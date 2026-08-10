@@ -1,0 +1,151 @@
+//! Layered configuration: base TOML file ← `TRIB__SECTION__KEY` env overrides.
+
+use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    pub server: Server,
+    pub audio: Audio,
+    pub projects: Projects,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Server {
+    pub bind: String,
+    /// Non-loopback browser origins allowed by CORS and the WS handshake
+    /// origin check (loopback passes on any port without configuration).
+    pub cors_origins: Vec<String>,
+}
+
+impl Default for Server {
+    fn default() -> Self {
+        Server {
+            bind: "127.0.0.1:4600".into(),
+            cors_origins: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Audio {
+    pub sample_rate: u32,
+    pub block_size: usize,
+}
+
+impl Default for Audio {
+    fn default() -> Self {
+        Audio {
+            sample_rate: 48_000,
+            block_size: 256,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Projects {
+    pub root: PathBuf,
+}
+
+impl Default for Projects {
+    fn default() -> Self {
+        Projects {
+            root: "projects".into(),
+        }
+    }
+}
+
+/// The engine rates the DSP is validated for — one whitelist for boot
+/// config and the recording prefs API alike.
+pub const SAMPLE_RATES: [u32; 3] = [44_100, 48_000, 96_000];
+
+#[derive(Debug, thiserror::Error)]
+pub enum SettingsError {
+    #[error(transparent)]
+    Config(#[from] config::ConfigError),
+    #[error("invalid config: {0}")]
+    Invalid(String),
+}
+
+/// Load and validate. A missing file is the defaults, not an error — a fresh
+/// checkout must boot.
+pub fn load(path: &Path) -> Result<Settings, SettingsError> {
+    let settings: Settings = config::Config::builder()
+        .add_source(config::File::from(path).required(false))
+        .add_source(
+            config::Environment::with_prefix("TRIB")
+                .prefix_separator("__")
+                .separator("__"),
+        )
+        .build()?
+        .try_deserialize()?;
+    settings.validate()?;
+    Ok(settings)
+}
+
+impl Settings {
+    /// Cross-field invariants, checked on every load so a bad edit is refused
+    /// before it reaches the engine.
+    pub fn validate(&self) -> Result<(), SettingsError> {
+        self.server
+            .bind
+            .parse::<std::net::SocketAddr>()
+            .map_err(|_| SettingsError::Invalid(format!("server.bind: {}", self.server.bind)))?;
+        if !SAMPLE_RATES.contains(&self.audio.sample_rate) {
+            return Err(SettingsError::Invalid(format!(
+                "audio.sample_rate must be one of {SAMPLE_RATES:?}"
+            )));
+        }
+        let block = self.audio.block_size;
+        if !block.is_power_of_two() || !(32..=2048).contains(&block) {
+            return Err(SettingsError::Invalid(
+                "audio.block_size must be a power of two in 32..=2048".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_file_yields_the_defaults() {
+        let settings = load(Path::new("/nonexistent/tribd.toml")).unwrap();
+        assert_eq!(settings.server.bind, "127.0.0.1:4600");
+        assert_eq!(settings.audio.sample_rate, 48_000);
+        assert_eq!(settings.audio.block_size, 256);
+    }
+
+    #[test]
+    fn an_unknown_key_is_refused_not_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tribd.toml");
+        std::fs::write(&path, "[audio]\nsample_rats = 48000\n").unwrap();
+        assert!(load(&path).is_err(), "typos must not silently vanish");
+    }
+
+    #[test]
+    fn validate_rejects_odd_block_sizes() {
+        let mut settings = Settings::default();
+        settings.audio.block_size = 300;
+        assert!(settings.validate().is_err());
+        settings.audio.block_size = 16_384;
+        assert!(settings.validate().is_err());
+        settings.audio.block_size = 128;
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_unparseable_bind() {
+        let mut settings = Settings::default();
+        settings.server.bind = "not-an-addr".into();
+        assert!(settings.validate().is_err());
+    }
+}

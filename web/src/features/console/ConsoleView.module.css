@@ -1,0 +1,57 @@
+.console {
+  height: 100%;
+  display: flex;
+  background: var(--surface-console);
+}
+
+.strips {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  min-width: 0;
+}
+
+.addStrip {
+  align-self: flex-start;
+  margin: var(--s3);
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-2);
+  background: var(--surface-control);
+  box-shadow: var(--depth-raised);
+  color: var(--text-label);
+  font-size: var(--text-lg);
+  font-family: var(--font-label);
+  transition: background var(--transition);
+}
+
+.addStrip:hover {
+  background: var(--gray-5);
+}
+
+.waiting {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s3);
+}
+
+.tape {
+  margin: 0;
+  padding: var(--s2) var(--s5);
+  background: var(--tape-cream);
+  color: var(--ink);
+  font-family: var(--font-tape);
+  font-size: var(--text-lg);
+  rotate: 1deg;
+  box-shadow: var(--depth-raised);
+}
+
+.hint {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}

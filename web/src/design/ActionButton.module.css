@@ -1,0 +1,36 @@
+.button {
+  position: relative;
+  min-width: 26px;
+  height: var(--btn-h);
+  padding: var(--s0) var(--s1);
+  background: var(--surface-control);
+  border-radius: var(--radius-1);
+  box-shadow: var(--depth-raised);
+  font-family: var(--font-label);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-label);
+  transition: background var(--transition);
+}
+
+/* Dense visual, honest hit area (WCAG 2.2 target size). */
+.button::before {
+  content: '';
+  position: absolute;
+  inset: calc((var(--btn-h) - 32px) / 2) -4px;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--gray-5);
+}
+
+.button:active:not(:disabled) {
+  box-shadow: var(--depth-inset);
+  translate: 0 1px;
+}
+
+.button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}

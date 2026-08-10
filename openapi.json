@@ -1,0 +1,2994 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "tribd",
+    "description": "Tributary daemon API",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/destinations": {
+      "get": {
+        "operationId": "list_destinations",
+        "responses": {
+          "200": {
+            "description": "Mounted drives and the active destination",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DestinationsDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices": {
+      "get": {
+        "summary": "The patchbay device document: every input device the OS reports, joined\nwith what the daemon has open, plus wanted-but-absent devices from the\nloaded project. Fresh enumeration, no side effects.",
+        "operationId": "list_devices",
+        "responses": {
+          "200": {
+            "description": "Input devices joined with patch state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DeviceReport"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/refresh": {
+      "post": {
+        "summary": "The patchbay Refresh button: re-enumerate, re-run name reconciliation,\nretry every wanted-but-unopened or failed device, and return the fresh\ndocument. Also what the modal calls on open — plug and see.",
+        "operationId": "refresh_devices",
+        "responses": {
+          "200": {
+            "description": "Devices re-enumerated and reconciled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DeviceReport"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/master": {
+      "put": {
+        "operationId": "update_master",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MasterPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The master section after the patch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MasterState"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A value out of range"
+          }
+        }
+      }
+    },
+    "/api/v1/settings/recording": {
+      "get": {
+        "operationId": "get_recording",
+        "responses": {
+          "200": {
+            "description": "Current recording settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordingSettingsDto"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "update_recording",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateRecordingSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Settings after the update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordingSettingsDto"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Recording in progress"
+          },
+          "422": {
+            "description": "Invalid destination, format, or sample rate"
+          }
+        }
+      }
+    },
+    "/api/v1/state": {
+      "get": {
+        "summary": "The one REST snapshot: everything a client needs to render the console.",
+        "operationId": "get_state",
+        "responses": {
+          "200": {
+            "description": "Full mixer document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MixerState"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/strips": {
+      "post": {
+        "operationId": "create_strip",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewStrip"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The strip, freshly taped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StripState"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The console is full"
+          }
+        }
+      }
+    },
+    "/api/v1/strips/{id}": {
+      "put": {
+        "operationId": "update_strip",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Strip id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StripPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The strip after the patch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StripState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such strip"
+          },
+          "422": {
+            "description": "A value out of range"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_strip",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Strip id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Strip removed"
+          },
+          "404": {
+            "description": "No such strip"
+          }
+        }
+      }
+    },
+    "/api/v1/takes": {
+      "get": {
+        "summary": "Finished takes, newest first. Read fresh from disk on every call — the\nmanifest files are the source of truth and the list is short.",
+        "operationId": "list_takes",
+        "responses": {
+          "200": {
+            "description": "Recorded takes, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TakeDto"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/takes/{take}/peaks": {
+      "get": {
+        "summary": "Waveform peaks for every track of a take, in `TakeDto.tracks` order.",
+        "description": "Binary layout (little-endian): `\"TPKS\"` · `version: u8 = 1` · `pad: u8`\n· `track_count: u16` · `samples_per_bin: u32` · then per track:\n`bin_count: u32` + `bin_count × (min: i16, max: i16)`.",
+        "operationId": "take_peaks",
+        "parameters": [
+          {
+            "name": "take",
+            "in": "path",
+            "description": "Take number",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Binary peaks document",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "404": {
+            "description": "No such take"
+          }
+        }
+      }
+    },
+    "/api/v1/transport": {
+      "get": {
+        "operationId": "get_transport",
+        "responses": {
+          "200": {
+            "description": "Current transport state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransportDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/transport/lanes/{index}": {
+      "put": {
+        "operationId": "set_lane",
+        "parameters": [
+          {
+            "name": "index",
+            "in": "path",
+            "description": "Lane index within the latest take's tracks",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LaneGateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Lane gates updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransportDto"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No such lane"
+          }
+        }
+      }
+    },
+    "/api/v1/transport/loop": {
+      "put": {
+        "operationId": "set_loop",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoopRegionDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Loop set (rebuilds a playing session)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransportDto"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Recording"
+          },
+          "422": {
+            "description": "Region the take can't honor"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "clear_loop",
+        "responses": {
+          "200": {
+            "description": "Loop cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransportDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/transport/monitor": {
+      "put": {
+        "operationId": "set_monitor",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MonitorBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Monitor target set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransportDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/transport/play": {
+      "post": {
+        "operationId": "play",
+        "responses": {
+          "200": {
+            "description": "Playing the latest take",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransportDto"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Recording"
+          },
+          "422": {
+            "description": "No take, or sample-rate mismatch"
+          }
+        }
+      }
+    },
+    "/api/v1/transport/record/start": {
+      "post": {
+        "operationId": "record_start",
+        "responses": {
+          "200": {
+            "description": "Recording",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransportDto"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already recording"
+          },
+          "422": {
+            "description": "Nothing armed"
+          }
+        }
+      }
+    },
+    "/api/v1/transport/record/stop": {
+      "post": {
+        "operationId": "record_stop",
+        "responses": {
+          "200": {
+            "description": "Stopped (idempotent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransportDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/transport/seek": {
+      "post": {
+        "operationId": "seek",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SeekBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Playhead moved (rebuilds the session while playing)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransportDto"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Recording"
+          }
+        }
+      }
+    },
+    "/api/v1/transport/stop": {
+      "post": {
+        "operationId": "play_stop",
+        "responses": {
+          "200": {
+            "description": "Playback stopped (idempotent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransportDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "Daemon is up"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BusId": {
+        "type": "integer",
+        "format": "int32",
+        "description": "A group or aux bus.",
+        "minimum": 0
+      },
+      "BusKind": {
+        "type": "string",
+        "description": "What a bus feeds. Groups mix into the master; aux buses feed an FX unit.\nThe split is the v1 cycle-prevention stage rule: strips → groups → aux →\nfx → master, never backwards.",
+        "enum": [
+          "group",
+          "aux"
+        ]
+      },
+      "BusState": {
+        "type": "object",
+        "description": "A group or aux bus strip. Renders like a channel strip without gain/arm.",
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "fader_db",
+          "pan",
+          "mute",
+          "pfl"
+        ],
+        "properties": {
+          "fader_db": {
+            "type": "number",
+            "format": "float"
+          },
+          "id": {
+            "$ref": "#/components/schemas/BusId"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/BusKind"
+          },
+          "mute": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pan": {
+            "type": "number",
+            "format": "float",
+            "description": "Constant-power pan of a group into the master. Ignored for aux buses\n(their output feeds an FX unit input, which is mono-summed)."
+          },
+          "pfl": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Channel": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "mixer"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "meters"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "transport"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "waveform"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "A subscribable stream. Doubles as the routing key inside the hub."
+      },
+      "ChannelEq": {
+        "type": "object",
+        "description": "The Folio-style 3-band strip EQ: LF shelf, swept mid peak, HF shelf.",
+        "required": [
+          "enabled",
+          "low",
+          "mid",
+          "high"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "high": {
+            "$ref": "#/components/schemas/EqBand"
+          },
+          "low": {
+            "$ref": "#/components/schemas/EqBand"
+          },
+          "mid": {
+            "$ref": "#/components/schemas/EqBand"
+          }
+        }
+      },
+      "ClientMessage": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "channel",
+              "op"
+            ],
+            "properties": {
+              "channel": {
+                "$ref": "#/components/schemas/Channel"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "subscribe"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "channel",
+              "op"
+            ],
+            "properties": {
+              "channel": {
+                "$ref": "#/components/schemas/Channel"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "unsubscribe"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "ping"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Continuous control gestures (fader/knob drags) ride WS, not REST —\nthe one deliberate divergence from magma, justified by gesture rate.",
+            "required": [
+              "command",
+              "seq",
+              "client_id",
+              "op"
+            ],
+            "properties": {
+              "client_id": {
+                "type": "string"
+              },
+              "command": {
+                "$ref": "#/components/schemas/MixCommand"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set"
+                ]
+              },
+              "seq": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "Messages the client sends over `/ws`."
+      },
+      "DestinationsDto": {
+        "type": "object",
+        "required": [
+          "current",
+          "default",
+          "drives"
+        ],
+        "properties": {
+          "current": {
+            "type": "string",
+            "description": "The active recording destination (projects root)."
+          },
+          "default": {
+            "type": "string",
+            "description": "The boot-config fallback root."
+          },
+          "drives": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DriveDto"
+            },
+            "description": "Mounted filesystems, removable first."
+          }
+        }
+      },
+      "DeviceReport": {
+        "type": "object",
+        "description": "One row of the patchbay device document.",
+        "required": [
+          "name",
+          "channels",
+          "active",
+          "status",
+          "patched",
+          "underruns"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "The OS default input — what `device: null` patches feed from."
+          },
+          "channels": {
+            "type": "integer",
+            "format": "int32",
+            "description": "0 = unknown (an absent device was never enumerated this boot).",
+            "minimum": 0
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The friendly print the system sound menu shows, when the source\nlayer provides one."
+          },
+          "name": {
+            "type": "string"
+          },
+          "patched": {
+            "type": "boolean",
+            "description": "Some strip references it (directly, via the default, or via an alias)."
+          },
+          "reconciled_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The stored project name this device was matched from, when name\nreconciliation adopted it under a changed name."
+          },
+          "status": {
+            "$ref": "#/components/schemas/DeviceStatus"
+          },
+          "underruns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "DeviceStatus": {
+        "type": "string",
+        "enum": [
+          "open",
+          "available",
+          "failed",
+          "absent"
+        ]
+      },
+      "DriveDto": {
+        "type": "object",
+        "required": [
+          "mount_point",
+          "label",
+          "total_bytes",
+          "available_bytes",
+          "removable",
+          "read_only"
+        ],
+        "properties": {
+          "available_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "label": {
+            "type": "string"
+          },
+          "mount_point": {
+            "type": "string"
+          },
+          "read_only": {
+            "type": "boolean"
+          },
+          "removable": {
+            "type": "boolean"
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "EqBand": {
+        "type": "object",
+        "description": "One EQ band of a strip. `kind` is fixed per slot (low/mid/high); freq is\nonly user-swept on the mid band, but carrying it uniformly keeps the DSP\ncoefficient path shape-free.",
+        "required": [
+          "kind",
+          "freq_hz",
+          "gain_db",
+          "q"
+        ],
+        "properties": {
+          "freq_hz": {
+            "type": "number",
+            "format": "float"
+          },
+          "gain_db": {
+            "type": "number",
+            "format": "float"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EqBandKind"
+          },
+          "q": {
+            "type": "number",
+            "format": "float"
+          }
+        }
+      },
+      "EqBandKind": {
+        "type": "string",
+        "enum": [
+          "low_shelf",
+          "peak",
+          "high_shelf"
+        ]
+      },
+      "FaderTarget": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/StripId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "strip"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/BusId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "bus"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "master"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Which fader a level command addresses; doubles as the mute/PFL/rename\ntarget (the master supports only fader moves in v1 — see `apply`)."
+      },
+      "FxId": {
+        "type": "integer",
+        "format": "int32",
+        "description": "A built-in effect unit.",
+        "minimum": 0
+      },
+      "FxParams": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "room_size",
+              "damping",
+              "kind"
+            ],
+            "properties": {
+              "damping": {
+                "type": "number",
+                "format": "float",
+                "description": "0.0 (bright) .. 1.0 (dark)."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "reverb"
+                ]
+              },
+              "room_size": {
+                "type": "number",
+                "format": "float",
+                "description": "0.0 (booth) .. 1.0 (hall)."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "time_ms",
+              "feedback",
+              "kind"
+            ],
+            "properties": {
+              "feedback": {
+                "type": "number",
+                "format": "float",
+                "description": "0.0 .. 0.95; capped below unity so the loop always decays."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "delay"
+                ]
+              },
+              "time_ms": {
+                "type": "number",
+                "format": "float"
+              }
+            }
+          }
+        ],
+        "description": "Parameters of a built-in effect. The serde tag doubles as the effect kind\non the wire, so `FxState` never carries a separate `kind` field to drift."
+      },
+      "FxState": {
+        "type": "object",
+        "description": "A built-in effect unit: fed by one aux bus, returned into the master at\n`return_level_db`.",
+        "required": [
+          "id",
+          "name",
+          "input",
+          "params",
+          "return_level_db"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/FxId"
+          },
+          "input": {
+            "$ref": "#/components/schemas/BusId"
+          },
+          "name": {
+            "type": "string"
+          },
+          "params": {
+            "$ref": "#/components/schemas/FxParams"
+          },
+          "return_level_db": {
+            "type": "number",
+            "format": "float"
+          }
+        }
+      },
+      "InputAssign": {
+        "type": "object",
+        "description": "A hardware input patched into a strip: a device (by OS name) and a\nchannel within it. `device: None` means the system default input — the\nshape every pre-multi-device manifest carries.",
+        "required": [
+          "device_channel"
+        ],
+        "properties": {
+          "device": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "device_channel": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "InputAssignBody": {
+        "type": "object",
+        "description": "A device-qualified patch target: which device (by OS name, `null` = the\nsystem default input) and which of its channels.",
+        "required": [
+          "channel"
+        ],
+        "properties": {
+          "channel": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "device": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "LaneDto": {
+        "type": "object",
+        "description": "Playback gate for one lane of the latest take (index-aligned with the\ntake's tracks).",
+        "required": [
+          "solo",
+          "mute"
+        ],
+        "properties": {
+          "mute": {
+            "type": "boolean"
+          },
+          "solo": {
+            "type": "boolean"
+          }
+        }
+      },
+      "LaneGateBody": {
+        "type": "object",
+        "properties": {
+          "mute": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "solo": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Omitted = leave the flag alone."
+          }
+        }
+      },
+      "LoopRegionDto": {
+        "type": "object",
+        "required": [
+          "start_frames",
+          "end_frames"
+        ],
+        "properties": {
+          "end_frames": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "start_frames": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "MasterPatch": {
+        "type": "object",
+        "properties": {
+          "fader_db": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MasterState": {
+        "type": "object",
+        "description": "The master output section: one stereo fader and its own record arm.",
+        "required": [
+          "fader_db",
+          "record_arm"
+        ],
+        "properties": {
+          "fader_db": {
+            "type": "number",
+            "format": "float"
+          },
+          "record_arm": {
+            "type": "boolean"
+          }
+        }
+      },
+      "MeterDto": {
+        "type": "object",
+        "description": "One metered point in a `meters` batch.",
+        "required": [
+          "key",
+          "peak_db",
+          "clip"
+        ],
+        "properties": {
+          "clip": {
+            "type": "boolean"
+          },
+          "key": {
+            "$ref": "#/components/schemas/MeterKey"
+          },
+          "peak_db": {
+            "type": "number",
+            "format": "float"
+          }
+        }
+      },
+      "MeterKey": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/StripId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "strip"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/BusId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "bus"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "master"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "What a metered point on the console refers to."
+      },
+      "MixCommand": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "target",
+              "level_db",
+              "op"
+            ],
+            "properties": {
+              "level_db": {
+                "type": "number",
+                "format": "float"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_fader"
+                ]
+              },
+              "target": {
+                "$ref": "#/components/schemas/FaderTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "strip",
+              "gain_db",
+              "op"
+            ],
+            "properties": {
+              "gain_db": {
+                "type": "number",
+                "format": "float"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_gain"
+                ]
+              },
+              "strip": {
+                "$ref": "#/components/schemas/StripId"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "strip",
+              "band",
+              "freq_hz",
+              "gain_db",
+              "q",
+              "op"
+            ],
+            "properties": {
+              "band": {
+                "$ref": "#/components/schemas/EqBandKind"
+              },
+              "freq_hz": {
+                "type": "number",
+                "format": "float"
+              },
+              "gain_db": {
+                "type": "number",
+                "format": "float"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_eq_band"
+                ]
+              },
+              "q": {
+                "type": "number",
+                "format": "float"
+              },
+              "strip": {
+                "$ref": "#/components/schemas/StripId"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "strip",
+              "enabled",
+              "op"
+            ],
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_eq_enabled"
+                ]
+              },
+              "strip": {
+                "$ref": "#/components/schemas/StripId"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "strip",
+              "pan",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_pan"
+                ]
+              },
+              "pan": {
+                "type": "number",
+                "format": "float"
+              },
+              "strip": {
+                "$ref": "#/components/schemas/StripId"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "target",
+              "mute",
+              "op"
+            ],
+            "properties": {
+              "mute": {
+                "type": "boolean"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_mute"
+                ]
+              },
+              "target": {
+                "$ref": "#/components/schemas/FaderTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "target",
+              "on",
+              "op"
+            ],
+            "properties": {
+              "on": {
+                "type": "boolean"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_pfl"
+                ]
+              },
+              "target": {
+                "$ref": "#/components/schemas/FaderTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "strip",
+              "op"
+            ],
+            "properties": {
+              "input": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/InputAssign"
+                  }
+                ]
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_input"
+                ]
+              },
+              "strip": {
+                "$ref": "#/components/schemas/StripId"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "target",
+              "name",
+              "op"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "rename"
+                ]
+              },
+              "target": {
+                "$ref": "#/components/schemas/FaderTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "op"
+            ],
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "add_strip"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "op"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/StripId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "remove_strip"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Upsert one aux send. A level at the floor is simply silent — the\nsend always exists toward every aux bus.",
+            "required": [
+              "strip",
+              "dest",
+              "level_db",
+              "tap",
+              "op"
+            ],
+            "properties": {
+              "dest": {
+                "$ref": "#/components/schemas/BusId"
+              },
+              "level_db": {
+                "type": "number",
+                "format": "float"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_send"
+                ]
+              },
+              "strip": {
+                "$ref": "#/components/schemas/StripId"
+              },
+              "tap": {
+                "$ref": "#/components/schemas/SendTap"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Where the strip's main signal goes (master or a group bus).",
+            "required": [
+              "strip",
+              "to",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_route"
+                ]
+              },
+              "strip": {
+                "$ref": "#/components/schemas/StripId"
+              },
+              "to": {
+                "$ref": "#/components/schemas/RouteTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "fx",
+              "params",
+              "op"
+            ],
+            "properties": {
+              "fx": {
+                "$ref": "#/components/schemas/FxId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_fx_params"
+                ]
+              },
+              "params": {
+                "$ref": "#/components/schemas/FxParams"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "fx",
+              "level_db",
+              "op"
+            ],
+            "properties": {
+              "fx": {
+                "$ref": "#/components/schemas/FxId"
+              },
+              "level_db": {
+                "type": "number",
+                "format": "float"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_fx_return"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "op"
+            ],
+            "properties": {
+              "kind": {
+                "$ref": "#/components/schemas/BusKind"
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "add_bus"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "op"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/BusId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "remove_bus"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Arm a strip (its own dry track) or the master (the mix) for the\nnext take. Arming mid-take changes the NEXT take, not the running one.",
+            "required": [
+              "target",
+              "armed",
+              "op"
+            ],
+            "properties": {
+              "armed": {
+                "type": "boolean"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_record_arm"
+                ]
+              },
+              "target": {
+                "$ref": "#/components/schemas/FaderTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The \"Arm All\" button: every loaded strip at once (master untouched).",
+            "required": [
+              "armed",
+              "op"
+            ],
+            "properties": {
+              "armed": {
+                "type": "boolean"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_record_arm_all"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "A mutation of the mixer document. The API-facing command enum: REST\nhandlers and the WS `set` op both reduce to this."
+      },
+      "MixerState": {
+        "type": "object",
+        "description": "The whole console document: the single authoritative mix state the daemon\nowns, the UI mirrors, and the project manifest persists.",
+        "required": [
+          "strips",
+          "buses",
+          "fx",
+          "master"
+        ],
+        "properties": {
+          "buses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BusState"
+            }
+          },
+          "fx": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FxState"
+            }
+          },
+          "master": {
+            "$ref": "#/components/schemas/MasterState"
+          },
+          "strips": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StripState"
+            }
+          }
+        }
+      },
+      "MonitorBody": {
+        "type": "object",
+        "required": [
+          "target"
+        ],
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/MonitorTarget"
+          }
+        }
+      },
+      "MonitorTarget": {
+        "type": "string",
+        "description": "Where the playback mix goes: the console's hardware output, or the\nbrowser monitor stream (M6). Hardware until the stream lands.",
+        "enum": [
+          "hardware",
+          "stream"
+        ]
+      },
+      "NewStrip": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "RecordFormat": {
+        "type": "string",
+        "description": "What the take writer puts on disk. Bit depth folds into the variant so\nillegal combinations (float FLAC) are unrepresentable.",
+        "enum": [
+          "wav16",
+          "wav24",
+          "wav32_float",
+          "flac16",
+          "flac24"
+        ]
+      },
+      "RecordingSettingsDto": {
+        "type": "object",
+        "required": [
+          "destination",
+          "default_destination",
+          "project_name",
+          "format",
+          "active_sample_rate",
+          "configured_sample_rate",
+          "restart_required"
+        ],
+        "properties": {
+          "active_sample_rate": {
+            "type": "integer",
+            "format": "int32",
+            "description": "What the engine graph runs at — immutable per boot.",
+            "minimum": 0
+          },
+          "configured_destination": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The persisted preference — differs from `destination` when the\nconfigured drive was missing at boot and the daemon fell back."
+          },
+          "configured_sample_rate": {
+            "type": "integer",
+            "format": "int32",
+            "description": "What the prefs ask for — takes effect at the next daemon start.",
+            "minimum": 0
+          },
+          "default_destination": {
+            "type": "string",
+            "description": "The boot-config fallback root."
+          },
+          "destination": {
+            "type": "string",
+            "description": "The projects root the next take lands on."
+          },
+          "format": {
+            "$ref": "#/components/schemas/RecordFormat"
+          },
+          "project_name": {
+            "type": "string",
+            "description": "The open project at the destination."
+          },
+          "restart_required": {
+            "type": "boolean"
+          }
+        }
+      },
+      "RouteTarget": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "master"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/BusId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "bus"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Where a strip's main (post-fader, post-pan) signal goes."
+      },
+      "SeekBody": {
+        "type": "object",
+        "required": [
+          "position_frames"
+        ],
+        "properties": {
+          "position_frames": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "SendState": {
+        "type": "object",
+        "description": "One aux send from a strip toward a bus.",
+        "required": [
+          "dest",
+          "level_db",
+          "tap"
+        ],
+        "properties": {
+          "dest": {
+            "$ref": "#/components/schemas/BusId"
+          },
+          "level_db": {
+            "type": "number",
+            "format": "float"
+          },
+          "tap": {
+            "$ref": "#/components/schemas/SendTap"
+          }
+        }
+      },
+      "SendTap": {
+        "type": "string",
+        "description": "Where an aux send taps the strip signal. Pre-fader for monitor-style\nsends, post-fader for FX (the classic default: FX level follows the mix).",
+        "enum": [
+          "pre_fader",
+          "post_fader"
+        ]
+      },
+      "ServerMessage": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The full document — sent on every Mixer subscribe (and structural\nchanges, from M3). Clients replace their mirror wholesale.",
+            "required": [
+              "state",
+              "type"
+            ],
+            "properties": {
+              "state": {
+                "$ref": "#/components/schemas/MixerState"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "mixer_snapshot"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "One applied mutation, broadcast to ALL clients (multi-UI sync).",
+            "required": [
+              "delta",
+              "type"
+            ],
+            "properties": {
+              "ack": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/WsAck"
+                  }
+                ]
+              },
+              "delta": {
+                "$ref": "#/components/schemas/StateDelta"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "state_changed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Coalesced meter batch at the pump rate. Droppable.",
+            "required": [
+              "frame",
+              "meters",
+              "type"
+            ],
+            "properties": {
+              "frame": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "meters": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/MeterDto"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "meters"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Transport state changed (play/stop/record/seek/gates).",
+            "required": [
+              "state",
+              "type"
+            ],
+            "properties": {
+              "state": {
+                "$ref": "#/components/schemas/TransportDto"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "transport"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Playhead progress at the pump rate while playing. Droppable; frames\nare take-timeline frames derived from real audio, not wall clock.",
+            "required": [
+              "take",
+              "frames",
+              "type"
+            ],
+            "properties": {
+              "frames": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "take": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "playback_position"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Freshly closed peak bins from the take writer — the live waveform.\n`bins` is interleaved (min, max) pairs scaled by 32767.",
+            "required": [
+              "take",
+              "track",
+              "start_bin",
+              "samples_per_bin",
+              "bins",
+              "type"
+            ],
+            "properties": {
+              "bins": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32"
+                }
+              },
+              "samples_per_bin": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "start_bin": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "take": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "track": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "waveform_bins"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "channel",
+              "type"
+            ],
+            "properties": {
+              "channel": {
+                "$ref": "#/components/schemas/Channel"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "subscribed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "channel",
+              "type"
+            ],
+            "properties": {
+              "channel": {
+                "$ref": "#/components/schemas/Channel"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "unsubscribed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "code",
+              "message",
+              "type"
+            ],
+            "properties": {
+              "code": {
+                "$ref": "#/components/schemas/WsErrorCode"
+              },
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "error"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "pong"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Messages the daemon sends over `/ws`."
+      },
+      "StateDelta": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "target",
+              "level_db",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "fader"
+                ]
+              },
+              "level_db": {
+                "type": "number",
+                "format": "float"
+              },
+              "target": {
+                "$ref": "#/components/schemas/FaderTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "strip",
+              "gain_db",
+              "kind"
+            ],
+            "properties": {
+              "gain_db": {
+                "type": "number",
+                "format": "float"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "gain"
+                ]
+              },
+              "strip": {
+                "$ref": "#/components/schemas/StripId"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "strip",
+              "band",
+              "freq_hz",
+              "gain_db",
+              "q",
+              "kind"
+            ],
+            "properties": {
+              "band": {
+                "$ref": "#/components/schemas/EqBandKind"
+              },
+              "freq_hz": {
+                "type": "number",
+                "format": "float"
+              },
+              "gain_db": {
+                "type": "number",
+                "format": "float"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "eq_band"
+                ]
+              },
+              "q": {
+                "type": "number",
+                "format": "float"
+              },
+              "strip": {
+                "$ref": "#/components/schemas/StripId"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "strip",
+              "enabled",
+              "kind"
+            ],
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "eq_enabled"
+                ]
+              },
+              "strip": {
+                "$ref": "#/components/schemas/StripId"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "strip",
+              "pan",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "pan"
+                ]
+              },
+              "pan": {
+                "type": "number",
+                "format": "float"
+              },
+              "strip": {
+                "$ref": "#/components/schemas/StripId"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "target",
+              "mute",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "mute"
+                ]
+              },
+              "mute": {
+                "type": "boolean"
+              },
+              "target": {
+                "$ref": "#/components/schemas/FaderTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "target",
+              "on",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "pfl"
+                ]
+              },
+              "on": {
+                "type": "boolean"
+              },
+              "target": {
+                "$ref": "#/components/schemas/FaderTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "strip",
+              "kind"
+            ],
+            "properties": {
+              "input": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/InputAssign"
+                  }
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "input"
+                ]
+              },
+              "strip": {
+                "$ref": "#/components/schemas/StripId"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "target",
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "renamed"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/components/schemas/FaderTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "strip",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "strip_added"
+                ]
+              },
+              "strip": {
+                "$ref": "#/components/schemas/StripState"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/StripId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "strip_removed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "strip",
+              "dest",
+              "level_db",
+              "tap",
+              "kind"
+            ],
+            "properties": {
+              "dest": {
+                "$ref": "#/components/schemas/BusId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "send"
+                ]
+              },
+              "level_db": {
+                "type": "number",
+                "format": "float"
+              },
+              "strip": {
+                "$ref": "#/components/schemas/StripId"
+              },
+              "tap": {
+                "$ref": "#/components/schemas/SendTap"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "strip",
+              "to",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "route"
+                ]
+              },
+              "strip": {
+                "$ref": "#/components/schemas/StripId"
+              },
+              "to": {
+                "$ref": "#/components/schemas/RouteTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "fx",
+              "params",
+              "kind"
+            ],
+            "properties": {
+              "fx": {
+                "$ref": "#/components/schemas/FxId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "fx_params"
+                ]
+              },
+              "params": {
+                "$ref": "#/components/schemas/FxParams"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "fx",
+              "level_db",
+              "kind"
+            ],
+            "properties": {
+              "fx": {
+                "$ref": "#/components/schemas/FxId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "fx_return"
+                ]
+              },
+              "level_db": {
+                "type": "number",
+                "format": "float"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "bus",
+              "kind"
+            ],
+            "properties": {
+              "bus": {
+                "$ref": "#/components/schemas/BusState"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "bus_added"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/BusId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "bus_removed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "target",
+              "armed",
+              "kind"
+            ],
+            "properties": {
+              "armed": {
+                "type": "boolean"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "record_arm"
+                ]
+              },
+              "target": {
+                "$ref": "#/components/schemas/FaderTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "armed",
+              "kind"
+            ],
+            "properties": {
+              "armed": {
+                "type": "boolean"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "record_arm_all"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "What a successful `apply` changed — the WS `state_changed` payload.\nSemantically complete per change: a client patches its mirror from the\ndelta alone. Structural changes broadcast a full snapshot instead."
+      },
+      "StripId": {
+        "type": "integer",
+        "format": "int32",
+        "description": "An input channel strip.",
+        "minimum": 0
+      },
+      "StripPatch": {
+        "type": "object",
+        "description": "Any subset of a strip's controls. Absent fields stay put; `input` is\ndouble-optional so `null` explicitly unpatches while absence means\n\"leave it\".",
+        "properties": {
+          "eq_enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "fader_db": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float"
+          },
+          "gain_db": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float"
+          },
+          "input": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/InputAssignBody"
+              }
+            ]
+          },
+          "mute": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pan": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float"
+          },
+          "pfl": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "StripState": {
+        "type": "object",
+        "description": "One channel strip, top to bottom like the panel: input, gain, EQ, sends,\npan, fader, switches.",
+        "required": [
+          "id",
+          "name",
+          "gain_db",
+          "eq",
+          "sends",
+          "pan",
+          "fader_db",
+          "mute",
+          "pfl",
+          "record_arm",
+          "route_to"
+        ],
+        "properties": {
+          "eq": {
+            "$ref": "#/components/schemas/ChannelEq"
+          },
+          "fader_db": {
+            "type": "number",
+            "format": "float"
+          },
+          "gain_db": {
+            "type": "number",
+            "format": "float",
+            "description": "Input trim, pre-EQ."
+          },
+          "id": {
+            "$ref": "#/components/schemas/StripId"
+          },
+          "input": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/InputAssign"
+              }
+            ]
+          },
+          "mute": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pan": {
+            "type": "number",
+            "format": "float",
+            "description": "Constant-power pan, -1.0 (hard left) .. 1.0 (hard right)."
+          },
+          "pfl": {
+            "type": "boolean"
+          },
+          "record_arm": {
+            "type": "boolean"
+          },
+          "route_to": {
+            "$ref": "#/components/schemas/RouteTarget"
+          },
+          "sends": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SendState"
+            }
+          }
+        }
+      },
+      "TakeDto": {
+        "type": "object",
+        "required": [
+          "take",
+          "started_at_unix",
+          "sample_rate",
+          "damaged",
+          "duration_secs",
+          "tracks"
+        ],
+        "properties": {
+          "damaged": {
+            "type": "boolean"
+          },
+          "duration_secs": {
+            "type": "number",
+            "format": "double"
+          },
+          "sample_rate": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "started_at_unix": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "take": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TakeTrackDto"
+            }
+          }
+        }
+      },
+      "TakeTrackDto": {
+        "type": "object",
+        "required": [
+          "file",
+          "channels",
+          "frames",
+          "dropped_samples"
+        ],
+        "properties": {
+          "channels": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "dropped_samples": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "file": {
+            "type": "string"
+          },
+          "frames": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "strip_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The strip this track tapped — absent for the master mix and for\ntakes cut before the field existed.",
+            "minimum": 0
+          }
+        }
+      },
+      "TransportDto": {
+        "type": "object",
+        "description": "Transport state, pushed on the Transport channel on every state change\nand served over REST. Position ticks ride `PlaybackPosition` instead.",
+        "required": [
+          "state",
+          "position_frames",
+          "sample_rate",
+          "total_frames",
+          "monitor",
+          "lanes"
+        ],
+        "properties": {
+          "lanes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LaneDto"
+            }
+          },
+          "loop": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LoopRegionDto"
+              }
+            ]
+          },
+          "monitor": {
+            "$ref": "#/components/schemas/MonitorTarget"
+          },
+          "position_frames": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "sample_rate": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "started_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Recording only.",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/TransportPhase"
+          },
+          "take": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Recording: the take being written. Otherwise: the latest take —\nwhat PLAY would roll.",
+            "minimum": 0
+          },
+          "total_frames": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Length of the latest take (its longest track).",
+            "minimum": 0
+          }
+        }
+      },
+      "TransportPhase": {
+        "type": "string",
+        "enum": [
+          "stopped",
+          "playing",
+          "recording"
+        ]
+      },
+      "UpdateRecordingSettings": {
+        "type": "object",
+        "properties": {
+          "destination": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Absolute path of the new destination. Omitted = leave alone."
+          },
+          "format": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RecordFormat"
+              }
+            ]
+          },
+          "sample_rate": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "WsAck": {
+        "type": "object",
+        "description": "Tags a `state_changed` broadcast with the client gesture that caused it,\nso the issuing tab can reconcile its optimistic value.",
+        "required": [
+          "client_id",
+          "seq"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "WsErrorCode": {
+        "type": "string",
+        "enum": [
+          "bad_message",
+          "too_many_subscriptions",
+          "rejected"
+        ]
+      }
+    }
+  }
+}

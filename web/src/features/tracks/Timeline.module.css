@@ -1,0 +1,44 @@
+.scroller {
+  position: relative;
+  overflow-x: auto;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-2);
+  background: var(--surface-console);
+}
+
+/* Gives the scroller its width without occupying layout height. */
+.spacer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 1px;
+}
+
+/* Always pinned to the visible left edge; canvases inside redraw from the
+ * scroll position instead of moving. */
+.pane {
+  position: sticky;
+  left: 0;
+  min-width: 0;
+}
+
+.rulerRow {
+  display: flex;
+  align-items: stretch;
+  position: relative;
+  z-index: 1;
+}
+
+.corner {
+  flex: 0 0 var(--lane-header-w);
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: 0 var(--s1);
+  background: var(--surface-section);
+  border-right: 1px solid var(--border-panel);
+  border-bottom: 1px solid var(--border-panel);
+}

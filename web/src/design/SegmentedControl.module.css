@@ -1,0 +1,77 @@
+.group {
+  display: flex;
+}
+
+/* The PushButton cap recipe, minus its own corners: end caps round the
+ * outside, a single divider seams the middle so the row reads as one
+ * interlocked assembly. */
+.cap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s0);
+  min-width: 26px;
+  height: var(--btn-h);
+  padding: var(--s0) var(--s1);
+  background: var(--surface-control);
+  box-shadow: var(--depth-raised);
+  transition: background var(--transition);
+}
+
+.cap + .cap {
+  border-left: 1px solid var(--border-divider);
+}
+
+.cap:first-child {
+  border-radius: var(--radius-1) 0 0 var(--radius-1);
+}
+
+.cap:last-child {
+  border-radius: 0 var(--radius-1) var(--radius-1) 0;
+}
+
+/* Dense visual, honest hit area (WCAG 2.2 target size). Vertical only —
+ * sideways overhang would poach clicks from the adjacent cap. */
+.cap::before {
+  content: '';
+  position: absolute;
+  inset: calc((var(--btn-h) - 32px) / 2) 0;
+}
+
+.cap:hover:not(:disabled) {
+  background: var(--gray-5);
+}
+
+.cap[data-checked] {
+  box-shadow: var(--depth-inset);
+  translate: 0 1px;
+}
+
+.cap:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* LED state snaps — no transition, like every lamp on the console. */
+.led {
+  width: var(--btn-led-size);
+  height: var(--btn-led-size);
+  border-radius: var(--radius-round);
+  background: var(--led-green-off);
+  box-shadow: var(--depth-inset);
+}
+
+.cap[data-checked] .led {
+  background: var(--led-green-on);
+  box-shadow: var(--glow-green);
+}
+
+.label {
+  font-family: var(--font-label);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-label);
+  user-select: none;
+}

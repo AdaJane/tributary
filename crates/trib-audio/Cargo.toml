@@ -1,0 +1,28 @@
+[package]
+name = "trib-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Audio device IO for Tributary: cpal/ALSA backend and PulseAudio capture"
+
+[features]
+# Real device IO. Off by default until the host has ALSA headers
+# (libasound2-dev); everything else builds and tests without them.
+cpal-backend = ["dep:cpal"]
+
+[dependencies]
+serde_json.workspace = true
+trib-engine.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rtrb.workspace = true
+cpal = { workspace = true, optional = true }
+
+[dev-dependencies]
+assert_no_alloc.workspace = true
+trib-core.workspace = true
+
+[lints]
+workspace = true

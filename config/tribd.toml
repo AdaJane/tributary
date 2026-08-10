@@ -1,0 +1,19 @@
+# Tributary daemon configuration. Every key is optional; the values shown are
+# the defaults. Environment overrides use TRIB__SECTION__KEY, e.g.
+# TRIB__SERVER__BIND=0.0.0.0:4600.
+
+[server]
+# bind = "127.0.0.1:4600"
+# Loopback origins pass on any port; list non-loopback extras (LAN names,
+# reverse proxies) here. No auth: the daemon trusts its own machine.
+# cors_origins = []
+
+[audio]
+# Inputs open per-device on demand (patch a strip to open one); the output
+# is the system default device and provides the clock. No resampling —
+# devices open at the engine rate (PipeWire adapts; raw ALSA may refuse).
+# sample_rate = 48000
+# block_size = 256
+
+[projects]
+# root = "projects"

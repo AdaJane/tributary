@@ -1,0 +1,14 @@
+/target
+/projects
+node_modules
+dist
+
+# Runtime-written state (recording destination prefs), not config to ship.
+/config/recording.toml
+
+# Tool and editor droppings.
+.serena/
+.DS_Store
+.idea/
+.vscode/
+*.swp

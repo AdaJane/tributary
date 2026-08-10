@@ -1,0 +1,61 @@
+# The same bar as `just check`, plus the generated-artifact drift gates:
+# the committed openapi.json and the web schema types are contracts, so a
+# daemon change that forgets to regenerate them fails here.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # cpal's alsa-sys needs the ALSA headers to build.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # rustup reads rust-toolchain.toml — the pin (and its components)
+      # lives in one place.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Lint the feature-gated embedded-console code too; an empty dist
+      # satisfies the rust-embed macro. Its tests need a real web build,
+      # so they run in the release workflow instead.
+      - run: mkdir -p web/dist
+      - run: cargo clippy -p tribd --all-targets --features embed-ui -- -D warnings
+      - run: cargo test --workspace
+
+  openapi-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run -p tribd -- openapi > openapi.json
+      - run: git diff --exit-code openapi.json
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      # The committed schema types must match the committed spec.
+      - run: npm run codegen && git diff --exit-code src/api/generated/
+      - run: npm run -s test
+      - run: npm run build

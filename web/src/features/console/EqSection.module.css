@@ -1,0 +1,5 @@
+.switches {
+  display: flex;
+  gap: var(--s1);
+  justify-content: center;
+}

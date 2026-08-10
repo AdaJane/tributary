@@ -1,0 +1,32 @@
+[package]
+name = "trib-project"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Project persistence for Tributary: takes, manifests, peaks sidecars"
+
+[features]
+# The persistence crate carries no web dependency unless the daemon asks
+# for schemas (the trib-core pattern).
+openapi = ["dep:utoipa"]
+
+[dependencies]
+trib-core.workspace = true
+flacenc.workspace = true
+hound.workspace = true
+rayon.workspace = true
+rtrb.workspace = true
+serde.workspace = true
+symphonia.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+utoipa = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

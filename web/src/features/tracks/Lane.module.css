@@ -1,0 +1,53 @@
+.lane {
+  display: flex;
+  align-items: stretch;
+  height: var(--lane-h);
+  border-bottom: 1px solid var(--border-divider);
+}
+
+.header {
+  flex: 0 0 var(--lane-header-w);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--s1);
+  padding: var(--s2);
+  background: var(--surface-strip);
+  border-right: 1px solid var(--border-panel);
+  box-shadow: var(--depth-raised);
+}
+
+.header[data-master] {
+  background: var(--surface-section);
+}
+
+.gates {
+  display: flex;
+  gap: var(--s1);
+}
+
+.damaged {
+  margin-left: var(--s1);
+  padding: 0 var(--s1);
+  border-radius: var(--radius-1);
+  background: var(--led-red-off);
+  color: var(--led-red-on);
+  font-size: var(--text-2xs);
+}
+
+.name {
+  font-family: var(--font-label);
+  font-size: var(--text-xs);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wave {
+  height: 100%;
+  background: var(--surface-inset);
+  box-shadow: var(--depth-inset);
+}

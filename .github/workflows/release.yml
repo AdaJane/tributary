@@ -1,0 +1,59 @@
+# Tag-driven release: one self-contained binary per arch (API + embedded
+# web console). ci.yml stays the PR/main gate — tag from green main.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # gh release create/upload
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest # x86_64, glibc, dynamic ALSA
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm # native aarch64 — no cross toolchain
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      # cpal's alsa-sys needs the ALSA headers to build.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: web
+      # rustup reads rust-toolchain.toml — the pin lives in one place.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Tag must match the workspace version
+        run: |
+          version=$(cargo pkgid -p tribd | cut -d# -f2)
+          [ "v${version}" = "${GITHUB_REF_NAME}" ] \
+            || { echo "tag ${GITHUB_REF_NAME} != workspace version ${version}"; exit 1; }
+      # The embed smoke tests only run here — the one place with a real dist.
+      - run: cargo test -p tribd --features embed-ui
+      - run: cargo build --release -p tribd --features embed-ui
+      - name: Package
+        run: |
+          name="tributary-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "${name}"
+          cp target/release/tribd LICENSE README.md THIRD-PARTY.md "${name}/"
+          tar czf "${name}.tar.gz" "${name}"
+          sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+      # Both matrix jobs race to create; the loser falls through to upload.
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes \
+            tributary-*.tar.gz tributary-*.tar.gz.sha256 \
+          || gh release upload "${GITHUB_REF_NAME}" --clobber \
+            tributary-*.tar.gz tributary-*.tar.gz.sha256

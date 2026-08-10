@@ -1,0 +1,114 @@
+.wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s0);
+}
+
+.wrap[data-disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.knob {
+  position: relative;
+  width: var(--knob-size);
+  height: var(--knob-size);
+  border-radius: var(--radius-round);
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.ticks {
+  position: absolute;
+  /* Ticks sit just outside the body circle. */
+  inset: -6px;
+  width: calc(100% + 12px);
+  height: calc(100% + 12px);
+  overflow: visible;
+}
+
+.ticks line {
+  stroke: var(--text-dim);
+  stroke-width: 3;
+}
+
+.body {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-round);
+  background: var(--knob-body);
+  box-shadow: var(--depth-raised);
+}
+
+.pointer {
+  position: absolute;
+  inset: 0;
+  /* No transition: the pointer must track the finger exactly. */
+}
+
+.pointer::before {
+  content: '';
+  position: absolute;
+  top: 6%;
+  left: calc(50% - 1px);
+  width: 2px;
+  height: 30%;
+  background: var(--knob-pointer);
+  border-radius: var(--radius-1);
+}
+
+.cap {
+  position: absolute;
+  top: calc(50% - var(--knob-cap-size) / 2);
+  left: calc(50% - var(--knob-cap-size) / 2);
+  width: var(--knob-cap-size);
+  height: var(--knob-cap-size);
+  border-radius: var(--radius-round);
+  box-shadow: var(--depth-cap);
+  transition: background var(--transition);
+}
+
+.cap[data-cap='red'] { background: var(--cap-red); }
+.cap[data-cap='blue'] { background: var(--cap-blue); }
+.cap[data-cap='yellow'] { background: var(--cap-yellow); }
+.cap[data-cap='green'] { background: var(--cap-green); }
+.cap[data-cap='white'] { background: var(--cap-white); }
+.cap[data-cap='grey'] { background: var(--cap-grey); }
+
+.knob:hover .cap[data-cap='red'],
+.knob[data-dragging] .cap[data-cap='red'] { background: var(--cap-red-hi); }
+.knob:hover .cap[data-cap='blue'],
+.knob[data-dragging] .cap[data-cap='blue'] { background: var(--cap-blue-hi); }
+.knob:hover .cap[data-cap='yellow'],
+.knob[data-dragging] .cap[data-cap='yellow'] { background: var(--cap-yellow-hi); }
+.knob:hover .cap[data-cap='green'],
+.knob[data-dragging] .cap[data-cap='green'] { background: var(--cap-green-hi); }
+.knob:hover .cap[data-cap='white'],
+.knob[data-dragging] .cap[data-cap='white'] { background: var(--cap-white-hi); }
+.knob:hover .cap[data-cap='grey'],
+.knob[data-dragging] .cap[data-cap='grey'] { background: var(--cap-grey-hi); }
+
+.label {
+  font-family: var(--font-label);
+  font-size: var(--text-xs);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-label);
+  user-select: none;
+}
+
+.readout {
+  position: absolute;
+  top: calc(-1 * var(--s5));
+  z-index: 1;
+  padding: var(--s0) var(--s1);
+  background: var(--surface-section);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-1);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-value);
+  white-space: nowrap;
+}

@@ -1,0 +1,7 @@
+.ruler {
+  height: var(--ruler-h);
+  background: var(--surface-section);
+  border-bottom: 1px solid var(--border-panel);
+  cursor: pointer;
+  touch-action: none;
+}

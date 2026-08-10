@@ -1,0 +1,42 @@
+.column {
+  display: flex;
+  /* Bottom-up like hardware: first stop renders lowest. */
+  flex-direction: column-reverse;
+  gap: var(--led-gap);
+  width: fit-content;
+}
+
+.column[data-disabled] {
+  opacity: 0.6;
+}
+
+.led {
+  width: var(--led-size);
+  height: var(--led-size);
+  border-radius: var(--radius-1);
+  box-shadow: var(--depth-inset);
+  /* No transition, ever: LEDs snap. */
+}
+
+.led[data-color='green'] { background: var(--led-green-off); }
+.led[data-color='amber'] { background: var(--led-amber-off); }
+.led[data-color='red'] { background: var(--led-red-off); }
+
+.led[data-color='green'][data-on] {
+  background: var(--led-green-on);
+  box-shadow: var(--glow-green);
+}
+
+.led[data-color='amber'][data-on] {
+  background: var(--led-amber-on);
+  box-shadow: var(--glow-amber);
+}
+
+.led[data-color='red'][data-on] {
+  background: var(--led-red-on);
+  box-shadow: var(--glow-red);
+}
+
+.clipClear {
+  display: block;
+}

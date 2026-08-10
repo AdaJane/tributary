@@ -1,0 +1,64 @@
+.shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-app);
+}
+
+.topBar {
+  display: flex;
+  align-items: center;
+  gap: var(--s5);
+  padding: var(--s2) var(--s4);
+  background: var(--surface-console);
+  border-bottom: 1px solid var(--border-panel);
+}
+
+.brand {
+  font-family: var(--font-tape);
+  font-size: var(--text-lg);
+  color: var(--tape-cream);
+  user-select: none;
+}
+
+.tabs {
+  display: flex;
+  gap: var(--s1);
+}
+
+.tab {
+  padding: var(--s1) var(--s3);
+  border-radius: var(--radius-2);
+  font-family: var(--font-label);
+  font-size: var(--text-sm);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-dim);
+  transition: background var(--transition), color var(--transition);
+}
+
+.tab:hover:not(:disabled) {
+  color: var(--text-label);
+  background: var(--surface-section);
+}
+
+.tab[aria-current='page'] {
+  color: var(--text-label);
+  background: var(--surface-section);
+  box-shadow: var(--depth-raised);
+}
+
+.tab:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.status {
+  margin-left: auto;
+}
+
+.main {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}

@@ -1,0 +1,195 @@
+/**
+ * Tributary design tokens — the machine source of truth.
+ * Spec + rationale: design-system/tributary/MASTER.md
+ *
+ * Three layers: primitives (raw material) → semantic (roles) → component
+ * (per-widget). Components reference ONLY semantic/component tokens; no raw
+ * color anywhere else in src/ (enforced by design/token-guard.test.ts).
+ *
+ * Theme: retro early-2000s console hardware, dark-only, restrained
+ * skeuomorphism — depth comes from etch lines and single inner shadows,
+ * never bitmap textures or blur.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* ── Primitives ───────────────────────────────────────────────── */
+
+  /* Panel grays: powder-coated steel, slightly cool. */
+  --gray-0: #0e0f11; /* rack well / app background */
+  --gray-1: #16181b; /* console bed */
+  --gray-2: #1d2024; /* panel face (channel strip) */
+  --gray-3: #24282d; /* raised section / popover surface */
+  --gray-4: #2d3238; /* control body (knob skirt, fader frame) */
+  --gray-5: #3a4047; /* strong border */
+  --gray-6: #4d545c; /* subtle divider on raised surfaces */
+  --gray-7: #78818b; /* dim print — 4.6:1 on gray-2, floor for tiny text */
+  --gray-8: #aab2bb;
+  --gray-9: #d7dce1; /* value readouts */
+  --print-white: #e9ecef; /* screen-printed labels — ~13:1 on gray-2 */
+
+  /* Knob/fader cap plastics (the Soundcraft palette). */
+  --cap-red: #d8453e;
+  --cap-red-hi: #ef6a5f;
+  --cap-blue: #4a83d4;
+  --cap-blue-hi: #74a3e4;
+  --cap-yellow: #e9b83f;
+  --cap-yellow-hi: #f5d066;
+  --cap-green: #46a065;
+  --cap-green-hi: #68bd85;
+  --cap-white: #e4e7ea;
+  --cap-white-hi: #f7f9fa;
+  --cap-grey: #949ca6;
+  --cap-grey-hi: #b6bdc5;
+
+  /* LEDs. An "off" LED is dim colored plastic, never invisible. */
+  --led-green-on: #37e26b;
+  --led-green-off: #17301f;
+  --led-amber-on: #ffb224;
+  --led-amber-off: #33270f;
+  --led-red-on: #ff4136;
+  --led-red-off: #33120f;
+
+  /* Masking tape + sharpie. */
+  --tape-cream: #e9ddc0;
+  --tape-cream-edge: #d8c9a4;
+  --ink: #26221e;
+
+  /* Type. */
+  --font-ui: 'Barlow', system-ui, sans-serif;
+  --font-label: 'Barlow Condensed', 'Barlow', sans-serif; /* screen-print */
+  --font-tape: 'Permanent Marker', cursive; /* sharpie */
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace; /* dB/Hz readouts */
+  --text-2xs: 9px;
+  --text-xs: 10px;
+  --text-sm: 11px;
+  --text-md: 13px;
+  --text-lg: 15px;
+  --track-print: 0.08em; /* letter-spacing for screen-print labels */
+
+  /* Spacing: dense 8px scale with a 2px sub-step for LED/tick work. */
+  --s0: 2px;
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+
+  /* Radii: hardware corners are tight. */
+  --radius-1: 2px;
+  --radius-2: 4px;
+  --radius-3: 6px;
+  --radius-round: 999px;
+
+  /* Motion: subtle only. LEDs and meters are exempt — they snap. */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-1: 90ms;
+  --dur-2: 150ms;
+  --dur-3: 240ms;
+  --transition: var(--dur-2) var(--ease-out);
+
+  /* ── Semantic ─────────────────────────────────────────────────── */
+
+  --surface-app: var(--gray-0);
+  --surface-console: var(--gray-1);
+  --surface-strip: var(--gray-2);
+  --surface-section: var(--gray-3);
+  --surface-control: var(--gray-4);
+  --surface-inset: #131518; /* fader slot, meter well */
+  --border-panel: var(--gray-5);
+  --border-divider: var(--gray-6);
+  --etch-hi: rgb(255 255 255 / 6%); /* top-edge machining highlight */
+  --etch-lo: rgb(0 0 0 / 45%); /* bottom-edge shadow */
+
+  --text-label: var(--print-white);
+  --text-value: var(--gray-9);
+  --text-dim: var(--gray-7);
+
+  --state-record: var(--cap-red);
+  --state-solo: var(--cap-yellow);
+  --state-mute: var(--cap-red);
+  --state-active: var(--led-green-on);
+
+  --focus-color: var(--led-amber-on);
+  --focus-ring: 0 0 0 2px var(--surface-strip), 0 0 0 4px var(--focus-color);
+
+  /* Depth recipes — the entire skeuomorphism budget lives here. */
+  --depth-raised: inset 0 1px 0 var(--etch-hi), inset 0 -1px 0 var(--etch-lo),
+    0 1px 2px rgb(0 0 0 / 50%);
+  --depth-inset: inset 0 1px 3px rgb(0 0 0 / 60%), 0 1px 0 var(--etch-hi);
+  --depth-cap: inset 0 1px 1px rgb(255 255 255 / 25%),
+    inset 0 -2px 3px rgb(0 0 0 / 35%), 0 2px 3px rgb(0 0 0 / 55%);
+  --depth-pop: 0 12px 32px rgb(0 0 0 / 55%);
+  --backdrop: rgb(10 11 13 / 65%);
+  --glow-green: 0 0 6px 1px rgb(55 226 107 / 55%);
+  --glow-amber: 0 0 6px 1px rgb(255 178 36 / 55%);
+  --glow-red: 0 0 7px 2px rgb(255 65 54 / 60%);
+
+  /* ── Component ────────────────────────────────────────────────── */
+
+  /* Knob */
+  --knob-size: 40px;
+  --knob-cap-size: 16px;
+  --knob-sweep: 270deg; /* -135°..+135°, detent at 12 o'clock */
+  --knob-body: radial-gradient(
+    circle at 35% 30%,
+    var(--gray-5),
+    var(--gray-4) 60%,
+    #24272b
+  );
+  --knob-pointer: var(--print-white);
+
+  /* Fader */
+  --fader-track-h: 200px;
+  --fader-slot-w: 4px;
+  --fader-cap-w: 24px;
+  --fader-cap-h: 42px;
+  --fader-cap-face: linear-gradient(
+    180deg,
+    var(--gray-6),
+    var(--gray-4) 45%,
+    var(--gray-5)
+  );
+
+  /* LedMeter */
+  --led-size: 8px;
+  --led-gap: 3px;
+
+  /* PushButton */
+  --btn-h: 22px;
+  --btn-led-size: 6px;
+
+  /* TapeLabel — two lines of sharpie at full size; the fit probe shrinks
+   * longer names into the same box. */
+  --tape-h: 48px;
+  --tape-rotate-max: 1.2deg;
+
+  /* ChannelStrip / MasterSection */
+  --strip-w: 88px;
+  --strip-pad: var(--s2);
+  --master-w: 200px;
+
+  /* Tracks editor: lanes, ruler, playhead. Canvas code reads these via
+   * getComputedStyle so no raw color ever lands in a component. */
+  --lane-h: 96px;
+  --lane-header-w: 148px;
+  --ruler-h: 28px;
+  --wave-ink: var(--led-green-on);
+  --wave-ink-dim: var(--gray-4);
+  --wave-fill: rgb(55 226 107 / 18%);
+  --playhead-color: var(--led-amber-on);
+  --loop-region: rgb(255 178 36 / 14%);
+}
+
+/* Touch density: the 44px-target answer without bloating the desktop
+ * console. */
+@media (pointer: coarse) {
+  :root {
+    --strip-w: 104px;
+    --knob-size: 48px;
+    --btn-h: 30px;
+    --fader-cap-h: 48px;
+  }
+}

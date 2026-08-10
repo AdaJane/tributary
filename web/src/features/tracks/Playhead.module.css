@@ -1,0 +1,11 @@
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 2px;
+  background: var(--playhead-color);
+  pointer-events: none;
+  z-index: 2;
+  /* Motion comes from rAF; a transition would smear the snap. */
+}

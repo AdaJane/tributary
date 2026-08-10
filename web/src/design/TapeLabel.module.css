@@ -1,0 +1,62 @@
+.wrap {
+  position: relative;
+  width: 100%;
+}
+
+.tape {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: var(--tape-h);
+  padding: var(--s1) var(--s2);
+  background: var(--tape-cream);
+  color: var(--ink);
+  font-family: var(--font-tape);
+  font-size: var(--text-lg);
+  line-height: 1.15;
+  text-align: center;
+  border: none;
+  box-shadow: var(--depth-raised);
+  /* Torn ends. */
+  clip-path: polygon(
+    0 0,
+    100% 2px,
+    calc(100% - 3px) 30%,
+    100% 65%,
+    calc(100% - 1px) 100%,
+    2px 100%,
+    3px 60%,
+    0 35%
+  );
+  overflow: hidden;
+  /* Long names wrap; the fit probe shrinks the writing to keep every
+   * word on the tape. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+textarea.tape {
+  display: block;
+  cursor: text;
+  outline: none;
+  resize: none;
+}
+
+/* The measuring twin: identical box and writing rules, never seen. The
+ * fit hook resizes THIS and reports what fits. */
+.probe {
+  position: absolute;
+  inset: 0;
+  padding: var(--s1) var(--s2);
+  font-family: var(--font-tape);
+  font-size: var(--text-lg);
+  line-height: 1.15;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+}

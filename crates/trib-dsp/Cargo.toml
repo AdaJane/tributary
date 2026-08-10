@@ -1,0 +1,15 @@
+[package]
+name = "trib-dsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DSP building blocks for Tributary: filters, dynamics, reverb"
+
+[dependencies]
+trib-core.workspace = true
+biquad.workspace = true
+
+[lints]
+workspace = true

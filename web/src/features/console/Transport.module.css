@@ -1,0 +1,33 @@
+.transport {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  align-items: center;
+  width: 100%;
+  padding: var(--s2);
+  background: var(--surface-strip);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-2);
+}
+
+.row {
+  display: flex;
+  gap: var(--s2);
+  align-items: center;
+}
+
+.clock {
+  min-width: 88px;
+  padding: var(--s0) var(--s1);
+  background: var(--surface-inset);
+  box-shadow: var(--depth-inset);
+  border-radius: var(--radius-1);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.clock[data-recording] {
+  color: var(--led-red-on);
+}

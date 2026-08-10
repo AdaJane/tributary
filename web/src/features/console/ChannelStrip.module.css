@@ -1,0 +1,96 @@
+.strip {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s2);
+  width: var(--strip-w);
+  min-width: var(--strip-w);
+  padding: var(--strip-pad);
+  background: var(--surface-strip);
+  border-right: 1px solid var(--border-panel);
+}
+
+/* Pull-the-channel control: quiet in the corner, loud once armed. */
+.remove {
+  position: absolute;
+  top: var(--s0);
+  right: var(--s0);
+  z-index: 1;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 var(--s0);
+  border: none;
+  border-radius: var(--radius-1);
+  background: none;
+  color: var(--text-dim);
+  font-family: var(--font-label);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-print);
+  cursor: pointer;
+}
+
+/* WCAG hit area without growing the visual. */
+.remove::before {
+  content: '';
+  position: absolute;
+  inset: -6px;
+}
+
+.remove:hover {
+  color: var(--led-red-on);
+}
+
+.remove[data-armed] {
+  background: var(--led-red-off);
+  color: var(--led-red-on);
+}
+
+.remove:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.strip[data-muted] {
+  /* Color is never the sole signal: a muted strip visibly dims. */
+  filter: brightness(0.75);
+}
+
+/* Shared-input marker: a strip of colored tape across the top edge, torn
+ * ends and all. Same color = same jack. */
+.linkTape {
+  width: calc(100% + 2 * var(--strip-pad));
+  margin: calc(-1 * var(--strip-pad)) calc(-1 * var(--strip-pad)) 0;
+  padding: var(--s0) 0;
+  text-align: center;
+  font-family: var(--font-tape);
+  font-size: var(--text-2xs);
+  color: var(--ink);
+  box-shadow: var(--depth-raised);
+  clip-path: polygon(
+    0 0,
+    100% 0,
+    calc(100% - 2px) 40%,
+    100% 100%,
+    2px 100%,
+    0 55%
+  );
+}
+
+.linkTape[data-cap='red'] { background: var(--cap-red); }
+.linkTape[data-cap='blue'] { background: var(--cap-blue); }
+.linkTape[data-cap='yellow'] { background: var(--cap-yellow); }
+.linkTape[data-cap='green'] { background: var(--cap-green); }
+.linkTape[data-cap='white'] { background: var(--cap-white); }
+.linkTape[data-cap='grey'] { background: var(--cap-grey); }
+
+.meterRow {
+  display: flex;
+  gap: var(--s1);
+  align-items: flex-end;
+}
+
+.switches {
+  display: flex;
+  gap: var(--s1);
+}

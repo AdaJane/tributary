@@ -1,0 +1,178 @@
+.waiting {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--s2);
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s1);
+  padding: var(--s2);
+  min-height: 44px;
+  background: var(--surface-strip);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-2);
+  box-shadow: var(--depth-raised);
+  color: var(--text-label);
+  transition: background var(--transition);
+}
+
+.tile:hover:not(:disabled) {
+  background: var(--surface-control);
+  cursor: pointer;
+}
+
+.tile[data-selected] {
+  box-shadow: var(--depth-inset), 0 0 0 2px var(--focus-color);
+}
+
+.tile:disabled {
+  opacity: 0.6;
+}
+
+.tileLabel {
+  font-family: var(--font-label);
+  font-size: var(--text-md);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-label);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tileDetail {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.tileStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  font-family: var(--font-label);
+  font-size: var(--text-sm);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.statusDot {
+  width: var(--btn-led-size);
+  height: var(--btn-led-size);
+  border-radius: var(--radius-round);
+  background: var(--surface-inset);
+  box-shadow: var(--depth-inset);
+}
+
+/* LEDs snap — no transitions, per the motion rule. */
+.tileStatus[data-status='ready'] {
+  color: var(--led-green-on);
+}
+
+.tileStatus[data-status='ready'] .statusDot {
+  background: var(--led-green-on);
+  box-shadow: var(--glow-green);
+}
+
+.tileStatus[data-status='read-only'] {
+  color: var(--led-amber-on);
+}
+
+.tileStatus[data-status='read-only'] .statusDot {
+  background: var(--led-amber-on);
+  box-shadow: var(--glow-amber);
+}
+
+.tileStatus[data-status='missing'] {
+  color: var(--led-red-on);
+}
+
+.tileStatus[data-status='missing'] .statusDot {
+  background: var(--led-red-on);
+  box-shadow: var(--glow-red);
+}
+
+.custom {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s3);
+}
+
+.custom > :nth-child(2) {
+  flex: 1;
+}
+
+.customLabel {
+  font-family: var(--font-label);
+  font-size: var(--text-sm);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.recPath {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: var(--s3) 0 0;
+  padding: var(--s1) var(--s2);
+  background: var(--surface-inset);
+  border-radius: var(--radius-2);
+  box-shadow: var(--depth-inset);
+}
+
+.recPathLabel {
+  flex-shrink: 0;
+  font-family: var(--font-label);
+  font-size: var(--text-sm);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.recPathValue {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-value);
+}
+
+.hint,
+.lockHint,
+.error {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  margin: var(--s2) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.lockHint {
+  color: var(--led-amber-on);
+}
+
+.error {
+  color: var(--led-red-on);
+}
+
+.error .statusDot {
+  background: var(--led-red-on);
+  box-shadow: var(--glow-red);
+}

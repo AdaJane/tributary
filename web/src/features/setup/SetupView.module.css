@@ -1,0 +1,114 @@
+.page {
+  height: 100%;
+  overflow-y: auto;
+  background: var(--surface-console);
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  max-width: 680px;
+  margin: 0 auto;
+  padding: var(--s5) var(--s4);
+}
+
+.panel {
+  padding: var(--s3);
+  background: var(--surface-strip);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-2);
+  box-shadow: var(--depth-raised);
+}
+
+.panelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+}
+
+.panelTitle {
+  margin: 0;
+  font-family: var(--font-label);
+  font-size: var(--text-md);
+  font-weight: normal;
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-label);
+}
+
+.waiting {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.note {
+  margin: var(--s2) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.engine {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: var(--s3) 0 0;
+  padding: var(--s1) var(--s2);
+  background: var(--surface-inset);
+  border-radius: var(--radius-2);
+  box-shadow: var(--depth-inset);
+}
+
+.engineLabel {
+  font-family: var(--font-label);
+  font-size: var(--text-sm);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.engineValue {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-value);
+}
+
+/* The amber restart lamp — snaps on, never fades. */
+.restart {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  font-family: var(--font-label);
+  font-size: var(--text-sm);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--led-amber-on);
+}
+
+.restartDot {
+  width: var(--btn-led-size);
+  height: var(--btn-led-size);
+  border-radius: var(--radius-round);
+  background: var(--led-amber-on);
+  box-shadow: var(--glow-amber);
+}
+
+.error {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  margin: var(--s2) 0 0;
+  font-size: var(--text-sm);
+  color: var(--led-red-on);
+}
+
+.errorDot {
+  width: var(--btn-led-size);
+  height: var(--btn-led-size);
+  border-radius: var(--radius-round);
+  background: var(--led-red-on);
+  box-shadow: var(--glow-red);
+}

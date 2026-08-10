@@ -1,0 +1,20 @@
+.field {
+  height: var(--btn-h);
+  padding: 0 var(--s2);
+  background: var(--surface-inset);
+  border: none;
+  border-radius: var(--radius-2);
+  box-shadow: var(--depth-inset);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-value);
+}
+
+.field::placeholder {
+  color: var(--text-dim);
+}
+
+.field:disabled {
+  opacity: 0.45;
+  cursor: default;
+}

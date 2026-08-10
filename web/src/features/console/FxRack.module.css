@@ -1,0 +1,29 @@
+.rack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  width: 100%;
+}
+
+.unit {
+  background: var(--surface-strip);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-2);
+  padding: var(--s2);
+}
+
+.name {
+  margin: 0 0 var(--s1);
+  font-family: var(--font-label);
+  font-size: var(--text-xs);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-label);
+  text-align: center;
+}
+
+.knobs {
+  display: flex;
+  justify-content: center;
+  gap: var(--s2);
+}

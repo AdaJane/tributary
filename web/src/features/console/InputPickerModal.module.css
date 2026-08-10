@@ -1,0 +1,212 @@
+.deviceSection {
+  margin-bottom: var(--s4);
+}
+
+.device {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0 0 var(--s2);
+  font-family: var(--font-label);
+  font-size: var(--text-md);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-label);
+}
+
+.letter {
+  flex-shrink: 0;
+  min-width: 22px;
+  padding: var(--s0) var(--s1);
+  border-radius: var(--radius-1);
+  background: var(--surface-control);
+  box-shadow: var(--depth-raised);
+  text-align: center;
+  font-size: var(--text-md);
+  color: var(--text-value);
+}
+
+.deviceIcon {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  color: var(--text-label);
+}
+
+.status {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  margin-left: auto;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.statusDot {
+  width: var(--btn-led-size);
+  height: var(--btn-led-size);
+  border-radius: var(--radius-round);
+  background: var(--surface-inset);
+  box-shadow: var(--depth-inset);
+}
+
+.status[data-status='open'] {
+  color: var(--led-green-on);
+}
+
+.status[data-status='open'] .statusDot {
+  background: var(--led-green-on);
+  box-shadow: var(--glow-green);
+}
+
+.status[data-status='failed'] {
+  color: var(--led-red-on);
+}
+
+.status[data-status='failed'] .statusDot {
+  background: var(--led-red-on);
+  box-shadow: var(--glow-red);
+}
+
+.status[data-status='absent'] {
+  color: var(--led-amber-on);
+}
+
+.status[data-status='absent'] .statusDot {
+  background: var(--led-amber-on);
+  box-shadow: var(--glow-amber);
+}
+
+.deviceName {
+  min-width: 0;
+  color: var(--text-value);
+}
+
+.deviceHint {
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.jacks {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--s2);
+}
+
+.jack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s1);
+  padding: var(--s2);
+  background: var(--surface-strip);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-2);
+  box-shadow: var(--depth-raised);
+  transition: background var(--transition);
+}
+
+.jack:hover {
+  background: var(--surface-control);
+}
+
+.jack[data-selected] {
+  box-shadow: var(--depth-inset), 0 0 0 2px var(--focus-color);
+}
+
+/* The XLR socket, drawn not photographed. */
+.socket {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-round);
+  background: var(--surface-inset);
+  box-shadow: var(--depth-inset);
+}
+
+.pin {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-round);
+  background: var(--surface-control);
+  box-shadow: var(--depth-raised);
+}
+
+.jack[data-selected] .pin {
+  background: var(--focus-color);
+}
+
+/* A jack past the device's channel count: visible (a patch may hold it)
+ * but clearly carrying nothing. */
+.jack[data-dead] .socket {
+  opacity: 0.35;
+}
+
+.jack[data-dead] .jackLabel {
+  color: var(--text-dim);
+}
+
+.jackLabel {
+  font-family: var(--font-label);
+  font-size: var(--text-md);
+  letter-spacing: var(--track-print);
+  color: var(--text-label);
+}
+
+.free {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.holders {
+  display: flex;
+  align-items: center;
+  gap: var(--s0);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-tape);
+  font-size: var(--text-sm);
+  color: var(--tape-cream);
+}
+
+.linkDot {
+  flex-shrink: 0;
+  width: var(--btn-led-size);
+  height: var(--btn-led-size);
+  border-radius: var(--radius-round);
+  box-shadow: var(--depth-raised);
+}
+
+.linkDot[data-cap='red'] { background: var(--cap-red); }
+.linkDot[data-cap='blue'] { background: var(--cap-blue); }
+.linkDot[data-cap='yellow'] { background: var(--cap-yellow); }
+.linkDot[data-cap='green'] { background: var(--cap-green); }
+.linkDot[data-cap='white'] { background: var(--cap-white); }
+.linkDot[data-cap='grey'] { background: var(--cap-grey); }
+
+.others {
+  margin: var(--s3) 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  margin-top: var(--s4);
+}
+
+.hint {
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  max-width: 34ch;
+}

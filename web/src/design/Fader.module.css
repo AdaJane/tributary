@@ -1,0 +1,96 @@
+.wrap {
+  position: relative;
+  display: flex;
+  gap: var(--s1);
+  height: var(--fader-track-h);
+}
+
+.wrap[data-disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.scale {
+  position: relative;
+  width: 18px;
+  user-select: none;
+}
+
+.mark {
+  position: absolute;
+  right: 0;
+  transform: translateY(50%);
+  font-family: var(--font-label);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
+}
+
+.mark[data-unity] {
+  color: var(--text-label);
+  font-weight: 600;
+}
+
+.track {
+  position: relative;
+  width: var(--fader-cap-w);
+}
+
+.slot {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(50% - var(--fader-slot-w) / 2);
+  width: var(--fader-slot-w);
+  background: var(--surface-inset);
+  box-shadow: var(--depth-inset);
+  border-radius: var(--radius-1);
+  /* The slot is the click-to-jump surface; events land on .track. */
+  pointer-events: none;
+}
+
+.cap {
+  position: absolute;
+  left: 0;
+  width: var(--fader-cap-w);
+  height: var(--fader-cap-h);
+  background: var(--fader-cap-face);
+  border-radius: var(--radius-1);
+  box-shadow: var(--depth-cap);
+  cursor: grab;
+  touch-action: none;
+}
+
+.cap:active {
+  cursor: grabbing;
+}
+
+.grip {
+  position: absolute;
+  top: calc(50% - 2px);
+  left: 2px;
+  right: 2px;
+  height: 4px;
+  border-radius: var(--radius-1);
+}
+
+.cap[data-cap='red'] .grip { background: var(--cap-red); }
+.cap[data-cap='blue'] .grip { background: var(--cap-blue); }
+.cap[data-cap='yellow'] .grip { background: var(--cap-yellow); }
+.cap[data-cap='green'] .grip { background: var(--cap-green); }
+.cap[data-cap='white'] .grip { background: var(--cap-white); }
+.cap[data-cap='grey'] .grip { background: var(--cap-grey); }
+
+.readout {
+  position: absolute;
+  top: calc(-1 * var(--s5));
+  left: 0;
+  z-index: 1;
+  padding: var(--s0) var(--s1);
+  background: var(--surface-section);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-1);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-value);
+  white-space: nowrap;
+}

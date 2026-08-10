@@ -1,0 +1,45 @@
+.bench {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s5);
+  padding: var(--s5);
+  align-items: flex-start;
+}
+
+.group {
+  background: var(--surface-strip);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-2);
+  padding: var(--s4);
+}
+
+.title {
+  margin: 0 0 var(--s3);
+  font-family: var(--font-label);
+  font-size: var(--text-sm);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.row {
+  display: flex;
+  gap: var(--s4);
+  align-items: flex-end;
+}
+
+.rowNarrow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  width: 140px;
+}
+
+.meterDrive {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+}

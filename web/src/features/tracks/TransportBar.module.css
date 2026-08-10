@@ -1,0 +1,28 @@
+.bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  background: var(--surface-section);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-2);
+  box-shadow: var(--depth-raised);
+  width: fit-content;
+}
+
+.counter {
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  color: var(--text-value);
+  background: var(--surface-inset);
+  box-shadow: var(--depth-inset);
+  border-radius: var(--radius-1);
+  padding: var(--s1) var(--s3);
+  min-width: 15ch;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.counter[data-recording] {
+  color: var(--led-red-on);
+}
