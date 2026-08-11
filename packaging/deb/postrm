@@ -1,0 +1,12 @@
+#!/bin/sh
+# Postrm for the tributary .deb.
+set -e
+
+if [ "$1" = "purge" ]; then
+    # recording.toml is daemon-written beside the conffile; purge means
+    # "leave nothing behind".
+    rm -f /etc/tributary/recording.toml
+    rmdir --ignore-fail-on-non-empty /etc/tributary 2>/dev/null || true
+fi
+
+#DEBHELPER#

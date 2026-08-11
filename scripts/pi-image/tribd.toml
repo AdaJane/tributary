@@ -1,0 +1,9 @@
+# Tributary appliance configuration. Every other key keeps its default —
+# see config/tribd.toml in the repo for the full commented set; env
+# overrides are TRIB__SECTION__KEY.
+
+[server]
+# LAN-open by design: browse http://tributary.local:4600 from any device
+# on the network. The daemon trusts this network — see the Security
+# section of the README before putting the appliance on one you don't.
+bind = "0.0.0.0:4600"

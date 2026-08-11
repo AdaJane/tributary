@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Tributary
+Comment=Live multitrack recording and mixing console
+Exec=tribd
+Icon=tributary
+Terminal=true
+Categories=AudioVideo;Audio;

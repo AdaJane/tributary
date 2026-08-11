@@ -1,0 +1,34 @@
+# Tributary daemon as a system service (deb/rpm installs). Binds loopback
+# by default — the LAN-open posture belongs to the Pi appliance image, not
+# this package. Runs headless under its own user: no user Pulse/PipeWire
+# session is visible from here, so the patchbay falls back to raw ALSA
+# devices (hence the audio group).
+[Unit]
+Description=Tributary recording daemon
+Documentation=https://github.com/AdaJane/tributary
+After=network.target sound.target
+
+[Service]
+User=tributary
+Group=tributary
+# Raw ALSA device access for the headless fallback path.
+SupplementaryGroups=audio
+ExecStart=/usr/bin/tribd --config /etc/tributary/tribd.toml
+# Default projects root ("projects", relative) resolves under the state
+# dir; recording.toml is daemon-written beside the config file — hence the
+# one writable /etc carve-out. `full` not `strict`: admins point the
+# recording destination at /media, /mnt or /home from the Setup tab.
+StateDirectory=tributary
+WorkingDirectory=/var/lib/tributary
+ProtectSystem=full
+ReadWritePaths=/etc/tributary
+NoNewPrivileges=yes
+PrivateTmp=yes
+Restart=on-failure
+RestartSec=2
+# tribd traps SIGINT (Ctrl-C) for graceful shutdown; tell systemd to speak
+# that language instead of SIGTERM.
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

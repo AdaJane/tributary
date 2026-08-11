@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Tributary apt repository</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; max-width: 40rem;
+         margin: 4rem auto; padding: 0 1rem; color: #1a1d21; }
+  pre  { background: #f4f4f2; padding: 1rem; border-radius: 6px;
+         overflow-x: auto; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #16191d; color: #e6e4df; }
+    pre  { background: #21262c; }
+  }
+</style>
+<h1>Tributary apt repository</h1>
+<p>Signed packages for <a href="https://github.com/AdaJane/tributary">Tributary</a>,
+the live multitrack recording console. Debian 12+/Ubuntu 22.04+, amd64 and arm64:</p>
+<pre>curl -fsSL https://adajane.github.io/tributary/tributary.asc \
+  | sudo gpg --dearmor -o /usr/share/keyrings/tributary.gpg
+echo "deb [signed-by=/usr/share/keyrings/tributary.gpg] \
+  https://adajane.github.io/tributary/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/tributary.list
+sudo apt update &amp;&amp; sudo apt install tributary</pre>
+<p>Installs the <code>tribd</code> system service (enabled + started,
+loopback only) — open <a href="http://127.0.0.1:4600">http://127.0.0.1:4600</a>.
+Other formats (.rpm, AppImage, Raspberry&nbsp;Pi image, Docker) live on the
+<a href="https://github.com/AdaJane/tributary/releases">releases page</a>.</p>

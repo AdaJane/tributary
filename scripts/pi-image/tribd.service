@@ -1,0 +1,22 @@
+# Tributary appliance: tribd as a systemd USER unit under the lingering
+# `tributary` account. A user unit — not a system one — because pactl and
+# parec dial the pulse socket at $XDG_RUNTIME_DIR/pulse/native, which user
+# units get for free and system units don't; PipeWire and wireplumber live
+# in the same user session. Logs: sudo journalctl SYSLOG_IDENTIFIER=tribd
+[Unit]
+Description=Tributary recording console (tribd)
+# pipewire-pulse.socket is socket-activated — parec's first connect wakes
+# it — so After= only shapes orderly shutdown, not startup correctness.
+After=pipewire-pulse.socket
+
+[Service]
+# %h = /home/tributary: config/ and projects/ mirror a repo checkout, and
+# the daemon-written recording.toml (beside the config) lands somewhere
+# writable.
+WorkingDirectory=%h
+ExecStart=/usr/local/bin/tribd --config %h/config/tribd.toml
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

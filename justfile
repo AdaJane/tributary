@@ -33,6 +33,23 @@ dist:
     cargo build --release -p tribd --features embed-ui
     @echo "==> target/release/tribd"
 
+# Remaster the Pi appliance image locally (rehearsal — no tag needed).
+# Needs sudo, ~4 GB free, and an aarch64 tribd; on an x86_64 box install
+# qemu-user-static (binfmt) and feed it a binary from a previous release.
+# Pass --no-compress to skip the slow xz while iterating.
+pi-image binary="target/release/tribd" *flags="":
+    sudo scripts/pi-image/build.sh {{binary}} target/tributary-dev-pi.img.xz {{flags}}
+
+# Local package builds — the same tools CI runs (which passes --no-build
+# and packages the release leg's own embed-ui binary).
+deb: dist
+    cargo deb -p tribd --no-build
+    @echo "==> target/debian/"
+
+rpm: dist
+    cargo generate-rpm -p crates/tribd
+    @echo "==> target/generate-rpm/"
+
 # Bring up the whole stack: daemon + web UI, together. Ctrl-C stops both.
 up:
     #!/usr/bin/env bash

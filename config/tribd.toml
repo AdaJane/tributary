@@ -4,8 +4,10 @@
 
 [server]
 # bind = "127.0.0.1:4600"
-# Loopback origins pass on any port; list non-loopback extras (LAN names,
-# reverse proxies) here. No auth: the daemon trusts its own machine.
+# Loopback origins pass on any port, and so does a same-origin page on a
+# `.local` or IP-literal host (the LAN appliance case); list other extras
+# (reverse proxies, custom DNS names) here. No auth: the daemon trusts
+# the machine/network it is reachable on.
 # cors_origins = []
 
 [audio]

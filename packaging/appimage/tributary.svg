@@ -1,0 +1,16 @@
+<!-- Placeholder mark: three console faders on a dark tile. No logo exists
+     in the repo yet (appimagetool requires an icon); replace with the real
+     Tributary mark when one lands. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="48" fill="#16191d"/>
+  <g stroke="#3a4048" stroke-width="10" stroke-linecap="round">
+    <line x1="76" y1="56" x2="76" y2="200"/>
+    <line x1="128" y1="56" x2="128" y2="200"/>
+    <line x1="180" y1="56" x2="180" y2="200"/>
+  </g>
+  <g fill="#e8b34b">
+    <rect x="58" y="128" width="36" height="22" rx="6"/>
+    <rect x="110" y="84" width="36" height="22" rx="6"/>
+    <rect x="162" y="150" width="36" height="22" rx="6"/>
+  </g>
+</svg>

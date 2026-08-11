@@ -1,24 +1,48 @@
 # Tag-driven release: one self-contained binary per arch (API + embedded
-# web console). ci.yml stays the PR/main gate — tag from green main.
+# web console), packaged every way the community consumes it — tarball,
+# .deb, .rpm, AppImage, a Raspberry Pi appliance image, a multi-arch
+# container on GHCR, and a signed apt repo on Pages. ci.yml stays the
+# PR/main gate — tag from green main. Rehearse with a v*-rc tag: it
+# exercises everything except the apt repo (guarded below) and never
+# claims the container `latest` tag.
 name: Release
 
 on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write # gh release create/upload
+# Empty at the top: each job declares its own least privilege.
+permissions: {}
 
 jobs:
   build:
     strategy:
       matrix:
         include:
-          - runner: ubuntu-latest # x86_64, glibc, dynamic ALSA
+          # 22.04 pins the glibc floor at 2.35 so the binaries and packages
+          # run on Debian 12 (2.36) and Ubuntu 22.04+; the 24.04 runners
+          # (glibc 2.39) would silently break the .deb/apt story for older
+          # stables. The bookworm install test below is the tripwire — if
+          # these runner images retire, fall back to building inside a
+          # debian:bookworm container.
+          - runner: ubuntu-22.04 # x86_64, dynamic ALSA
             target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-24.04-arm # native aarch64 — no cross toolchain
+            appimage_arch: x86_64
+          - runner: ubuntu-22.04-arm # native aarch64 — no cross toolchain
             target: aarch64-unknown-linux-gnu
+            appimage_arch: aarch64
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write # gh release create/upload
+      id-token: write # provenance attestations
+      attestations: write
+    env:
+      # appimagetool moved to AppImage/appimagetool when AppImageKit was
+      # archived (its tag-13 assets 404 since 2026-08). The successor only
+      # publishes the moving `continuous` tag, so no pin is possible — the
+      # Verify step below gates a bad build before anything is uploaded.
+      # --appimage-extract-and-run avoids FUSE on runners.
+      APPIMAGETOOL_TAG: "continuous"
     steps:
       - uses: actions/checkout@v4
       # cpal's alsa-sys needs the ALSA headers to build.
@@ -41,19 +65,198 @@ jobs:
       # The embed smoke tests only run here — the one place with a real dist.
       - run: cargo test -p tribd --features embed-ui
       - run: cargo build --release -p tribd --features embed-ui
-      - name: Package
+      # Built from source on purpose: upstream's prebuilt cargo-deb needs
+      # glibc 2.39 (built on 24.04) and dies on these 22.04 runners, and
+      # there is no arm64 prebuilt at all. Compiling here inherits the leg's
+      # 2.35 floor; rust-cache keeps ~/.cargo/bin, so cache hits skip this.
+      - run: cargo install --locked cargo-deb@3.7.0 cargo-generate-rpm@0.21.0
+      - name: Package tarball
         run: |
           name="tributary-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir "${name}"
           cp target/release/tribd LICENSE README.md THIRD-PARTY.md "${name}/"
           tar czf "${name}.tar.gz" "${name}"
           sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+      # deb/rpm keep their native filename conventions (apt pool layout and
+      # rpm tooling expect them); the dpkg/rpm metadata is authoritative.
+      # Both tools read Cargo.toml — the version assert above stays the
+      # single gate. --no-build packages this leg's embed-ui binary.
+      - name: Package .deb and .rpm
+        run: |
+          cargo deb -p tribd --no-build
+          cargo generate-rpm -p crates/tribd
+          cp target/debian/*.deb target/generate-rpm/*.rpm .
+          for f in *.deb *.rpm; do sha256sum "$f" > "$f.sha256"; done
+      - name: Package AppImage
+        run: |
+          mkdir -p AppDir/usr/bin
+          cp target/release/tribd AppDir/usr/bin/
+          install -m 755 packaging/appimage/AppRun AppDir/AppRun
+          cp packaging/appimage/tributary.desktop packaging/appimage/tributary.svg AppDir/
+          curl -fL --retry 3 -o appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_TAG}/appimagetool-${{ matrix.appimage_arch }}.AppImage"
+          chmod +x appimagetool
+          ARCH=${{ matrix.appimage_arch }} ./appimagetool --appimage-extract-and-run \
+            AppDir "tributary-${GITHUB_REF_NAME}-${{ matrix.appimage_arch }}.AppImage"
+          sha256sum tributary-*.AppImage > "tributary-${GITHUB_REF_NAME}-${{ matrix.appimage_arch }}.AppImage.sha256"
+      # A leg fails before publishing junk: install each package for real
+      # (arch-native for free — the arm leg tests the arm packages) and run
+      # the binary far enough to prove linkage and the glibc floor. The
+      # deb maintainer scripts run without systemd here; the generated
+      # fragments guard for that, so this exercises user/permission setup.
+      - name: Verify packages
+        run: |
+          dpkg-deb --info tributary_*.deb
+          docker run --rm -v "$PWD:/pkgs:ro" debian:bookworm bash -ec \
+            'apt-get update -qq >/dev/null && apt-get install -y -qq /pkgs/tributary_*.deb >/dev/null && tribd openapi >/dev/null && echo deb-OK'
+          docker run --rm -v "$PWD:/pkgs:ro" fedora:latest bash -ec \
+            'dnf install -y -q /pkgs/tributary-*.rpm >/dev/null && tribd openapi >/dev/null && echo rpm-OK'
+          appimage=(tributary-*.AppImage)
+          "./${appimage[0]}" --appimage-extract >/dev/null
+          squashfs-root/AppRun openapi >/dev/null && echo appimage-OK
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            tributary-*.tar.gz
+            tributary_*.deb
+            tributary-*.rpm
+            tributary-*.AppImage
       # Both matrix jobs race to create; the loser falls through to upload.
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes \
-            tributary-*.tar.gz tributary-*.tar.gz.sha256 \
+            tributary-*.tar.gz* tributary_*.deb* tributary-*.rpm* tributary-*.AppImage* \
           || gh release upload "${GITHUB_REF_NAME}" --clobber \
-            tributary-*.tar.gz tributary-*.tar.gz.sha256
+            tributary-*.tar.gz* tributary_*.deb* tributary-*.rpm* tributary-*.AppImage*
+      # The standardized binary handoff: bare tribd named by target triple.
+      # upload-artifact drops mode bits — consumers restore the exec bit.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tribd-${{ matrix.target }}
+          path: target/release/tribd
+
+  # Raspberry Pi appliance image: the official Lite arm64 image remastered
+  # in place (native chroot — no qemu) around the exact binary the aarch64
+  # leg shipped. Flash like any Raspbian; firstboot expansion and
+  # Imager/cloud-init customization are preserved untouched — see
+  # scripts/pi-image/build.sh for the whole story.
+  pi-image:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tribd-aarch64-unknown-linux-gnu
+      - run: chmod +x tribd
+      - name: Build image
+        run: |
+          sudo IMAGE_URL_BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" \
+            scripts/pi-image/build.sh ./tribd "tributary-${GITHUB_REF_NAME}-pi.img.xz"
+      # Boots a throwaway copy under nspawn (shared host netns) and waits
+      # for tribd: proves the linger → user session → pipewire → tribd
+      # wiring end-to-end. continue-on-error until first-boot timing under
+      # nspawn is proven stable across a few releases — then make it block.
+      - name: Boot smoke test (nspawn)
+        continue-on-error: true
+        run: |
+          sudo apt-get update && sudo apt-get install -y systemd-container
+          xz -dc "tributary-${GITHUB_REF_NAME}-pi.img.xz" > smoke.img
+          sudo systemd-run --unit=trib-smoke systemd-nspawn -i smoke.img -b
+          for _ in $(seq 60); do
+            if curl -sf http://127.0.0.1:4600/healthz; then break; fi
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:4600/healthz
+          sudo machinectl poweroff trib-smoke || true
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: tributary-*-pi.img.xz
+      # needs: build means the release exists by now — create loses the
+      # race on purpose and upload wins.
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes \
+            tributary-*-pi.img.xz* tributary-*-pi-imager.json \
+          || gh release upload "${GITHUB_REF_NAME}" --clobber \
+            tributary-*-pi.img.xz* tributary-*-pi-imager.json
+
+  # Multi-arch container on GHCR assembled from the legs' native binaries —
+  # the only emulated work in the buildx run is an apt-get (~1 min), so a
+  # single qemu job beats per-arch digest-push + manifest-merge plumbing.
+  container:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tribd-x86_64-unknown-linux-gnu
+          path: ctx/amd64
+      - uses: actions/download-artifact@v4
+        with:
+          name: tribd-aarch64-unknown-linux-gnu
+          path: ctx/arm64
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # vX.Y.Z on every tag; `latest` only on non-prerelease semver, so rc
+      # rehearsals never claim it. The source label auto-links the GHCR
+      # package to this repo.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: type=semver,pattern=v{{version}}
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: ctx
+          file: packaging/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+      - name: Smoke test
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          tag="$(echo "$TAGS" | head -1)"
+          docker run -d --name smoke -p 4600:4600 "$tag"
+          curl --retry 10 --retry-delay 2 --retry-connrefused -sf \
+            http://127.0.0.1:4600/healthz
+          docker rm -f smoke
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  # The Pages apt repo rebuilds statelessly from every stable release's
+  # .debs; rc rehearsal tags (they contain '-') never touch it.
+  apt:
+    needs: build
+    if: ${{ !contains(github.ref_name, '-') }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/apt-repo.yml
+    secrets: inherit

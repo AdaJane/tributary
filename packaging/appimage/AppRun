@@ -1,0 +1,6 @@
+#!/bin/sh
+# AppImage entrypoint: tribd is self-contained (console embedded); the only
+# host requirement is ALSA (libasound2), deliberately NOT bundled — it
+# dlopens host-specific plugins and configuration.
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/bin/tribd" "$@"

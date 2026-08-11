@@ -135,15 +135,20 @@ pub fn openapi_json() -> String {
 }
 
 pub fn build(state: AppState) -> Router {
-    // Same doctrine as the WS handshake: loopback on any port, plus the
-    // configured extras (LAN names, reverse proxies).
+    // Same doctrine as the WS handshake: loopback on any port, same-origin
+    // from `.local`/IP-literal hosts, plus the configured extras (reverse
+    // proxies, custom DNS). One function owns the rule — see ws.rs.
     let allowed = state.cors_origins.clone();
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::AllowOrigin::predicate(
-            move |origin: &HeaderValue, _| {
-                origin.to_str().is_ok_and(|origin| {
-                    ws::is_loopback_origin(origin) || allowed.iter().any(|a| a == origin)
-                })
+            move |origin: &HeaderValue, parts| {
+                let host = parts
+                    .headers
+                    .get(axum::http::header::HOST)
+                    .and_then(|v| v.to_str().ok());
+                origin
+                    .to_str()
+                    .is_ok_and(|origin| ws::origin_allowed(Some(origin), host, &allowed))
             },
         ))
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])

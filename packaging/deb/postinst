@@ -1,0 +1,20 @@
+#!/bin/sh
+# Postinst for the tributary .deb. cargo-deb replaces #DEBHELPER# with its
+# generated systemd fragments (enable + start on install — the Debian
+# server convention; the unit binds loopback).
+set -e
+
+if [ "$1" = "configure" ]; then
+    # Static system user, not DynamicUser: recordings are persistent files
+    # written to admin-chosen destinations; ownership must survive
+    # restarts. adduser --system is idempotent.
+    adduser --system --group --no-create-home --home /var/lib/tributary \
+        --quiet tributary
+    # The daemon writes recording.toml (atomic temp+rename) beside
+    # tribd.toml, so it needs write permission on the directory; the
+    # admin's tribd.toml itself stays root-owned.
+    chown root:tributary /etc/tributary
+    chmod 0775 /etc/tributary
+fi
+
+#DEBHELPER#

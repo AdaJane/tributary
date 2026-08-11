@@ -262,35 +262,67 @@ pub fn handle_client_message(
 /// Browsers do NOT apply CORS to the WebSocket handshake, so the origin
 /// check is enforced here. Absent Origin (curl, native clients) passes —
 /// the header only exists to fence browsers, and a hostile page always
-/// presents its own domain. Loopback origins are trusted on ANY port
-/// (Vite hops ports freely); everything else needs the configured list.
-pub fn origin_allowed(origin: Option<&str>, allowed: &[String]) -> bool {
+/// presents its own domain. Three tiers pass: loopback origins on ANY port
+/// (Vite hops ports freely), same-origin from a host public DNS cannot
+/// serve (`.local` names, IP literals — the appliance and container case),
+/// and the configured list (reverse proxies, custom DNS).
+pub fn origin_allowed(origin: Option<&str>, host: Option<&str>, allowed: &[String]) -> bool {
     match origin {
         None => true,
-        Some(origin) => is_loopback_origin(origin) || allowed.iter().any(|a| a == origin),
+        Some(origin) => {
+            is_loopback_origin(origin)
+                || host.is_some_and(|host| is_same_origin_lan(origin, host))
+                || allowed.iter().any(|a| a == origin)
+        }
+    }
+}
+
+/// The scheme-stripped authority of an `http(s)://` origin; None for any
+/// other scheme.
+fn origin_authority(origin: &str) -> Option<&str> {
+    origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+}
+
+/// The host part of an authority: port dropped, brackets stripped from
+/// IPv6 literals. None when the bracketing is malformed.
+fn authority_host(authority: &str) -> Option<&str> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        // Bracketed IPv6: the port comes after the closing bracket.
+        match rest.split_once(']') {
+            Some((host, port)) if port.is_empty() || port.starts_with(':') => Some(host),
+            _ => None,
+        }
+    } else {
+        authority.split(':').next()
     }
 }
 
 /// True for `http(s)://localhost[:port]`, `127.0.0.1`, or `[::1]`.
 pub fn is_loopback_origin(origin: &str) -> bool {
-    let Some(authority) = origin
-        .strip_prefix("http://")
-        .or_else(|| origin.strip_prefix("https://"))
-    else {
+    origin_authority(origin)
+        .and_then(authority_host)
+        .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1"))
+}
+
+/// Same-origin, fenced to hosts public DNS cannot serve: the Origin
+/// authority must equal the request's Host header AND name an IP literal
+/// or a `.local` (mDNS-reserved) host. This lets http://tributary.local:4600
+/// and http://<lan-ip>:4600 work with zero configuration while staying
+/// DNS-rebinding-safe — a hostile page's Origin always matches its own
+/// Host, but its host is a public DNS name, which fails the fence. A LAN
+/// mDNS spoofer is inside the trust boundary documented in the README.
+pub fn is_same_origin_lan(origin: &str, host: &str) -> bool {
+    let Some(authority) = origin_authority(origin) else {
         return false;
     };
-    let host = if let Some(rest) = authority.strip_prefix('[') {
-        // Bracketed IPv6: the port comes after the closing bracket.
-        match rest.split_once(']') {
-            Some((host, port)) if port.is_empty() || port.starts_with(':') => {
-                return host == "::1";
-            }
-            _ => return false,
-        }
-    } else {
-        authority.split(':').next().unwrap_or(authority)
-    };
-    matches!(host, "localhost" | "127.0.0.1")
+    if !authority.eq_ignore_ascii_case(host) {
+        return false;
+    }
+    authority_host(authority).is_some_and(|host| {
+        host.parse::<std::net::IpAddr>().is_ok() || host.to_ascii_lowercase().ends_with(".local")
+    })
 }
 
 pub async fn ws_handler(
@@ -299,7 +331,8 @@ pub async fn ws_handler(
     upgrade: WebSocketUpgrade,
 ) -> Response {
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
-    if !origin_allowed(origin, &state.cors_origins) {
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    if !origin_allowed(origin, host, &state.cors_origins) {
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
     upgrade
@@ -316,7 +349,8 @@ pub async fn monitor_ws_handler(
     upgrade: WebSocketUpgrade,
 ) -> Response {
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
-    if !origin_allowed(origin, &state.cors_origins) {
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    if !origin_allowed(origin, host, &state.cors_origins) {
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
     upgrade.on_upgrade(move |socket| async move {
@@ -600,9 +634,12 @@ mod tests {
     #[test]
     fn origin_check_fences_browsers_only() {
         let allowed = vec!["http://mixer.lan".to_string()];
-        assert!(origin_allowed(None, &allowed), "non-browser clients pass");
-        assert!(origin_allowed(Some("http://mixer.lan"), &allowed));
-        assert!(!origin_allowed(Some("http://evil.example"), &allowed));
+        assert!(
+            origin_allowed(None, None, &allowed),
+            "non-browser clients pass"
+        );
+        assert!(origin_allowed(Some("http://mixer.lan"), None, &allowed));
+        assert!(!origin_allowed(Some("http://evil.example"), None, &allowed));
     }
 
     #[test]
@@ -617,7 +654,10 @@ mod tests {
             "https://localhost:8443",
             "http://[::1]:5173",
         ] {
-            assert!(origin_allowed(Some(origin), &[]), "{origin} must pass");
+            assert!(
+                origin_allowed(Some(origin), None, &[]),
+                "{origin} must pass"
+            );
         }
         for origin in [
             "http://evil.example",
@@ -625,7 +665,77 @@ mod tests {
             "http://127.0.0.1.evil.example",
             "ftp://localhost",
         ] {
-            assert!(!origin_allowed(Some(origin), &[]), "{origin} must fail");
+            assert!(
+                !origin_allowed(Some(origin), None, &[]),
+                "{origin} must fail"
+            );
         }
+    }
+
+    #[test]
+    fn same_origin_local_names_pass_with_matching_host() {
+        // The appliance: the embedded console is served same-origin from
+        // http://tributary.local:4600, so Origin equals Host exactly.
+        for (origin, host) in [
+            ("http://tributary.local:4600", "tributary.local:4600"),
+            ("http://Tributary.LOCAL:4600", "tributary.local:4600"),
+            ("https://studio.b.local", "studio.b.local"),
+        ] {
+            assert!(
+                origin_allowed(Some(origin), Some(host), &[]),
+                "{origin} with Host {host} must pass"
+            );
+        }
+    }
+
+    #[test]
+    fn ip_literal_origins_pass_when_host_matches() {
+        for (origin, host) in [
+            ("http://192.168.1.50:4600", "192.168.1.50:4600"),
+            ("http://[fd00::5]:4600", "[fd00::5]:4600"),
+        ] {
+            assert!(
+                origin_allowed(Some(origin), Some(host), &[]),
+                "{origin} with Host {host} must pass"
+            );
+        }
+    }
+
+    #[test]
+    fn public_dns_names_never_pass_same_origin() {
+        // The DNS-rebinding shape: a hostile page's Origin always matches
+        // its own Host, so Origin == Host alone proves nothing — the
+        // host-class fence (IP literal or .local) is what stops it.
+        for (origin, host) in [
+            ("http://evil.example:4600", "evil.example:4600"),
+            (
+                "http://evil.local.example.com:4600",
+                "evil.local.example.com:4600",
+            ),
+            ("ftp://tributary.local", "tributary.local"),
+        ] {
+            assert!(
+                !origin_allowed(Some(origin), Some(host), &[]),
+                "{origin} with Host {host} must fail"
+            );
+        }
+    }
+
+    #[test]
+    fn same_origin_requires_an_exact_authority_match() {
+        for (origin, host) in [
+            ("http://tributary.local:4600", "tributary.local:4601"),
+            ("http://tributary.local:4600", "other.local:4600"),
+            ("http://192.168.1.50:4600", "192.168.1.51:4600"),
+        ] {
+            assert!(
+                !origin_allowed(Some(origin), Some(host), &[]),
+                "{origin} with Host {host} must fail"
+            );
+        }
+        assert!(
+            !origin_allowed(Some("http://tributary.local:4600"), None, &[]),
+            "absent Host must fail same-origin"
+        );
     }
 }

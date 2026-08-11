@@ -1,0 +1,106 @@
+# The apt repository on GitHub Pages, rebuilt statelessly on every stable
+# release from the .debs of ALL stable releases — no branch state to
+# corrupt or bloat. Rebuilds are idempotent by construction, so the manual
+# dispatch doubles as the repair/rehearsal tool. Users:
+#   deb [signed-by=/usr/share/keyrings/tributary.gpg]
+#     https://adajane.github.io/tributary/apt stable main
+# One-time setup this workflow needs: the APT_SIGNING_KEY secret (armored
+# private key, no passphrase) and its public half committed at
+# packaging/apt/tributary.asc; Pages set to "GitHub Actions" source.
+name: apt repo
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write # deploy-pages OIDC
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      # Every vX.Y.Z release; rc tags carry '-' and are excluded, so a
+      # rehearsal can never leak into the stable suite. Releases that
+      # predate deb packaging (v0.1.0 is tarball-only) are skipped, but an
+      # API failure or an empty pool still fails hard — the final glob is
+      # the gate against publishing an empty repo.
+      - name: Collect stable-release .debs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p _site/apt/pool/main/t/tributary
+          for tag in $(gh release list --limit 200 --json tagName -q '.[].tagName' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'); do
+            assets=$(gh release view "$tag" --json assets -q '.assets[].name')
+            if grep -q '\.deb$' <<<"$assets"; then
+              gh release download "$tag" -p '*.deb' -D _site/apt/pool/main/t/tributary/
+            else
+              echo "$tag: no .deb assets (predates deb packaging) — skipped"
+            fi
+          done
+          ls -l _site/apt/pool/main/t/tributary/*.deb
+      # apt-ftparchive is a pure generator (reprepro/aptly keep their own
+      # databases — state we deliberately don't want). Run from _site/apt
+      # so the Packages "Filename:" fields come out pool-relative.
+      - name: Generate dists
+        working-directory: _site/apt
+        run: |
+          for arch in amd64 arm64; do
+            mkdir -p "dists/stable/main/binary-$arch"
+            apt-ftparchive --arch "$arch" packages pool \
+              > "dists/stable/main/binary-$arch/Packages"
+            gzip -k9 "dists/stable/main/binary-$arch/Packages"
+          done
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=Tributary \
+            -o APT::FTPArchive::Release::Label=Tributary \
+            -o APT::FTPArchive::Release::Suite=stable \
+            -o APT::FTPArchive::Release::Codename=stable \
+            -o APT::FTPArchive::Release::Components=main \
+            -o "APT::FTPArchive::Release::Architectures=amd64 arm64" \
+            release dists/stable > dists/stable/Release
+      # InRelease for modern apt; Release.gpg costs nothing extra.
+      - name: Sign
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          echo "$APT_SIGNING_KEY" | gpg --batch --import
+          gpg --batch --yes --clearsign \
+            -o _site/apt/dists/stable/InRelease _site/apt/dists/stable/Release
+          gpg --batch --yes -abs \
+            -o _site/apt/dists/stable/Release.gpg _site/apt/dists/stable/Release
+      - run: cp packaging/apt/index.html packaging/apt/tributary.asc _site/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+  # A broken repo must never ship silently: install from the live Pages
+  # URL exactly as the README tells users to. The retry loop rides out
+  # Pages CDN propagation; the failure mode is still a hard fail.
+  verify:
+    needs: publish
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    steps:
+      - name: apt install from the published repo
+        run: |
+          apt-get update -qq >/dev/null && apt-get install -y -qq curl gnupg >/dev/null
+          curl -fsSL https://adajane.github.io/tributary/tributary.asc \
+            | gpg --dearmor -o /usr/share/keyrings/tributary.gpg
+          echo "deb [signed-by=/usr/share/keyrings/tributary.gpg] https://adajane.github.io/tributary/apt stable main" \
+            > /etc/apt/sources.list.d/tributary.list
+          for _ in 1 2 3 4 5; do
+            if apt-get update -qq && apt-get install -y -qq tributary; then break; fi
+            sleep 30
+          done
+          tribd openapi >/dev/null && echo apt-repo-OK

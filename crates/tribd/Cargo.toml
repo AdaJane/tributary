@@ -49,3 +49,83 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+# ---------------------------------------------------------------------------
+# Distribution metadata (cargo-deb / cargo-generate-rpm). Both tools read
+# the workspace-inherited version, so the "tag == workspace version" assert
+# in release.yml stays the single version gate.
+
+[package.metadata.deb]
+name = "tributary"
+maintainer = "Ada Jane <ada@somepanic.com>"
+copyright = "Tributary contributors"
+extended-description = """\
+Live multitrack recording and mixing console. The tribd daemon owns all
+realtime audio — patching, mixing, FX, recording, playback — and serves the
+browser console (embedded in the binary) plus a REST/WebSocket API at
+http://127.0.0.1:4600."""
+section = "sound"
+# Explicit and unversioned: $auto on the build runner would emit
+# libasound2t64, absent on Debian 12; unversioned libasound2 resolves
+# everywhere modern via the t64 package's versioned Provides.
+depends = "libasound2, adduser"
+# pactl/parec unlock the friendly-named patchbay sources on Pulse/PipeWire
+# desktops; without them the daemon falls back to raw ALSA devices.
+recommends = "pulseaudio-utils"
+# Local `cargo deb` builds embed the console; CI passes --no-build and
+# packages the leg's own --features embed-ui binary.
+features = ["embed-ui"]
+maintainer-scripts = "../../packaging/deb"
+conf-files = ["/etc/tributary/tribd.toml"]
+assets = [
+  ["target/release/tribd", "usr/bin/", "755"],
+  ["../../README.md", "usr/share/doc/tributary/", "644"],
+  ["../../THIRD-PARTY.md", "usr/share/doc/tributary/", "644"],
+  # The commented defaults, shipped verbatim — one source of truth.
+  ["../../config/tribd.toml", "etc/tributary/tribd.toml", "644"],
+]
+
+[package.metadata.deb.systemd-units]
+unit-name = "tribd"
+unit-scripts = "../../packaging/systemd"
+# Debian server convention: installed means running (loopback bind).
+enable = true
+start = true
+restart-after-upgrade = true
+
+[package.metadata.generate-rpm]
+name = "tributary"
+summary = "Live multitrack recording and mixing console (tribd daemon)"
+# Requires are declared by soname below — distro-neutral (alsa-lib on
+# Fedora, alsa on openSUSE); cargo-generate-rpm runs no auto-dep generator.
+auto-req = "disabled"
+assets = [
+  { source = "target/release/tribd", dest = "/usr/bin/tribd", mode = "755" },
+  { source = "packaging/systemd/tribd.service", dest = "/usr/lib/systemd/system/tribd.service", mode = "644" },
+  { source = "config/tribd.toml", dest = "/etc/tributary/tribd.toml", mode = "644", config = "noreplace" },
+  { source = "README.md", dest = "/usr/share/doc/tributary/README.md", mode = "644", doc = true },
+  { source = "THIRD-PARTY.md", dest = "/usr/share/doc/tributary/THIRD-PARTY.md", mode = "644", doc = true },
+]
+# Fedora/openSUSE convention: ship the unit preset-disabled; admins opt in
+# with `systemctl enable --now tribd` (the deb's enable+start would violate
+# least surprise on RPM distros).
+pre_install_script = """
+getent group tributary >/dev/null || groupadd -r tributary
+getent passwd tributary >/dev/null || \
+  useradd -r -g tributary -d /var/lib/tributary -s /sbin/nologin tributary
+"""
+post_install_script = """
+chown root:tributary /etc/tributary && chmod 0775 /etc/tributary
+systemctl daemon-reload >/dev/null 2>&1 || :
+[ "$1" -eq 1 ] && systemctl preset tribd.service >/dev/null 2>&1 || :
+"""
+pre_uninstall_script = """
+[ "$1" -eq 0 ] && systemctl --no-reload disable --now tribd.service >/dev/null 2>&1 || :
+"""
+post_uninstall_script = """
+systemctl daemon-reload >/dev/null 2>&1 || :
+[ "$1" -ge 1 ] && systemctl try-restart tribd.service >/dev/null 2>&1 || :
+"""
+
+[package.metadata.generate-rpm.requires]
+"libasound.so.2()(64bit)" = "*"
