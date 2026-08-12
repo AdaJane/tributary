@@ -78,11 +78,17 @@ jobs:
           gpg --batch --yes -abs \
             -o _site/apt/dists/stable/Release.gpg _site/apt/dists/stable/Release
       - run: cp packaging/apt/index.html packaging/apt/tributary.asc _site/
+      # Attempt-suffixed: artifacts outlive failed attempts within a run,
+      # and deploy-pages hard-fails if two share a name — a bare re-run of
+      # this job would always collide with its previous attempt.
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
+          name: github-pages-${{ github.run_attempt }}
       - id: deploy
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
 
   # A broken repo must never ship silently: install from the live Pages
   # URL exactly as the README tells users to. The retry loop rides out

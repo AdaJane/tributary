@@ -1,26 +1,346 @@
 <!doctype html>
+<html lang="en">
 <meta charset="utf-8">
-<title>Tributary apt repository</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tributary — live multitrack recording console</title>
+<meta name="description"
+  content="Tributary: a live multitrack recording console for Linux and Raspberry Pi. Signed apt repository, Pi appliance image, RPM, AppImage, Docker.">
+<meta name="theme-color" content="#0e0f11">
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"><rect width="256" height="256" rx="48" fill="%2316191d"/><g stroke="%233a4048" stroke-width="10" stroke-linecap="round"><line x1="76" y1="56" x2="76" y2="200"/><line x1="128" y1="56" x2="128" y2="200"/><line x1="180" y1="56" x2="180" y2="200"/></g><g fill="%23e9b83f"><rect x="58" y="128" width="36" height="22" rx="6"/><rect x="110" y="84" width="36" height="22" rx="6"/><rect x="162" y="150" width="36" height="22" rx="6"/></g></svg>'>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet"
+  href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;600&family=Barlow+Condensed:wght@600&family=JetBrains+Mono:wght@400;500&family=Permanent+Marker&display=swap">
 <style>
-  body { font: 16px/1.6 system-ui, sans-serif; max-width: 40rem;
-         margin: 4rem auto; padding: 0 1rem; color: #1a1d21; }
-  pre  { background: #f4f4f2; padding: 1rem; border-radius: 6px;
-         overflow-x: auto; }
-  @media (prefers-color-scheme: dark) {
-    body { background: #16191d; color: #e6e4df; }
-    pre  { background: #21262c; }
+  /* Values mirror web/src/design/tokens.css — the console's design tokens.
+     Spec: design-system/tributary/MASTER.md. Depth = etch lines + one inner
+     shadow; no bitmaps, no blur; dark-only. */
+  :root {
+    color-scheme: dark;
+    --gray-0: #0e0f11; --gray-1: #16181b; --gray-2: #1d2024;
+    --gray-4: #2d3238; --gray-5: #3a4047; --gray-6: #4d545c;
+    --gray-7: #78818b; --gray-8: #aab2bb; --gray-9: #d7dce1;
+    --print-white: #e9ecef;
+    --surface-inset: #131518;
+    --cap-blue-hi: #74a3e4; --cap-yellow: #e9b83f;
+    --led-green-on: #37e26b; --led-green-off: #17301f;
+    --led-amber-on: #ffb224;
+    --tape-cream: #e9ddc0; --tape-cream-edge: #d8c9a4; --ink: #26221e;
+    --font-ui: 'Barlow', system-ui, sans-serif;
+    --font-label: 'Barlow Condensed', 'Barlow', system-ui, sans-serif;
+    --font-tape: 'Permanent Marker', cursive;
+    --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+    --track-print: 0.08em;
+    --radius-2: 4px; --radius-3: 6px;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --etch-hi: rgb(255 255 255 / 6%); --etch-lo: rgb(0 0 0 / 45%);
+    --depth-raised: inset 0 1px 0 var(--etch-hi), inset 0 -1px 0 var(--etch-lo),
+      0 1px 2px rgb(0 0 0 / 50%);
+    --depth-inset: inset 0 1px 3px rgb(0 0 0 / 60%), 0 1px 0 var(--etch-hi);
+    --glow-green: 0 0 6px 1px rgb(55 226 107 / 55%);
+    --focus-ring: 0 0 0 2px var(--gray-2), 0 0 0 4px var(--led-amber-on);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--gray-0); color: var(--gray-8);
+    font: 400 16px/1.6 var(--font-ui);
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 46rem; margin: 0 auto; padding: 48px 20px 56px; }
+
+  a { color: var(--cap-blue-hi); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:hover { color: var(--print-white); }
+  :is(a, button):focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: 2px; }
+  strong, b { color: var(--gray-9); font-weight: 600; }
+  code, pre { font-variant-ligatures: none; } /* `>-` must never ligate in filenames */
+  code { font-family: var(--font-mono); font-size: 0.88em; color: var(--gray-9); }
+
+  /* ── Header ── */
+  header { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  .mark { flex: none; width: 64px; height: 64px; }
+  h1 {
+    margin: 0; font: 600 clamp(30px, 6vw, 38px)/1 var(--font-label);
+    letter-spacing: 0.16em; color: var(--print-white); text-transform: uppercase;
+  }
+  .tape {
+    display: inline-block; margin-top: 8px; padding: 4px 14px 5px;
+    background: var(--tape-cream); color: var(--ink);
+    border-left: 5px solid var(--tape-cream-edge);
+    border-right: 5px solid var(--tape-cream-edge);
+    font: 400 15px/1.5 var(--font-tape);
+    transform: rotate(-1deg);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 50%);
+  }
+  .lede { margin: 20px 0 0; color: var(--gray-8); }
+  nav { margin-top: 14px; display: flex; gap: 18px; flex-wrap: wrap; }
+  nav a {
+    font: 600 13px/1 var(--font-label); letter-spacing: var(--track-print);
+    text-transform: uppercase; text-decoration: none;
+    color: var(--gray-8); padding: 8px 0;
+  }
+  nav a:hover { color: var(--print-white); }
+
+  /* ── Panels ── */
+  section {
+    margin-top: 28px; padding: 20px 22px 22px;
+    background: var(--gray-2); border: 1px solid var(--gray-5);
+    border-radius: var(--radius-3); box-shadow: var(--depth-raised);
+  }
+  h2 {
+    display: flex; align-items: center; gap: 10px; margin: 0 0 10px;
+    font: 600 16px/1.2 var(--font-label); letter-spacing: var(--track-print);
+    text-transform: uppercase; color: var(--print-white);
+  }
+  .led {
+    flex: none; width: 8px; height: 8px; border-radius: 2px;
+    background: var(--led-green-on); box-shadow: var(--glow-green), var(--depth-inset);
+  }
+  .led.amber { background: var(--led-amber-on); box-shadow: 0 0 6px 1px rgb(255 178 36 / 55%), var(--depth-inset); }
+  .led.off { background: var(--led-green-off); box-shadow: var(--depth-inset); }
+  section p { margin: 0.55em 0; }
+  .dim { color: var(--gray-7); font-size: 14px; }
+
+  /* ── Command wells ── */
+  .cmd {
+    position: relative; margin: 14px 0;
+    background: var(--surface-inset); border-radius: var(--radius-2);
+    box-shadow: var(--depth-inset);
+  }
+  .cmd pre {
+    margin: 0; padding: 14px 16px; overflow-x: auto;
+    font: 400 13.5px/1.6 var(--font-mono); color: var(--gray-9);
+  }
+  .cmd .c { color: var(--gray-7); }
+  .copy {
+    position: absolute; top: 8px; right: 8px;
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 6px 11px; min-height: 30px; cursor: pointer;
+    background: var(--gray-4); color: var(--print-white);
+    border: 1px solid var(--gray-6); border-radius: var(--radius-2);
+    box-shadow: var(--depth-raised);
+    font: 600 12px/1 var(--font-label); letter-spacing: var(--track-print);
+    text-transform: uppercase;
+    transition: background 150ms var(--ease-out);
+  }
+  .copy:hover { background: var(--gray-5); }
+  .copy:active, .copy.done { transform: translateY(1px); box-shadow: var(--depth-inset); }
+  .copy .dot {
+    width: 6px; height: 6px; border-radius: 2px;
+    background: var(--led-green-off); box-shadow: var(--depth-inset);
+  }
+  .copy.done .dot { background: var(--led-green-on); box-shadow: var(--glow-green); }
+  @media (pointer: coarse) { .copy { min-height: 44px; padding: 10px 14px; } }
+  /* Narrow screens: code scrolls under a pinned button, so reserve a top
+     strip for it instead of letting it cover the first line. */
+  @media (max-width: 560px) { .cmd pre { padding-top: 50px; } }
+
+  /* ── Rows (tools, formats) ── */
+  .rows { list-style: none; margin: 12px 0 0; padding: 0; }
+  .rows li {
+    display: grid; grid-template-columns: 9.5rem 1fr; gap: 2px 16px;
+    padding: 10px 0; border-top: 1px solid var(--gray-5); align-items: baseline;
+  }
+  .rows li:last-child { padding-bottom: 2px; }
+  .rows .name {
+    font: 600 13px/1.6 var(--font-label); letter-spacing: var(--track-print);
+    text-transform: uppercase; color: var(--gray-9);
+  }
+  .rows .name a { color: var(--cap-blue-hi); text-decoration: none; }
+  .rows .name a:hover { color: var(--print-white); text-decoration: underline; }
+  @media (max-width: 560px) { .rows li { grid-template-columns: 1fr; } }
+
+  ol.steps { margin: 12px 0 0; padding-left: 0; list-style: none; counter-reset: step; }
+  ol.steps > li { counter-increment: step; position: relative; padding: 0 0 12px 38px; }
+  ol.steps > li::before {
+    content: counter(step); position: absolute; left: 0; top: 2px;
+    width: 24px; height: 24px; display: grid; place-items: center;
+    background: var(--gray-4); border: 1px solid var(--gray-6);
+    border-radius: var(--radius-2); box-shadow: var(--depth-raised);
+    font: 500 12.5px/1 var(--font-mono); color: var(--print-white);
+  }
+
+  footer { margin-top: 36px; color: var(--gray-7); font-size: 14px; }
+  footer a { color: var(--gray-8); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
   }
 </style>
-<h1>Tributary apt repository</h1>
-<p>Signed packages for <a href="https://github.com/AdaJane/tributary">Tributary</a>,
-the live multitrack recording console. Debian 12+/Ubuntu 22.04+, amd64 and arm64:</p>
+<body>
+<div class="wrap">
+
+  <header>
+    <svg class="mark" viewBox="0 0 256 256" role="img" aria-label="Tributary mark: three console faders">
+      <rect width="256" height="256" rx="48" fill="var(--gray-1)"/>
+      <g stroke="var(--gray-5)" stroke-width="10" stroke-linecap="round">
+        <line x1="76" y1="56" x2="76" y2="200"/>
+        <line x1="128" y1="56" x2="128" y2="200"/>
+        <line x1="180" y1="56" x2="180" y2="200"/>
+      </g>
+      <g fill="var(--cap-yellow)">
+        <rect x="58" y="128" width="36" height="22" rx="6"/>
+        <rect x="110" y="84" width="36" height="22" rx="6"/>
+        <rect x="162" y="150" width="36" height="22" rx="6"/>
+      </g>
+    </svg>
+    <div>
+      <h1>Tributary</h1>
+      <span class="tape">live multitrack recording console</span>
+    </div>
+  </header>
+
+  <p class="lede">
+    A single <code>tribd</code> daemon records every channel while you mix live in a
+    hardware-style web console. Linux, amd64 + arm64, MIT licensed.
+  </p>
+  <nav aria-label="Project links">
+    <a href="https://github.com/AdaJane/tributary">Source</a>
+    <a href="https://github.com/AdaJane/tributary/releases">Releases</a>
+    <a href="https://github.com/AdaJane/tributary#readme">Docs</a>
+    <a href="https://github.com/AdaJane/tributary/issues">Issues</a>
+  </nav>
+
+  <section aria-labelledby="apt-h">
+    <h2 id="apt-h"><span class="led" aria-hidden="true"></span>Apt repository</h2>
+    <p>
+      This site is a signed apt repository — add it once and upgrades arrive with
+      <code>apt upgrade</code>. Debian 12+ / Ubuntu 22.04+, amd64 and arm64:
+    </p>
+    <div class="cmd">
 <pre>curl -fsSL https://adajane.github.io/tributary/tributary.asc \
   | sudo gpg --dearmor -o /usr/share/keyrings/tributary.gpg
 echo "deb [signed-by=/usr/share/keyrings/tributary.gpg] \
   https://adajane.github.io/tributary/apt stable main" \
   | sudo tee /etc/apt/sources.list.d/tributary.list
 sudo apt update &amp;&amp; sudo apt install tributary</pre>
-<p>Installs the <code>tribd</code> system service (enabled + started,
-loopback only) — open <a href="http://127.0.0.1:4600">http://127.0.0.1:4600</a>.
-Other formats (.rpm, AppImage, Raspberry&nbsp;Pi image, Docker) live on the
-<a href="https://github.com/AdaJane/tributary/releases">releases page</a>.</p>
+    </div>
+    <p>
+      Installs the <code>tribd</code> system service, enabled and started on loopback —
+      open <a href="http://127.0.0.1:4600">http://127.0.0.1:4600</a>.
+      Repository signing key: <a href="tributary.asc">tributary.asc</a>.
+    </p>
+  </section>
+
+  <section aria-labelledby="pi-h">
+    <h2 id="pi-h"><span class="led amber" aria-hidden="true"></span>Raspberry Pi appliance</h2>
+    <p>
+      Stock Raspberry Pi OS Lite (arm64) with Tributary and PipeWire preinstalled —
+      flash a card, boot a Pi&nbsp;3/4/5/Zero&nbsp;2&nbsp;W, and the console is live on your LAN
+      at <strong>http://tributary.local:4600</strong>.
+    </p>
+    <ol class="steps">
+      <li>
+        Download the latest <code>tributary-&lt;version&gt;-pi.img.xz</code> from the
+        <a href="https://github.com/AdaJane/tributary/releases/latest">releases page</a>.
+      </li>
+      <li>
+        Flash it to an SD card (8&nbsp;GB or larger) with one of the tools below —
+        all of them take the <code>.img.xz</code> as-is, no unpacking needed.
+      </li>
+      <li>
+        Boot. First boot expands the card and starts the console; recordings land in
+        <code>/home/tributary/projects</code>.
+      </li>
+    </ol>
+    <ul class="rows">
+      <li>
+        <span class="name"><a href="https://www.raspberrypi.com/software/">Raspberry Pi Imager</a></span>
+        <span>Recommended — Windows, macOS, Ubuntu. Pick the image via “Use custom”.
+        For the hostname / Wi-Fi / user dialog, launch it as
+        <code>rpi-imager --repo &lt;URL&nbsp;of&nbsp;the&nbsp;release’s&nbsp;…-pi-imager.json&gt;</code>.</span>
+      </li>
+      <li>
+        <span class="name"><a href="https://etcher.balena.io/">balenaEtcher</a></span>
+        <span>Cross-platform GUI flasher: select image, select card, flash.</span>
+      </li>
+      <li>
+        <span class="name">Command line</span>
+        <span>Nothing to install on most Linux systems:</span>
+      </li>
+    </ul>
+    <div class="cmd">
+<pre>xz -dc tributary-*-pi.img.xz \
+  | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress  <span class="c"># sdX = your card</span></pre>
+    </div>
+    <p class="dim">
+      The appliance trusts its LAN — read
+      <a href="https://github.com/AdaJane/tributary#security">Security</a> before
+      putting it on a network you don’t own.
+    </p>
+  </section>
+
+  <section aria-labelledby="fmt-h">
+    <h2 id="fmt-h"><span class="led off" aria-hidden="true"></span>Other formats</h2>
+    <p>
+      Everything below is on the
+      <a href="https://github.com/AdaJane/tributary/releases/latest">releases page</a>
+      unless noted; full instructions live in the
+      <a href="https://github.com/AdaJane/tributary#install">README</a>.
+    </p>
+    <ul class="rows">
+      <li>
+        <span class="name">.deb (one-off)</span>
+        <span><code>sudo apt install ./tributary_*.deb</code> — same package, no repository.</span>
+      </li>
+      <li>
+        <span class="name">.rpm</span>
+        <span>Fedora / openSUSE: <code>sudo dnf install ./tributary-*.rpm</code>, then
+        <code>sudo systemctl enable --now tribd</code> (ships preset-disabled).</span>
+      </li>
+      <li>
+        <span class="name">AppImage</span>
+        <span>Single file, any distro — only needs ALSA (<code>libasound2</code>).</span>
+      </li>
+      <li>
+        <span class="name">Tarball</span>
+        <span>Bare <code>tribd</code> binary with license and docs.</span>
+      </li>
+      <li>
+        <span class="name"><a href="https://github.com/AdaJane/tributary/pkgs/container/tributary">Docker</a></span>
+        <span><code>docker pull ghcr.io/adajane/tributary:latest</code> — multi-arch, on GHCR.</span>
+      </li>
+    </ul>
+  </section>
+
+  <section aria-labelledby="verify-h">
+    <h2 id="verify-h"><span class="led off" aria-hidden="true"></span>Verify a download</h2>
+    <p>
+      Every release asset carries GitHub build provenance. With the
+      <a href="https://cli.github.com/">GitHub CLI</a>:
+    </p>
+    <div class="cmd">
+<pre>gh attestation verify &lt;file&gt; --repo AdaJane/tributary</pre>
+    </div>
+  </section>
+
+  <footer>
+    MIT licensed · Built and signed by
+    <a href="https://github.com/AdaJane/tributary/actions">GitHub Actions</a> ·
+    © Ada Jane
+  </footer>
+
+</div>
+<script>
+  // Copy buttons are added here so a no-JS page simply has none.
+  for (const cmd of document.querySelectorAll('.cmd')) {
+    const btn = document.createElement('button');
+    btn.className = 'copy';
+    btn.innerHTML = '<span class="dot" aria-hidden="true"></span><span class="label">Copy</span>';
+    btn.setAttribute('aria-label', 'Copy command to clipboard');
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(cmd.querySelector('pre').textContent.trim());
+      } catch { return; }
+      btn.classList.add('done');
+      btn.querySelector('.label').textContent = 'Copied';
+      clearTimeout(btn._t);
+      btn._t = setTimeout(() => {
+        btn.classList.remove('done');
+        btn.querySelector('.label').textContent = 'Copy';
+      }, 1800);
+    });
+    cmd.append(btn);
+  }
+</script>
+</body>
+</html>
