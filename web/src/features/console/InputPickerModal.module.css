@@ -90,6 +90,12 @@
   color: var(--text-dim);
 }
 
+.deviceError {
+  margin: 0 0 var(--s2);
+  font-size: var(--text-sm);
+  color: var(--led-red-on);
+}
+
 .jacks {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

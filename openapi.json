@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.1.0"
+    "version": "1.0.1"
   },
   "paths": {
     "/api/v1/destinations": {
@@ -843,6 +843,13 @@
             "format": "int32",
             "description": "0 = unknown (an absent device was never enumerated this boot).",
             "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why capture isn't running, when the failure happened at open time\n(post-open stream deaths land in the journal only)."
           },
           "label": {
             "type": [

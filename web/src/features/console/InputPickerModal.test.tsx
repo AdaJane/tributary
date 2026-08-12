@@ -95,6 +95,38 @@ describe('InputPickerModal', () => {
     expect(screen.getAllByRole('option')).toHaveLength(4);
   });
 
+  it('a failed section explains why', () => {
+    useDevices.setState({
+      devices: [
+        {
+          name: 'alsa_input.usb-UMC1820.multichannel-input',
+          label: 'UMC1820 Multichannel',
+          channels: 10,
+          active: true,
+          status: 'failed',
+          patched: true,
+          underruns: 0,
+          error: 'audio backend not running',
+          reconciled_from: null,
+        },
+      ],
+      loaded: true,
+    });
+    render(
+      <InputPickerModal
+        strip={snare}
+        strips={console_}
+        open
+        onClose={() => {}}
+        onPatch={() => {}}
+      />,
+    );
+    // The default box and the source's own box both explain the failure.
+    const alerts = screen.getAllByRole('alert');
+    expect(alerts).toHaveLength(2);
+    expect(alerts[0]).toHaveTextContent('audio backend not running');
+  });
+
   it('patching hands back the device-qualified jack', async () => {
     const user = userEvent.setup();
     const onPatch = vi.fn();

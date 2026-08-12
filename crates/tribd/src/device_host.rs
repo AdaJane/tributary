@@ -49,6 +49,9 @@ pub struct DeviceReport {
     /// Some strip references it (directly, via the default, or via an alias).
     pub patched: bool,
     pub underruns: u64,
+    /// Why capture isn't running, when the failure happened at open time
+    /// (post-open stream deaths land in the journal only).
+    pub error: Option<String>,
     /// The stored project name this device was matched from, when name
     /// reconciliation adopted it under a changed name.
     pub reconciled_from: Option<String>,
@@ -249,6 +252,7 @@ impl Orchestrator {
             let offset = match self.slots.allocate(stored.as_deref(), found.channels) {
                 Ok(offset) => offset,
                 Err(e) => {
+                    tracing::warn!(device = ?stored, error = ?e, "input slot allocation failed");
                     self.open_errors.insert(stored.clone(), format!("{e:?}"));
                     continue;
                 }
@@ -377,12 +381,11 @@ impl Orchestrator {
                 let patched = self.wanted.contains(&Some(device.name.clone()))
                     || (device.active && self.wanted.contains(&None))
                     || alias_targets.contains_key(device.name.as_str());
+                let open_error = self.wanted_error_for(&device.name, device.active);
                 let status = match (stored, status_entry) {
                     (Some(_), Some(s)) if s.failed => DeviceStatus::Failed,
                     (Some(_), _) => DeviceStatus::Open,
-                    (None, _) if patched && self.wanted_error_for(&device.name, device.active) => {
-                        DeviceStatus::Failed
-                    }
+                    (None, _) if patched && open_error.is_some() => DeviceStatus::Failed,
                     (None, _) => DeviceStatus::Available,
                 };
                 DeviceReport {
@@ -393,6 +396,10 @@ impl Orchestrator {
                     status,
                     patched,
                     underruns: status_entry.map_or(0, |s| s.underruns),
+                    error: match status {
+                        DeviceStatus::Failed => open_error.map(str::to_owned),
+                        _ => None,
+                    },
                     reconciled_from: alias_targets
                         .get(device.name.as_str())
                         .map(|s| (*s).to_owned()),
@@ -425,6 +432,7 @@ impl Orchestrator {
                 },
                 patched: true,
                 underruns: status_entry.map_or(0, |s| s.underruns),
+                error: None,
                 reconciled_from: stored.as_ref().filter(|s| *s != resolved).cloned(),
             });
         }
@@ -445,6 +453,7 @@ impl Orchestrator {
                     status: DeviceStatus::Absent,
                     patched: true,
                     underruns: 0,
+                    error: None,
                     reconciled_from: None,
                 });
             }
@@ -452,11 +461,17 @@ impl Orchestrator {
         rows
     }
 
-    fn wanted_error_for(&self, name: &str, active: bool) -> bool {
+    /// The recorded open-failure reason feeding this device row, if any:
+    /// keyed by its stored name, or — for the active device — the default.
+    fn wanted_error_for(&self, name: &str, active: bool) -> Option<&str> {
         self.open_errors
-            .keys()
-            .any(|stored| stored.as_deref() == Some(name))
-            || (active && self.open_errors.contains_key(&None))
+            .iter()
+            .find_map(|(stored, e)| (stored.as_deref() == Some(name)).then_some(e.as_str()))
+            .or_else(|| {
+                active
+                    .then(|| self.open_errors.get(&None).map(String::as_str))
+                    .flatten()
+            })
     }
 }
 
@@ -690,5 +705,36 @@ mod tests {
             row.reconciled_from.as_deref(),
             Some("ThinkPad Thunderbolt 4 Dock USB")
         );
+    }
+
+    #[test]
+    fn a_failed_open_reports_its_reason() {
+        let mut rig = rig(vec![dev("default", 2, true), dev("flaky", 2, false)]);
+        rig.calls.fail.lock().unwrap().push(Some("flaky".into()));
+        reconcile(&mut rig, &[Some("flaky")], false);
+        let report = rig
+            .orchestrator
+            .report(&rig.orchestrator.backend.input_devices());
+        let flaky = report.iter().find(|r| r.name == "flaky").unwrap();
+        assert_eq!(flaky.status, DeviceStatus::Failed);
+        assert_eq!(
+            flaky.error.as_deref(),
+            Some("no usable device: scripted failure")
+        );
+    }
+
+    #[test]
+    fn without_a_running_backend_the_report_says_so() {
+        let backend = Arc::new(TestBackend {
+            devices: Mutex::new(vec![dev("usb", 2, true)]),
+        });
+        let mut orchestrator = Orchestrator::new(backend.clone(), None, Box::new(|_| {}));
+        orchestrator.wanted = [Some("usb".to_owned())].into_iter().collect();
+        let present = backend.input_devices();
+        orchestrator.reconcile(&present, true);
+        let report = orchestrator.report(&present);
+        let row = report.iter().find(|r| r.name == "usb").unwrap();
+        assert_eq!(row.status, DeviceStatus::Failed);
+        assert_eq!(row.error.as_deref(), Some("audio backend not running"));
     }
 }

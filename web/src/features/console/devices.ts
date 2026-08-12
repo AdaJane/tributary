@@ -22,6 +22,8 @@ export interface PatchbaySection {
    * past the device (a dead patch must stay visible). */
   jackCount: number;
   status: SectionStatus;
+  /** The daemon's open-failure reason, when it knows one. */
+  error: string | null;
   /** The stored project name this device was matched from (renamed
    * hardware adopted by reconciliation). */
   reconciledFrom: string | null;
@@ -78,6 +80,7 @@ export function groupPatchbay(
       channels: defaultChannels,
       jackCount: Math.max(defaultChannels, patchedMax(strips, null) + 1),
       status: active ? (active.status as SectionStatus) : 'absent',
+      error: active?.error ?? null,
       reconciledFrom: null,
     },
   ];
@@ -90,6 +93,7 @@ export function groupPatchbay(
       channels: device.channels,
       jackCount: Math.max(device.channels, patchedMax(strips, device.name) + 1),
       status: device.status as SectionStatus,
+      error: device.error ?? null,
       reconciledFrom: device.reconciled_from ?? null,
     });
   }

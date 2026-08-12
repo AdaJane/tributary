@@ -4,7 +4,9 @@
 //! on command. The engine is clocked by its OWN timer thread — never by a
 //! device callback — rendering into a ring the output callback drains, so
 //! a stalling output device (Bluetooth renegotiation, route changes) costs
-//! monitor audio only, never metering or a take. Each input feeds its own
+//! monitor audio only, never metering or a take. A boot without any usable
+//! output is tolerated the same way: the stream thread starts regardless
+//! and keeps rebuilding on the current default. Each input feeds its own
 //! ring; the engine thread's assembler merges them into the fixed
 //! `MAX_INPUT_CHANNELS` engine frame. Devices open at the engine rate —
 //! PipeWire/ALSA adapt or the open fails and the jacks read silence.
@@ -130,6 +132,13 @@ impl AudioBackend for CpalBackend {
                 })
                 .collect();
         }
+        // Once per boot: on a PipeWire appliance this fallback is a broken
+        // state worth one loud line; repeating it per enumeration is noise.
+        static PULSE_FELL_BACK: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !PULSE_FELL_BACK.swap(true, Ordering::Relaxed) {
+            tracing::warn!("no Pulse/PipeWire server answered; enumerating raw ALSA devices");
+        }
         let host = cpal::default_host();
         let default_name = host.default_input_device().and_then(|d| d.name().ok());
         let Ok(devices) = host.input_devices() else {
@@ -222,17 +231,8 @@ fn stream_thread(
     // and pours silence rather than ever waiting.
     let out_rx = Arc::new(Mutex::new(out_rx));
     let beat = Arc::new(AtomicU64::new(0));
-    let mut output_stream = match build_output(&config, drain_closure(&out_rx, &beat)) {
-        Ok(stream) => {
-            let _ = setup_tx.send(Ok(()));
-            Some(stream)
-        }
-        Err(e) => {
-            let _ = setup_tx.send(Err(e));
-            return;
-        }
-    };
 
+    // The engine clock IS the backend; setup fails only if it can't run.
     let engine_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let engine_thread = {
         let stop = engine_stop.clone();
@@ -243,8 +243,24 @@ fn stream_thread(
     let engine_thread = match engine_thread {
         Ok(handle) => handle,
         Err(e) => {
-            tracing::error!(%e, "engine clock thread failed to spawn");
+            let _ = setup_tx.send(Err(AudioError::Stream(format!("engine clock: {e}"))));
             return;
+        }
+    };
+    let _ = setup_tx.send(Ok(()));
+
+    // The monitor output is best-effort: without a usable sink, inputs,
+    // meters, and recording still run; the rebuild loop below keeps
+    // trying the current default.
+    let mut output_stream = match build_output(&config, &out_rx, &beat) {
+        Ok(stream) => Some(stream),
+        Err(e) => {
+            tracing::error!(
+                %e,
+                "no usable monitor output — starting WITHOUT monitor audio; \
+                 inputs, metering and recording run; retrying on the default sink"
+            );
+            None
         }
     };
 
@@ -257,10 +273,15 @@ fn stream_thread(
         match watch.observe(beat.load(Ordering::Relaxed), now) {
             Some(Transition::Stalled) => {
                 stalled_since = Some(now);
-                tracing::warn!(
-                    "monitor output stalled (routing change?) — engine unaffected, \
-                     meters and recording continue; monitor audio is out until it resumes"
-                );
+                if output_stream.is_some() {
+                    tracing::warn!(
+                        "monitor output stalled (routing change?) — engine unaffected, \
+                         meters and recording continue; monitor audio is out until it resumes"
+                    );
+                } else {
+                    // Never built: the boot error already said so loudly.
+                    tracing::debug!("still no monitor output; rebuild pending");
+                }
             }
             Some(Transition::Resumed(outage)) => {
                 stalled_since = None;
@@ -268,9 +289,10 @@ fn stream_thread(
             }
             None => {}
         }
-        // A stream that stays wedged (its device vanished mid-stream) never
-        // resumes by itself; rebuild on the current default, retrying every
-        // window until one sticks. The command loop's cadence is untouched.
+        // A stream that stays wedged (its device vanished mid-stream) — or
+        // was never built at boot — never resumes by itself; rebuild on the
+        // current default, retrying every window until one sticks. The
+        // command loop's cadence is untouched.
         if stalled_since.is_some_and(|since| now.duration_since(since) >= REBUILD_AFTER) {
             drop(output_stream.take());
             // The stall left the ring full of stale audio; drop all but the
@@ -280,12 +302,14 @@ fn stream_thread(
                     let _ = rx.pop();
                 }
             }
-            match build_output(&config, drain_closure(&out_rx, &beat)) {
+            match build_output(&config, &out_rx, &beat) {
                 Ok(stream) => {
                     output_stream = Some(stream);
                     tracing::info!("monitor output rebuilt on the current default device");
                 }
-                Err(e) => tracing::warn!(%e, "monitor output rebuild failed; will retry"),
+                // The stall/boot failure was already announced; retries are
+                // routine until a sink appears.
+                Err(e) => tracing::debug!(%e, "monitor output rebuild failed; will retry"),
             }
             stalled_since = Some(Instant::now());
         }
@@ -530,27 +554,37 @@ fn attach(
     Ok(())
 }
 
-/// Build and start the output stream — the engine's clock. The callback
-/// owns the engine and the assembler via `render`.
+/// Build and start the output stream — the monitor sink. Its callback only
+/// drains the engine's ring (`drain_closure`). Fixed block first (lowest
+/// jitter); devices that refuse it get the default cadence, which the
+/// prefill absorbs.
 fn build_output(
     config: &StreamConfig,
-    mut render: impl FnMut(&mut [f32]) + Send + 'static,
+    out_rx: &Arc<Mutex<rtrb::Consumer<f32>>>,
+    beat: &Arc<AtomicU64>,
 ) -> Result<cpal::Stream, AudioError> {
     let host = cpal::default_host();
     let output_device = host
         .default_output_device()
         .ok_or_else(|| AudioError::Device("no default output device".into()))?;
-    let stream = output_device
-        .build_output_stream(
+    let try_build = |buffer_size: cpal::BufferSize| {
+        let mut render = drain_closure(out_rx, beat);
+        output_device.build_output_stream(
             &cpal::StreamConfig {
                 channels: 2,
                 sample_rate: cpal::SampleRate(config.sample_rate),
-                buffer_size: cpal::BufferSize::Fixed(config.block_size as u32),
+                buffer_size,
             },
             move |data: &mut [f32], _| render(data),
             |e| tracing::error!(%e, "output stream error"),
             None,
         )
+    };
+    let stream = try_build(cpal::BufferSize::Fixed(config.block_size as u32))
+        .or_else(|fixed_err| {
+            tracing::debug!(%fixed_err, "fixed buffer size refused; retrying with the device default");
+            try_build(cpal::BufferSize::Default)
+        })
         .map_err(|e| AudioError::Stream(format!("output: {e}")))?;
     stream
         .play()

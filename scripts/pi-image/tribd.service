@@ -15,6 +15,9 @@ After=pipewire-pulse.socket
 # writable.
 WorkingDirectory=%h
 ExecStart=/usr/local/bin/tribd --config %h/config/tribd.toml
+# tribd traps SIGINT only; the default SIGTERM would skip graceful take
+# finalization on appliance shutdown (parity with packaging/systemd).
+KillSignal=SIGINT
 Restart=on-failure
 RestartSec=2
 

@@ -85,6 +85,11 @@ export function InputPickerModal({
               {STATUS_LABEL[section.status]}
             </span>
           </p>
+          {section.status === 'failed' && section.error && (
+            <p className={styles.deviceError} role="alert">
+              {section.error}
+            </p>
+          )}
           <div
             className={styles.jacks}
             role="listbox"

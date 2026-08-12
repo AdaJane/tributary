@@ -1,7 +1,9 @@
-//! Output-stall detection. The engine is clocked by the output callback;
-//! a routing change (e.g. a Bluetooth sink negotiating) can silently stop
-//! callbacks without an error — freezing meters, recording, and monitor.
-//! The stream thread feeds beats into this pure core and logs transitions.
+//! Output-stall detection. A routing change (e.g. a Bluetooth sink
+//! renegotiating) can silently stop output callbacks without an error —
+//! costing monitor audio only (the engine clocks itself on its own
+//! thread). The stream thread feeds beats into this pure core, logs the
+//! transitions, and uses the stalled state to gate rebuilds. A stream
+//! that never beat — none was built at boot — reads as stalled by design.
 
 use std::time::{Duration, Instant};
 
@@ -77,6 +79,33 @@ mod tests {
         assert_eq!(watch.observe(1, t(start, 1.0)), None, "under threshold");
         assert_eq!(watch.observe(1, t(start, 2.2)), Some(Transition::Stalled));
         assert_eq!(watch.observe(1, t(start, 3.0)), None, "no repeat");
+    }
+
+    #[test]
+    fn a_stream_that_never_beats_reports_stalled() {
+        // Pins never-built ≡ wedged: `new` starts at beat 0, so a stream
+        // that was never created stalls without ever advancing.
+        let start = Instant::now();
+        let mut watch = StallWatch::new(start);
+        assert_eq!(watch.observe(0, t(start, 0.1)), None, "under threshold");
+        assert_eq!(watch.observe(0, t(start, 2.2)), Some(Transition::Stalled));
+        assert_eq!(watch.observe(0, t(start, 60.0)), None, "no repeat");
+    }
+
+    #[test]
+    fn the_first_beat_ever_after_a_boot_stall_resumes_with_the_full_outage() {
+        let start = Instant::now();
+        let mut watch = StallWatch::new(start);
+        assert_eq!(watch.observe(0, t(start, 2.5)), Some(Transition::Stalled));
+        let resumed = watch.observe(1, t(start, 30.0));
+        let Some(Transition::Resumed(outage)) = resumed else {
+            panic!("expected resume, got {resumed:?}");
+        };
+        let secs = outage.as_secs_f32();
+        assert!(
+            (29.9..=30.1).contains(&secs),
+            "outage spans back to thread start, got {secs}"
+        );
     }
 
     #[test]

@@ -29,10 +29,12 @@ readonly BASE_URL="https://downloads.raspberrypi.com/raspios_lite_arm64/images/r
 readonly BASE_SHA256="acff736ca7945e3b305f07cda4abdb870910e12634991da69783611756e381b3"
 
 # The appliance identity and audio stack. dbus-user-session is named
-# explicitly so wireplumber's user D-Bus is never in doubt; recommends stay
-# ON so rtkit and the pipewire-audio bits arrive exactly as on a desktop
-# install — the configuration tribd is tested against.
-readonly PACKAGES="pipewire pipewire-pulse wireplumber pulseaudio-utils dbus-user-session"
+# explicitly so wireplumber's user D-Bus is never in doubt; pipewire-alsa
+# too, because nothing else pulls it in (pipewire-audio is a Depends-only
+# metapackage) and without it ALSA's `default` bypasses PipeWire — cpal
+# would open raw hardware wireplumber already owns and tribd would boot
+# with no usable monitor output. Recommends stay ON so rtkit arrives.
+readonly PACKAGES="pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-utils dbus-user-session"
 readonly TRIB_USER="tributary"
 readonly TRIB_HOSTNAME="tributary"
 readonly GROW_MIB=768 # deterministic apt headroom; zeros are ~free under xz
@@ -229,9 +231,22 @@ v test -d "$ROOT/home/$TRIB_USER/projects"
 for unit in pipewire.socket pipewire-pulse.socket wireplumber.service; do
     user_enabled "$unit" || fail "verify: $unit not user-enabled"
 done
-for pkg in pipewire pipewire-pulse wireplumber pulseaudio-utils avahi-daemon; do
-    v grep -q "^Package: $pkg$" "$ROOT/var/lib/dpkg/status"
+for pkg in pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-utils avahi-daemon; do
+    # Status is always the line after Package; a bare Package: stanza also
+    # matches half-removed states, so assert the installed one.
+    grep -A1 "^Package: $pkg$" "$ROOT/var/lib/dpkg/status" \
+        | grep -q '^Status: install ok installed' || fail "verify: $pkg not installed"
 done
+# The capture stack tribd shells out to, and the ALSA→PipeWire routing that
+# keeps cpal's monitor output off raw hardware. parec is a pacat symlink;
+# conf.d entries symlink absolutely, so assert link + shipped target.
+v test -x "$ROOT/usr/bin/pactl"
+v test -x "$ROOT/usr/bin/pacat"
+v test -e "$ROOT/usr/bin/parec"
+[ -e "$ROOT/etc/alsa/conf.d/99-pipewire-default.conf" ] \
+    || [ -L "$ROOT/etc/alsa/conf.d/99-pipewire-default.conf" ] \
+    || fail "verify: ALSA default not routed to PipeWire"
+v test -f "$ROOT/usr/share/alsa/alsa.conf.d/99-pipewire-default.conf"
 [ "$(readlink "$ROOT/etc/systemd/system/userconfig.service")" = /dev/null ] \
     || fail "verify: userconfig.service not masked — first boot would prompt for a username"
 v test -L "$ROOT/etc/systemd/system/getty.target.wants/getty@tty1.service"

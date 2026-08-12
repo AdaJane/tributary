@@ -436,6 +436,11 @@ export interface components {
              */
             channels: number;
             /**
+             * @description Why capture isn't running, when the failure happened at open time
+             *     (post-open stream deaths land in the journal only).
+             */
+            error?: string | null;
+            /**
              * @description The friendly print the system sound menu shows, when the source
              *     layer provides one.
              */

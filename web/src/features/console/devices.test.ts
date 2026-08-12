@@ -45,6 +45,26 @@ describe('groupPatchbay', () => {
     expect(sections[0].channels).toBe(2);
   });
 
+  it('carries the open-failure reason onto every section the device feeds', () => {
+    const sections = groupPatchbay(
+      [
+        dev('alsa_input.usb-UMC1820.multichannel-input', {
+          label: 'UMC1820 Multichannel',
+          active: true,
+          status: 'failed',
+          patched: true,
+          error: 'audio backend not running',
+        }),
+      ],
+      [],
+    );
+    // The default box follows the same failed source: both explain why.
+    expect(sections.map((s) => [s.letter, s.status, s.error])).toEqual([
+      ['A', 'failed', 'audio backend not running'],
+      ['B', 'failed', 'audio backend not running'],
+    ]);
+  });
+
   it('an absent project device still forms a section with its dead patches', () => {
     const sections = groupPatchbay(
       [
