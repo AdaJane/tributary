@@ -13,8 +13,9 @@ import {
 import { GestureThrottle, SEND_WINDOW_MS } from '../state/throttle';
 import { wsClient } from './client-instance';
 import type { MixCommand, StateDelta, WsAck } from './messages';
+import { uuidv4 } from './uuid';
 
-export const CLIENT_ID: string = crypto.randomUUID();
+export const CLIENT_ID: string = uuidv4();
 
 let seq = 0;
 let hot: HotState = EMPTY_HOT;

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Remaster the official Raspberry Pi OS Lite arm64 image into the Tributary
 # appliance image: PipeWire audio stack, a lingering `tributary` service
-# user running tribd (LAN-open), hostname `tributary`. The base stays
-# byte-identical everywhere else, so stock behavior — first-boot rootfs
-# expansion, Raspberry Pi Imager / cloud-init customization, avahi mDNS —
-# is preserved by construction: cmdline.txt, the initramfs, and the boot
-# partition's cloud-init files are never touched (and verify() proves it).
+# user running tribd (LAN-open), hostname `tributary`, and the first-boot
+# username wizard masked so a plain flash boots straight to serving. The
+# base stays byte-identical everywhere else, so stock behavior — first-boot
+# rootfs expansion, Raspberry Pi Imager / cloud-init customization, avahi
+# mDNS — is preserved by construction: cmdline.txt, the initramfs, and the
+# boot partition's cloud-init files are never touched (and verify() proves
+# it).
 #
 # Usage: sudo scripts/pi-image/build.sh <aarch64-tribd> <out.img.xz> [--no-compress]
 #   --no-compress  emit the raw .img and skip the xz + Imager JSON (iteration)
@@ -164,6 +166,25 @@ ensure_user_enabled pipewire.socket sockets.target
 ensure_user_enabled pipewire-pulse.socket sockets.target
 ensure_user_enabled wireplumber.service default.target
 
+echo "==> first-boot wizard preempted"
+# On a plain flash, userconf-pi's userconfig.service squats on the console
+# asking for a username — an appliance must boot straight to serving. Mask
+# it: what `systemctl mask userconfig` creates, made by hand. Masking (not
+# disabling) is how Raspberry Pi Imager's own cloud-init path defeats the
+# already-queued wizard job, so a masked unit is exactly the state that
+# path converges to; Imager customization still creates its user first.
+ln -sf /dev/null "$ROOT/etc/systemd/system/userconfig.service"
+# The base ships getty@tty1 disabled so the wizard can own the console;
+# cancel-rename would re-enable it after user setup. Recreate that enable
+# by hand or the console stays blank forever.
+install -d "$ROOT/etc/systemd/system/getty.target.wants"
+ln -sf /usr/lib/systemd/system/getty@.service \
+    "$ROOT/etc/systemd/system/getty.target.wants/getty@tty1.service"
+# The stock `pi` user stays exactly as shipped: locked, nologin, UID 1000.
+# No login account exists on a plain flash (console/SSH access = reflash
+# with Imager customization), and Imager's user setup renames whatever
+# user holds UID 1000 — deleting or altering pi would break it.
+
 echo "==> hostname $TRIB_HOSTNAME"
 echo "$TRIB_HOSTNAME" > "$ROOT/etc/hostname"
 if grep -q raspberrypi "$ROOT/etc/hosts"; then
@@ -211,6 +232,13 @@ done
 for pkg in pipewire pipewire-pulse wireplumber pulseaudio-utils avahi-daemon; do
     v grep -q "^Package: $pkg$" "$ROOT/var/lib/dpkg/status"
 done
+[ "$(readlink "$ROOT/etc/systemd/system/userconfig.service")" = /dev/null ] \
+    || fail "verify: userconfig.service not masked — first boot would prompt for a username"
+v test -L "$ROOT/etc/systemd/system/getty.target.wants/getty@tty1.service"
+# pi must stay locked (no accidental credentials) at UID 1000 (the rename
+# target Imager customization depends on).
+v grep -q '^pi:x:1000:1000:' "$ROOT/etc/passwd"
+v grep -q '^pi:!:' "$ROOT/etc/shadow"
 [ "$(cat "$ROOT/etc/hostname")" = "$TRIB_HOSTNAME" ] || fail "verify: hostname"
 v grep -q "$TRIB_HOSTNAME" "$ROOT/etc/hosts"
 [ "$(sha256sum "$ROOT/boot/firmware/cmdline.txt" | cut -d' ' -f1)" = "$CMDLINE_SHA_BEFORE" ] \

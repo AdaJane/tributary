@@ -57,10 +57,12 @@ it as `rpi-imager --repo <URL of tributary-<version>-pi-imager.json>` (the
 JSON is a release asset); plain "Use custom" flashing works too — for
 headless Wi-Fi then, edit `user-data` on the boot partition. First boot
 expands the card and starts the console **LAN-open** at
-<http://tributary.local:4600>. Recordings live under
-`/home/tributary/projects`; logs via
-`sudo journalctl SYSLOG_IDENTIFIER=tribd`. Read Security below — the
-appliance trusts its LAN.
+<http://tributary.local:4600> — no setup wizard, no prompts. A plain flash
+ships **no login account**: nobody can log in on the console or over SSH
+until you reflash with Imager customization (which creates your user and
+can enable SSH). Recordings live under `/home/tributary/projects`; logs
+via `sudo journalctl SYSLOG_IDENTIFIER=tribd` (needs a login user). Read
+Security below — the appliance trusts its LAN.
 
 ### Docker
 
