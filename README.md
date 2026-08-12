@@ -52,17 +52,34 @@ ships preset-disabled per RPM convention:
 
 Flash `tributary-<version>-pi.img.xz` to an SD card — it's stock Raspberry
 Pi OS Lite (arm64: Pi 3/4/5/Zero 2 W) with Tributary and PipeWire
-preinstalled. For Raspberry Pi Imager's hostname/Wi-Fi/user dialog, launch
-it as `rpi-imager --repo <URL of tributary-<version>-pi-imager.json>` (the
-JSON is a release asset); plain "Use custom" flashing works too — for
-headless Wi-Fi then, edit `user-data` on the boot partition. First boot
-expands the card and starts the console **LAN-open** at
-<http://tributary.local:4600> — no setup wizard, no prompts. A plain flash
-ships **no login account**: nobody can log in on the console or over SSH
-until you reflash with Imager customization (which creates your user and
-can enable SSH). Recordings live under `/home/tributary/projects`; logs
-via `sudo journalctl SYSLOG_IDENTIFIER=tribd` (needs a login user). Read
-Security below — the appliance trusts its LAN.
+preinstalled. First boot expands the card and needs no setup wizard and no
+prompts:
+
+1. The appliance **hosts its own Wi-Fi network**, named `Tributary-XXXX`
+   (the suffix is your Pi's serial, so two units in one room stay apart).
+   The default passphrase is `tributary`.
+2. Join it and open **<http://tributary.local>** — no port to type.
+
+Plug in ethernet and the console is reachable that way too, at the same
+address; AP clients reach the wired network through the appliance.
+
+**The access point owns the Wi-Fi radio**, so Raspberry Pi Imager's Wi-Fi
+credentials no longer do anything — a Pi has one radio and it cannot host
+this network and join another at the same time. To put the appliance on an
+existing network, use ethernet. Imager's hostname/user dialog still works
+(launch it as `rpi-imager --repo <URL of tributary-<version>-pi-imager.json>`,
+a release asset); plain "Use custom" flashing works too.
+
+To change the Wi-Fi passphrase, SSID prefix, channel or address, edit
+`scripts/pi-image/tributary-ap.nmconnection` and rebuild the image
+(`just pi-image`); the regulatory domain defaults to `US` and is a build
+input — `AP_COUNTRY=GB just pi-image` for a regional image.
+
+A plain flash ships **no login account**: nobody can log in on the console
+or over SSH until you reflash with Imager customization (which creates your
+user and can enable SSH). Recordings live under `/home/tributary/projects`;
+logs via `sudo journalctl SYSLOG_IDENTIFIER=tribd` (needs a login user).
+Read Security below — the appliance trusts its own network.
 
 ### Docker
 
@@ -106,6 +123,15 @@ default bind is `127.0.0.1`. Don't bind a non-loopback address
 exposes an unauthenticated control surface that can capture audio and
 write to disk. The Raspberry Pi appliance image ships LAN-open on this
 doctrine deliberately: a studio LAN is its trust boundary.
+
+On the appliance that trust boundary is **its own Wi-Fi network**, and the
+WPA2 passphrase is the only thing in front of an unauthenticated console —
+anyone who joins can start and stop recordings and listen to the monitor
+stream. The image's default passphrase (`tributary`) is published here, so
+treat it as public: change it and rebuild before using the appliance
+anywhere you wouldn't hand out the key. Note also that the AP shares a
+plugged-in ethernet connection with its clients, so joining the appliance's
+network means reaching the wired one behind it.
 
 ## Developing
 

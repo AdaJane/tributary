@@ -3,7 +3,10 @@
 # overrides are TRIB__SECTION__KEY.
 
 [server]
-# LAN-open by design: browse http://tributary.local:4600 from any device
-# on the network. The daemon trusts this network — see the Security
-# section of the README before putting the appliance on one you don't.
-bind = "0.0.0.0:4600"
+# LAN-open by design: browse http://tributary.local from any device on the
+# appliance's own Wi-Fi network or a plugged-in ethernet LAN — no port to
+# type. Binding 80 works because build.sh lowers the unprivileged port
+# floor (/etc/sysctl.d/80-tributary.conf); tribd runs as a user unit and
+# cannot be granted CAP_NET_BIND_SERVICE. The daemon trusts this network —
+# see the Security section of the README before putting it on one you don't.
+bind = "0.0.0.0:80"

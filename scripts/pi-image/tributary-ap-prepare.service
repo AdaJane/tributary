@@ -1,0 +1,17 @@
+# Runs ap-prepare.sh before NetworkManager reads its connection profiles:
+# unblocks the radio Raspberry Pi OS soft-blocks at boot, and stamps the
+# per-device SSID the image could not know when it was built.
+[Unit]
+Description=Prepare the Tributary access point
+Before=NetworkManager.service
+# It rewrites a profile under /etc and reads /etc/machine-id.
+After=local-fs.target
+ConditionPathExists=/etc/NetworkManager/system-connections/tributary-ap.nmconnection
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/tributary/ap-prepare.sh
+
+[Install]
+WantedBy=multi-user.target

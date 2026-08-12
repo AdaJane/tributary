@@ -1,0 +1,49 @@
+# The appliance's built-in Wi-Fi access point, so a phone or laptop reaches
+# the console with no infrastructure at all — the rehearsal-room case.
+# NetworkManager owns wlan0 unconditionally: one radio cannot both host this
+# and join a network, and an appliance's network must simply always be there.
+# Consequence: Raspberry Pi Imager's Wi-Fi credentials no longer apply —
+# joining an existing network is ethernet-only (see the README).
+#
+# Installed 0600 by build.sh; NetworkManager refuses to load a keyfile
+# carrying a PSK that is more permissive than that.
+[connection]
+id=tributary-ap
+# Fixed so NetworkManager adopts the file as-is instead of minting a uuid
+# and rewriting it on first boot.
+uuid=7b2c9f4e-1a35-4d68-9c0b-3e5f8a2d6417
+type=wifi
+interface-name=wlan0
+autoconnect=true
+autoconnect-priority=100
+
+[wifi]
+mode=ap
+# ap-prepare.sh stamps the per-device suffix over this at boot (the Pi's
+# serial is not knowable when the image is built); this bare prefix is what
+# the appliance falls back to if no serial can be read.
+ssid=Tributary
+band=bg
+# brcmfmac's automatic channel selection is unreliable in AP mode — pin one.
+channel=6
+
+[wifi-security]
+key-mgmt=wpa-psk
+proto=rsn
+pairwise=ccmp
+group=ccmp
+# The daemon has no authentication, so this passphrase is the only thing
+# between a passer-by and the console. It is a published default: change it
+# here and rebuild for anything but a trusted room (README, Security).
+psk=tributary
+
+[ipv4]
+# `shared` is what starts NetworkManager's own dnsmasq (DHCP + DNS for the
+# clients) and the NAT that lets them reach a plugged-in ethernet LAN.
+# The address is pinned because dnsmasq-shared.d answers tributary.local
+# with it — build.sh reads it back out of this file, which is its one home.
+method=shared
+address1=10.42.0.1/24
+
+[ipv6]
+method=disabled

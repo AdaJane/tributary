@@ -37,8 +37,12 @@ dist:
 # Needs sudo, ~4 GB free, and an aarch64 tribd; on an x86_64 box install
 # qemu-user-static (binfmt) and feed it a binary from a previous release.
 # Pass --no-compress to skip the slow xz while iterating.
+# AP_COUNTRY picks the Wi-Fi regulatory domain (`AP_COUNTRY=GB just
+# pi-image`); it is forwarded explicitly because sudo resets the
+# environment, and its default lives in build.sh.
 pi-image binary="target/release/tribd" *flags="":
-    sudo scripts/pi-image/build.sh {{binary}} target/tributary-dev-pi.img.xz {{flags}}
+    sudo --preserve-env=AP_COUNTRY,CACHE_DIR,IMAGE_URL_BASE \
+        scripts/pi-image/build.sh {{binary}} target/tributary-dev-pi.img.xz {{flags}}
 
 # Local package builds — the same tools CI runs (which passes --no-build
 # and packages the release leg's own embed-ui binary).

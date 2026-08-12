@@ -168,12 +168,17 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y systemd-container
           xz -dc "tributary-${GITHUB_REF_NAME}-pi.img.xz" > smoke.img
+          # tribd binds :80, which the image enables with a sysctl drop-in.
+          # That knob is per-netns and this container shares the runner's
+          # netns, so the image's own drop-in cannot take effect here — set
+          # it on the runner instead, or the daemon exits EADDRACCES.
+          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80
           sudo systemd-run --unit=trib-smoke systemd-nspawn -i smoke.img -b
           for _ in $(seq 60); do
-            if curl -sf http://127.0.0.1:4600/healthz; then break; fi
+            if curl -sf http://127.0.0.1/healthz; then break; fi
             sleep 2
           done
-          curl -sf http://127.0.0.1:4600/healthz
+          curl -sf http://127.0.0.1/healthz
           sudo machinectl poweroff trib-smoke || true
       - uses: actions/attest-build-provenance@v3
         with:

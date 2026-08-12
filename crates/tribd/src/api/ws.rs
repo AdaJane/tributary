@@ -674,9 +674,12 @@ mod tests {
 
     #[test]
     fn same_origin_local_names_pass_with_matching_host() {
-        // The appliance: the embedded console is served same-origin from
-        // http://tributary.local:4600, so Origin equals Host exactly.
+        // The appliance: the embedded console is served same-origin, so
+        // Origin equals Host exactly. The Pi image serves port 80, where a
+        // browser elides the port from BOTH headers — that portless pair is
+        // what the appliance depends on, so it is pinned here.
         for (origin, host) in [
+            ("http://tributary.local", "tributary.local"),
             ("http://tributary.local:4600", "tributary.local:4600"),
             ("http://Tributary.LOCAL:4600", "tributary.local:4600"),
             ("https://studio.b.local", "studio.b.local"),

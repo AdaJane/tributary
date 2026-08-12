@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Remaster the official Raspberry Pi OS Lite arm64 image into the Tributary
 # appliance image: PipeWire audio stack, a lingering `tributary` service
-# user running tribd (LAN-open), hostname `tributary`, and the first-boot
-# username wizard masked so a plain flash boots straight to serving. The
-# base stays byte-identical everywhere else, so stock behavior — first-boot
-# rootfs expansion, Raspberry Pi Imager / cloud-init customization, avahi
-# mDNS — is preserved by construction: cmdline.txt, the initramfs, and the
-# boot partition's cloud-init files are never touched (and verify() proves
-# it).
+# user running tribd (LAN-open on port 80), a built-in Wi-Fi access point,
+# hostname `tributary`, and the first-boot username wizard masked so a plain
+# flash boots straight to serving. The base stays byte-identical everywhere
+# else, so stock behavior — first-boot rootfs expansion, Raspberry Pi Imager
+# / cloud-init customization, avahi mDNS — is preserved by construction:
+# cmdline.txt, the initramfs, and the boot partition's cloud-init files are
+# never touched (and verify() proves it).
+#
+# The access point needs no extra packages: NetworkManager, dnsmasq-base,
+# wpasupplicant and the regulatory database all ship in the base. It does
+# claim wlan0 outright, so Imager's Wi-Fi credentials no longer apply —
+# joining an existing network is ethernet-only (README).
 #
 # Usage: sudo scripts/pi-image/build.sh <aarch64-tribd> <out.img.xz> [--no-compress]
 #   --no-compress  emit the raw .img and skip the xz + Imager JSON (iteration)
@@ -38,6 +43,15 @@ readonly PACKAGES="pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-
 readonly TRIB_USER="tributary"
 readonly TRIB_HOSTNAME="tributary"
 readonly GROW_MIB=768 # deterministic apt headroom; zeros are ~free under xz
+
+# The Wi-Fi regulatory domain the access point runs under. A legal
+# constraint that varies by market, so it is a build input for regional
+# images rather than a runtime knob. The rest of the AP's settings (SSID
+# prefix, passphrase, address, channel) live in tributary-ap.nmconnection.
+readonly AP_COUNTRY="${AP_COUNTRY:-US}"
+# Mirrors AP_SSID_PREFIX in ap-prepare.sh, which stamps the per-device
+# suffix at boot; verify() asserts the two never drift apart.
+readonly AP_SSID_PREFIX="Tributary"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly HERE
@@ -202,6 +216,45 @@ if [ -f "$ROOT/boot/firmware/user-data" ] \
     sed -i -E "s/^hostname:.*/hostname: $TRIB_HOSTNAME/" "$ROOT/boot/firmware/user-data"
 fi
 
+echo "==> access point + port 80"
+# Config only — every binary this needs is already in the base image.
+# NetworkManager refuses a world-readable keyfile holding a PSK, hence 0600.
+install -m 600 "$HERE/tributary-ap.nmconnection" \
+    "$ROOT/etc/NetworkManager/system-connections/tributary-ap.nmconnection"
+install -D -m 755 "$HERE/ap-prepare.sh" "$ROOT/usr/local/lib/tributary/ap-prepare.sh"
+install -m 644 "$HERE/tributary-ap-prepare.service" \
+    "$ROOT/etc/systemd/system/tributary-ap-prepare.service"
+# What `systemctl enable` would create, made by hand (same reason as the
+# getty enable above: no manager runs in a chroot).
+install -d "$ROOT/etc/systemd/system/multi-user.target.wants"
+ln -sf /etc/systemd/system/tributary-ap-prepare.service \
+    "$ROOT/etc/systemd/system/multi-user.target.wants/tributary-ap-prepare.service"
+# Regulatory domain. raspi-config sets this by editing cmdline.txt, which
+# this script pins byte-identical to protect first-boot expansion; cfg80211
+# is a module here, so modprobe.d is the same knob with a one-file blast
+# radius. Without it the radio has no legal channel list and stays down.
+echo "options cfg80211 ieee80211_regdom=$AP_COUNTRY" \
+    > "$ROOT/etc/modprobe.d/tributary-regdom.conf"
+# `method=shared` hands DHCP+DNS to NetworkManager's own dnsmasq; teach it
+# the appliance's name so AP clients with weak mDNS (Android) resolve
+# tributary.local too. avahi keeps answering everyone else — two paths, and
+# the address has exactly one home: the profile installed above.
+AP_ADDR="$(sed -n 's|^address1=\([^/]*\)/.*|\1|p' "$HERE/tributary-ap.nmconnection")"
+[ -n "$AP_ADDR" ] || fail "no address1 in tributary-ap.nmconnection"
+echo "address=/$TRIB_HOSTNAME.local/$AP_ADDR" \
+    > "$ROOT/etc/NetworkManager/dnsmasq-shared.d/tributary.conf"
+# The base ships WirelessEnabled=false and NetworkManager honours it, so
+# the AP would never appear — silently. Same flip raspi-config makes.
+sed -i 's/^WirelessEnabled=.*/WirelessEnabled=true/' \
+    "$ROOT/var/lib/NetworkManager/NetworkManager.state"
+# Port 80, so the console is just http://tributary.local. tribd runs as a
+# systemd USER unit (it needs the session's PipeWire socket), and a user
+# manager holds no capabilities to grant via AmbientCapabilities — lowering
+# the unprivileged port floor is the one-line alternative. 80 and not 0
+# leaves ssh's :22 privileged.
+echo "net.ipv4.ip_unprivileged_port_start=80" \
+    > "$ROOT/etc/sysctl.d/80-tributary.conf"
+
 echo "==> hygiene"
 in_chroot "rm -rf /var/lib/apt/lists/*"
 truncate -s 0 "$ROOT/etc/machine-id"
@@ -226,12 +279,13 @@ v test -L "$ROOT/home/$TRIB_USER/.config/systemd/user/default.target.wants/tribd
 v test -f "$ROOT/var/lib/systemd/linger/$TRIB_USER"
 v grep -q "^$TRIB_USER:" "$ROOT/etc/passwd"
 v grep -qE "^audio:.*[:,]$TRIB_USER(,|\$)" "$ROOT/etc/group"
-v grep -q '0.0.0.0:4600' "$ROOT/home/$TRIB_USER/config/tribd.toml"
+v grep -q '^bind = "0.0.0.0:80"$' "$ROOT/home/$TRIB_USER/config/tribd.toml"
 v test -d "$ROOT/home/$TRIB_USER/projects"
 for unit in pipewire.socket pipewire-pulse.socket wireplumber.service; do
     user_enabled "$unit" || fail "verify: $unit not user-enabled"
 done
-for pkg in pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-utils avahi-daemon; do
+for pkg in pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-utils avahi-daemon \
+    network-manager dnsmasq-base wpasupplicant; do
     # Status is always the line after Package; a bare Package: stanza also
     # matches half-removed states, so assert the installed one.
     grep -A1 "^Package: $pkg$" "$ROOT/var/lib/dpkg/status" \
@@ -250,6 +304,30 @@ v test -f "$ROOT/usr/share/alsa/alsa.conf.d/99-pipewire-default.conf"
 [ "$(readlink "$ROOT/etc/systemd/system/userconfig.service")" = /dev/null ] \
     || fail "verify: userconfig.service not masked — first boot would prompt for a username"
 v test -L "$ROOT/etc/systemd/system/getty.target.wants/getty@tty1.service"
+# The access point. NetworkManager ignores a keyfile whose mode lets anyone
+# read the PSK, so the mode is as load-bearing as the content.
+AP_PROFILE="$ROOT/etc/NetworkManager/system-connections/tributary-ap.nmconnection"
+v test -f "$AP_PROFILE"
+[ "$(stat -c%a "$AP_PROFILE")" = 600 ] \
+    || fail "verify: AP profile is not mode 600 — NetworkManager would ignore it"
+v grep -q '^mode=ap' "$AP_PROFILE"
+v grep -q '^method=shared' "$AP_PROFILE"
+v grep -q '^psk=' "$AP_PROFILE"
+v grep -q "^ssid=$AP_SSID_PREFIX\$" "$AP_PROFILE"
+v test -x "$ROOT/usr/local/lib/tributary/ap-prepare.sh"
+# The boot-time suffix stamp only lands on the shipped SSID if both sides
+# spell the prefix the same way.
+v grep -q "^readonly AP_SSID_PREFIX=\"$AP_SSID_PREFIX\"" \
+    "$ROOT/usr/local/lib/tributary/ap-prepare.sh"
+v test -f "$ROOT/etc/systemd/system/tributary-ap-prepare.service"
+v test -L "$ROOT/etc/systemd/system/multi-user.target.wants/tributary-ap-prepare.service"
+v grep -q "^address=/$TRIB_HOSTNAME.local/$AP_ADDR\$" \
+    "$ROOT/etc/NetworkManager/dnsmasq-shared.d/tributary.conf"
+v grep -q "ieee80211_regdom=$AP_COUNTRY" "$ROOT/etc/modprobe.d/tributary-regdom.conf"
+# Left false by the base, this alone would keep the radio down with no
+# error anywhere on the device.
+v grep -q '^WirelessEnabled=true' "$ROOT/var/lib/NetworkManager/NetworkManager.state"
+v grep -q '^net.ipv4.ip_unprivileged_port_start=80' "$ROOT/etc/sysctl.d/80-tributary.conf"
 # pi must stay locked (no accidental credentials) at UID 1000 (the rename
 # target Imager customization depends on).
 v grep -q '^pi:x:1000:1000:' "$ROOT/etc/passwd"
@@ -290,7 +368,7 @@ cat > "${OUT%.img.xz}-imager.json" <<EOF
   "os_list": [
     {
       "name": "Tributary appliance",
-      "description": "Raspberry Pi OS Lite arm64 with the Tributary recording console preinstalled — boots serving http://tributary.local:4600",
+      "description": "Raspberry Pi OS Lite arm64 with the Tributary recording console preinstalled — hosts its own Wi-Fi network and serves the console at http://tributary.local",
       "url": "$IMAGE_URL_BASE/$(basename "$OUT")",
       "release_date": "$(date -u +%F)",
       "image_download_size": $DOWNLOAD_SIZE,
