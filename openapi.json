@@ -15,7 +15,7 @@
         "operationId": "list_destinations",
         "responses": {
           "200": {
-            "description": "Mounted drives and the active destination",
+            "description": "Every candidate drive and the active destination",
             "content": {
               "application/json": {
                 "schema": {
@@ -23,6 +23,35 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/destinations/format": {
+      "post": {
+        "operationId": "format_drive",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FormatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Drive formatted; it remounts on its own"
+          },
+          "409": {
+            "description": "Recording, or the drive is in use"
+          },
+          "422": {
+            "description": "Refused — not a removable whole disk, or a bad label"
+          },
+          "501": {
+            "description": "This installation has no format helper"
           }
         }
       }
@@ -133,6 +162,157 @@
           },
           "422": {
             "description": "A value out of range"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions": {
+      "get": {
+        "operationId": "list_sessions",
+        "responses": {
+          "200": {
+            "description": "Sessions on the active destination",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionsDto"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "create_session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewSession"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Created and opened",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDto"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Recording, or that name is taken"
+          },
+          "422": {
+            "description": "Bad name"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{id}": {
+      "put": {
+        "operationId": "rename_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session directory name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameSession"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Renamed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No session by that id"
+          },
+          "422": {
+            "description": "Bad name"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session directory name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted, permanently"
+          },
+          "404": {
+            "description": "No session by that id"
+          },
+          "409": {
+            "description": "Recording, or that session is open"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{id}/open": {
+      "post": {
+        "operationId": "open_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session directory name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Opened",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No session by that id"
+          },
+          "409": {
+            "description": "Recording"
           }
         }
       }
@@ -320,6 +500,47 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/takes/{take}": {
+      "delete": {
+        "summary": "Permanently remove one take — audio, peaks and manifest together.",
+        "description": "Refused while recording, and refused for the take being played: the\nfeeder threads hold open readers and reopen the files on every loop\npass, so unlinking underneath them would run playback off unlinked\ninodes until a later wrap died somewhere confusing.",
+        "operationId": "delete_take",
+        "parameters": [
+          {
+            "name": "take",
+            "in": "path",
+            "description": "Take number",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted; the remaining takes, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TakeDto"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such take"
+          },
+          "409": {
+            "description": "Recording, or that take is playing"
           }
         }
       }
@@ -600,6 +821,41 @@
         }
       }
     },
+    "/api/v1/transport/take": {
+      "put": {
+        "summary": "Point the transport at a take of the open session.",
+        "description": "A property of the transport, so PUT with a body — the same shape as\n`PUT /transport/loop` and `/monitor`, not a verb path like\n`record/start`. Selecting is what makes `lanes`, `total_frames` and the\nwaveform describe that take, which is why it is separate from PLAY: the\npoint is to be able to LOOK at a take.",
+        "operationId": "select_take",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelectTakeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Selected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransportDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such take in the open session"
+          },
+          "409": {
+            "description": "Recording"
+          }
+        }
+      }
+    },
     "/healthz": {
       "get": {
         "operationId": "healthz",
@@ -723,6 +979,34 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "destinations"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "sessions"
+                ]
+              }
+            }
           }
         ],
         "description": "A subscribable stream. Doubles as the routing key inside the hub."
@@ -840,9 +1124,14 @@
         "required": [
           "current",
           "default",
-          "drives"
+          "drives",
+          "can_format"
         ],
         "properties": {
+          "can_format": {
+            "type": "boolean",
+            "description": "Whether this installation can format a drive. False on package\ninstalls, which ship no privileged helper — the console shows the\ncontrol disabled with a reason rather than failing on tap."
+          },
           "current": {
             "type": "string",
             "description": "The active recording destination (projects root)."
@@ -856,7 +1145,7 @@
             "items": {
               "$ref": "#/components/schemas/DriveDto"
             },
-            "description": "Mounted filesystems, removable first."
+            "description": "Every candidate filesystem, usable first — never filtered down to\nthe usable ones. A drive that is plugged in but unusable rendering\nas nothing is indistinguishable from an empty port, which is the\nfailure this endpoint exists to make impossible."
           }
         }
       },
@@ -982,30 +1271,64 @@
       "DriveDto": {
         "type": "object",
         "required": [
-          "mount_point",
           "label",
           "total_bytes",
-          "available_bytes",
           "removable",
-          "read_only"
+          "state"
         ],
         "properties": {
           "available_bytes": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
+            "description": "Only knowable while mounted.",
             "minimum": 0
+          },
+          "device": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The block device, when one backs this filesystem."
+          },
+          "disk": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The whole disk this lives on, so the console can group partitions\nunder the drive they came from."
+          },
+          "filesystem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "\"exfat\", \"ext4\", … `null` when the kernel recognised none."
           },
           "label": {
             "type": "string"
           },
           "mount_point": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` when the drive is present but nothing mounted it — the case\nthat used to render as no drive at all."
           },
-          "read_only": {
-            "type": "boolean"
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why this is not a usable destination; `null` when it is."
           },
           "removable": {
             "type": "boolean"
+          },
+          "state": {
+            "$ref": "#/components/schemas/DriveState"
           },
           "total_bytes": {
             "type": "integer",
@@ -1013,6 +1336,19 @@
             "minimum": 0
           }
         }
+      },
+      "DriveState": {
+        "type": "string",
+        "description": "Why a drive is or is not a usable destination.\n\nEvaluated top-down, and the order is the point: these overlap (a\nroot-owned partition on the boot disk is both `System` and\n`NotWritable`), so the winner is the reason the user can do least\nabout. \"It is the boot disk\" ends the conversation; \"it is not\nwritable\" invites a reformat.",
+        "enum": [
+          "system",
+          "read_only",
+          "too_small",
+          "unknown_filesystem",
+          "not_mounted",
+          "not_writable",
+          "ready"
+        ]
       },
       "EqBand": {
         "type": "object",
@@ -1103,6 +1439,23 @@
           }
         ],
         "description": "Which fader a level command addresses; doubles as the mute/PFL/rename\ntarget (the master supports only fader moves in v1 — see `apply`)."
+      },
+      "FormatRequest": {
+        "type": "object",
+        "required": [
+          "device",
+          "label"
+        ],
+        "properties": {
+          "device": {
+            "type": "string",
+            "description": "The whole disk, as `DriveDto.disk` names it (\"/dev/sda\"). A\npartition is refused: formatting one strands the rest of the drive."
+          },
+          "label": {
+            "type": "string",
+            "description": "The exFAT volume label, which becomes the drive's printed name."
+          }
+        }
       },
       "FxId": {
         "type": "integer",
@@ -1896,6 +2249,23 @@
           "stream"
         ]
       },
+      "NewSession": {
+        "type": "object",
+        "required": [
+          "name",
+          "seed"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "seed": {
+            "$ref": "#/components/schemas/SessionSeed",
+            "description": "What the new session's desk starts from."
+          }
+        },
+        "additionalProperties": false
+      },
       "NewStrip": {
         "type": "object",
         "properties": {
@@ -1988,6 +2358,18 @@
           }
         }
       },
+      "RenameSession": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "RouteTarget": {
         "oneOf": [
           {
@@ -2037,6 +2419,20 @@
             "minimum": 0
           }
         }
+      },
+      "SelectTakeBody": {
+        "type": "object",
+        "required": [
+          "take"
+        ],
+        "properties": {
+          "take": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "SendState": {
         "type": "object",
@@ -2240,6 +2636,73 @@
           },
           {
             "type": "object",
+            "description": "The candidate drive list, pushed when the mount table changes and\nonce on subscribe. Carries only the drives — the active and default\ndestinations belong to the recording settings the client already\nholds, and duplicating them here would give them two homes.",
+            "required": [
+              "drives",
+              "type"
+            ],
+            "properties": {
+              "drives": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/DriveDto"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "destinations"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The open session's takes, newest first — pushed whenever the shelf\nchanges. Same mapping as `GET /api/v1/takes`, so a push and a poll\ncan never disagree.",
+            "required": [
+              "takes",
+              "type"
+            ],
+            "properties": {
+              "takes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/TakeDto"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "takes_changed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The open session changed — created, opened or renamed. Carries only\nthe open one; a client showing the list refetches, and one showing\njust the tape label never has to.",
+            "required": [
+              "open_id",
+              "open_name",
+              "type"
+            ],
+            "properties": {
+              "open_id": {
+                "type": "string"
+              },
+              "open_name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "sessions_changed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
             "required": [
               "channel",
               "type"
@@ -2312,6 +2775,72 @@
           }
         ],
         "description": "Messages the daemon sends over `/ws`."
+      },
+      "SessionDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "created_at_unix",
+          "take_count",
+          "open"
+        ],
+        "properties": {
+          "created_at_unix": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "The directory name. Stable across a rename — renaming retitles the\nmanifest and never moves the directory, so an id a client is\nholding stays valid."
+          },
+          "name": {
+            "type": "string"
+          },
+          "open": {
+            "type": "boolean",
+            "description": "Exactly one session in a list is open."
+          },
+          "take_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "SessionSeed": {
+        "type": "string",
+        "description": "What a new session's desk starts from, ordered by how much of the\ncurrent rig it keeps.",
+        "enum": [
+          "template",
+          "mapping",
+          "console"
+        ]
+      },
+      "SessionsDto": {
+        "type": "object",
+        "required": [
+          "root",
+          "root_present",
+          "sessions"
+        ],
+        "properties": {
+          "root": {
+            "type": "string",
+            "description": "The projects root these live under — the active destination."
+          },
+          "root_present": {
+            "type": "boolean",
+            "description": "False when the destination has gone away (drive unplugged). An\nempty list then means \"we cannot see them\", not \"there are none\" —\ntwo different sentences the console must not merge."
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionDto"
+            },
+            "description": "Newest first, in the same order an adopt would pick from."
+          }
+        }
       },
       "SetCardProfile": {
         "type": "object",
@@ -2992,16 +3521,33 @@
           "state",
           "position_frames",
           "sample_rate",
+          "engine_sample_rate",
           "total_frames",
           "monitor",
           "lanes"
         ],
         "properties": {
+          "engine_sample_rate": {
+            "type": "integer",
+            "format": "int32",
+            "description": "What the engine graph runs at — immutable per boot. A take cut at\nanother rate can be selected and read, but not played: there is no\nresampler, so PLAY refuses. Carried here so the console can disable\nPLAY and print why rather than discovering it via a 422.",
+            "minimum": 0
+          },
           "lanes": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/LaneDto"
-            }
+            },
+            "description": "Playback gates for the SELECTED take, index-aligned with its\ntracks. Empty while recording — there is no playback set to gate."
+          },
+          "latest_take": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The newest finished take on the shelf. Equals `take` unless the\nconsole is reviewing an older one. `null` on an empty session.",
+            "minimum": 0
           },
           "loop": {
             "oneOf": [
@@ -3024,6 +3570,7 @@
           "sample_rate": {
             "type": "integer",
             "format": "int32",
+            "description": "The SELECTED take's rate; the engine's own while recording.",
             "minimum": 0
           },
           "started_at_unix": {
@@ -3044,13 +3591,13 @@
               "null"
             ],
             "format": "int32",
-            "description": "Recording: the take being written. Otherwise: the latest take —\nwhat PLAY would roll.",
+            "description": "The selected take — what PLAY would roll. While recording, the take\nbeing written.",
             "minimum": 0
           },
           "total_frames": {
             "type": "integer",
             "format": "int64",
-            "description": "Length of the latest take (its longest track).",
+            "description": "Length of the selected take (its longest track); 0 while recording,\nwhere the client uses its own live frame count instead.",
             "minimum": 0
           }
         }

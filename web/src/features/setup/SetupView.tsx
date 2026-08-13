@@ -3,10 +3,12 @@ import type { ReactNode } from 'react';
 
 import { SegmentedControl } from '../../design/SegmentedControl';
 import type { SegmentedOption } from '../../design/SegmentedControl';
-import { loadDestinations, loadSettings, saveSettings, useSettings } from '../../state/settings';
+import { loadSettings, saveSettings, useSettings } from '../../state/settings';
+import { useDestinationsFeed } from './useDestinationsFeed';
 import type { RecordingFormat } from '../../state/settings';
 import { useTransport } from '../../state/transport';
 import { DestinationSection } from './DestinationSection';
+import { SessionSection } from './SessionSection';
 import { needsRestart } from './settings-logic';
 import styles from './SetupView.module.css';
 
@@ -69,8 +71,10 @@ export function SetupView() {
 
   useEffect(() => {
     void loadSettings();
-    void loadDestinations();
   }, []);
+  // Drives arrive on their own from here — the daemon pushes on every
+  // mount-table change, so plugging one in is not a race against Rescan.
+  useDestinationsFeed();
 
   const restart =
     settings !== null &&
@@ -79,6 +83,12 @@ export function SetupView() {
   return (
     <div className={styles.page}>
       <div className={styles.column}>
+        {/* Sessions first: which reel of tape is on the machine is the
+            more frequent choice, and the destination is where they live. */}
+        <Panel title="Session">
+          <SessionSection locked={recordingNow} />
+        </Panel>
+
         <Panel title="Destination">
           <DestinationSection locked={recordingNow} />
         </Panel>

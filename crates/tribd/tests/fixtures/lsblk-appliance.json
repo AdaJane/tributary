@@ -1,0 +1,117 @@
+{
+   "blockdevices": [
+      {
+         "name": "loop0",
+         "path": "/dev/loop0",
+         "pkname": null,
+         "type": "loop",
+         "size": 2108686336,
+         "fstype": "swap",
+         "label": null,
+         "mountpoints": [],
+         "rm": false,
+         "ro": false,
+         "tran": null
+      },{
+         "name": "sda",
+         "path": "/dev/sda",
+         "pkname": null,
+         "type": "disk",
+         "size": 62026416128,
+         "fstype": null,
+         "label": null,
+         "mountpoints": [],
+         "rm": true,
+         "ro": false,
+         "tran": "usb",
+         "children": [
+            {
+               "name": "sda1",
+               "path": "/dev/sda1",
+               "pkname": "sda",
+               "type": "part",
+               "size": 536870912,
+               "fstype": "vfat",
+               "label": "bootfs",
+               "mountpoints": [
+                   "/media/bootfs"
+               ],
+               "rm": true,
+               "ro": false,
+               "tran": null
+            },{
+               "name": "sda2",
+               "path": "/dev/sda2",
+               "pkname": "sda",
+               "type": "part",
+               "size": 3238002688,
+               "fstype": "ext4",
+               "label": "rootfs",
+               "mountpoints": [
+                   "/media/rootfs"
+               ],
+               "rm": true,
+               "ro": false,
+               "tran": null
+            }
+         ]
+      },{
+         "name": "mmcblk0",
+         "path": "/dev/mmcblk0",
+         "pkname": null,
+         "type": "disk",
+         "size": 63864569856,
+         "fstype": null,
+         "label": null,
+         "mountpoints": [],
+         "rm": false,
+         "ro": false,
+         "tran": "mmc",
+         "children": [
+            {
+               "name": "mmcblk0p1",
+               "path": "/dev/mmcblk0p1",
+               "pkname": "mmcblk0",
+               "type": "part",
+               "size": 536870912,
+               "fstype": "vfat",
+               "label": "bootfs",
+               "mountpoints": [
+                   "/boot/firmware"
+               ],
+               "rm": false,
+               "ro": false,
+               "tran": "mmc"
+            },{
+               "name": "mmcblk0p2",
+               "path": "/dev/mmcblk0p2",
+               "pkname": "mmcblk0",
+               "type": "part",
+               "size": 63319310336,
+               "fstype": "ext4",
+               "label": "rootfs",
+               "mountpoints": [
+                   "/"
+               ],
+               "rm": false,
+               "ro": false,
+               "tran": "mmc"
+            }
+         ]
+      },{
+         "name": "zram0",
+         "path": "/dev/zram0",
+         "pkname": null,
+         "type": "disk",
+         "size": 2147483648,
+         "fstype": "swap",
+         "label": "zram0",
+         "mountpoints": [
+             "[SWAP]"
+         ],
+         "rm": false,
+         "ro": false,
+         "tran": null
+      }
+   ]
+}

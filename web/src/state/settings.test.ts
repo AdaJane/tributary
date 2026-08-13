@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { loadDestinations, loadSettings, saveSettings, useSettings } from './settings';
+import { applyDestinations, loadDestinations, loadSettings, saveSettings, useSettings } from './settings';
 import { $api } from '../api/client';
 
 vi.mock('../api/client', () => ({
@@ -43,19 +43,29 @@ describe('loadSettings', () => {
 });
 
 describe('loadDestinations', () => {
-  it('maps drives, inverting read_only into writable', async () => {
+  /**
+   * The daemon's `state` is carried through verbatim rather than being
+   * re-derived client-side. The old mapping inverted a mount flag into
+   * `writable`, which reported a root-owned ext4 stick as writable and
+   * then failed at save time — a lie measured on real hardware.
+   */
+  it('carries the daemon state and reason through, without re-deriving them', async () => {
     vi.mocked($api.GET).mockResolvedValue({
       data: {
         current: '/home/user/projects',
         default: '/home/user/projects',
         drives: [
           {
+            device: '/dev/sdb1',
+            disk: '/dev/sdb',
             mount_point: '/run/media/user/STICK',
             label: 'STICK',
+            filesystem: 'exfat',
             total_bytes: 32_000_000_000,
             available_bytes: 14_200_000_000,
             removable: true,
-            read_only: false,
+            state: 'ready',
+            reason: null,
           },
         ],
       },
@@ -64,13 +74,91 @@ describe('loadDestinations', () => {
     expect(useSettings.getState().destinations).toEqual([
       {
         mountPath: '/run/media/user/STICK',
+        device: '/dev/sdb1',
+        disk: '/dev/sdb',
         label: 'STICK',
+        filesystem: 'exfat',
         totalBytes: 32_000_000_000,
         freeBytes: 14_200_000_000,
         removable: true,
-        writable: true,
+        state: 'ready',
+        reason: null,
       },
     ]);
+  });
+
+  /** An unmounted drive has no path and no free space — and must survive
+   *  the mapping rather than being dropped, which is how it used to
+   *  render as nothing at all. */
+  it('keeps a present-but-unmounted drive, with nulls where facts are unknown', async () => {
+    vi.mocked($api.GET).mockResolvedValue({
+      data: {
+        current: '/home/user/projects',
+        default: '/home/user/projects',
+        drives: [
+          {
+            device: '/dev/sdb1',
+            disk: '/dev/sdb',
+            mount_point: null,
+            label: 'FIELD',
+            filesystem: 'exfat',
+            total_bytes: 58_000_000_000,
+            available_bytes: null,
+            removable: true,
+            state: 'not_mounted',
+            reason: 'connected, but nothing mounted it',
+          },
+        ],
+      },
+    } as never);
+    await loadDestinations();
+    const [drive] = useSettings.getState().destinations;
+    expect(drive.mountPath).toBeNull();
+    expect(drive.freeBytes).toBeNull();
+    expect(drive.state).toBe('not_mounted');
+    expect(drive.reason).toBe('connected, but nothing mounted it');
+  });
+});
+
+describe('applyDestinations', () => {
+  /** The hotplug path. A pushed list must land through the same mapping
+   *  as the GET, or a drive that appeared on its own would render
+   *  differently from the same drive after a Rescan. */
+  it('replaces the list from a pushed message, same shape as the GET', () => {
+    applyDestinations([
+      {
+        device: '/dev/sdb1',
+        disk: '/dev/sdb',
+        mount_point: '/media/FIELD',
+        label: 'FIELD',
+        filesystem: 'exfat',
+        total_bytes: 58_000_000_000,
+        available_bytes: 57_000_000_000,
+        removable: true,
+        state: 'ready',
+        reason: null,
+      },
+    ] as never);
+    expect(useSettings.getState().destinations).toEqual([
+      {
+        mountPath: '/media/FIELD',
+        device: '/dev/sdb1',
+        disk: '/dev/sdb',
+        label: 'FIELD',
+        filesystem: 'exfat',
+        totalBytes: 58_000_000_000,
+        freeBytes: 57_000_000_000,
+        removable: true,
+        state: 'ready',
+        reason: null,
+      },
+    ]);
+  });
+
+  /** Unplugging is a push too — an empty list must clear, not merge. */
+  it('clears the list when the last drive goes away', () => {
+    applyDestinations([] as never);
+    expect(useSettings.getState().destinations).toEqual([]);
   });
 });
 

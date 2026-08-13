@@ -2,13 +2,16 @@
 //! is a view onto it.
 
 mod api;
+mod console;
 mod destinations;
 mod device_host;
 mod device_match;
 mod engine_host;
+mod format;
 mod hub;
 mod meter_pump;
 mod monitor_pump;
+mod mount_watch;
 mod recording_prefs;
 mod registry;
 mod settings;
@@ -18,9 +21,6 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use trib_audio::{AudioBackend, StreamConfig};
-use trib_core::{
-    BusId, BusKind, BusState, FxId, FxParams, FxState, InputAssign, MixerState, StripId, StripState,
-};
 use trib_engine::{compile, engine_pair};
 
 /// Hub backlog before a slow WS client starts skipping. Meters at 20 Hz are
@@ -101,12 +101,8 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     // show it.
     let projects_root = {
         let configured = std::path::absolute(prefs.effective_root(&settings))?;
-        let usable = std::fs::create_dir_all(&configured).is_ok() && {
-            let probe = configured.join(".tribd-probe");
-            std::fs::write(&probe, b"tributary")
-                .and_then(|()| std::fs::remove_file(&probe))
-                .is_ok()
-        };
+        let usable =
+            std::fs::create_dir_all(&configured).is_ok() && destinations::writable(&configured);
         if usable {
             configured
         } else {
@@ -131,7 +127,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             (project, manifest.mixer, manifest.created_at_unix)
         }
         None => {
-            let template = fresh_console();
+            let template = console::fresh_console();
             let project = trib_project::create_project(&projects_root, "Session", &template)?;
             let manifest = trib_project::load_latest(&projects_root)
                 .expect("just-created project loads")
@@ -219,12 +215,17 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         monitor_tx.clone(),
     );
 
+    // Drives appear on their own: the kernel wakes this on every mount
+    // table change, so nothing anywhere polls for storage.
+    mount_watch::spawn(hub.clone(), registry.clone());
+
     let state = api::AppState {
         hub,
         registry,
         cors_origins: Arc::new(settings.server.cors_origins.clone()),
         control,
         project: project_watch_rx,
+        can_format: format::available(),
         monitor_tx,
         devices,
     };
@@ -235,39 +236,6 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
-}
-
-/// The default console template for brand-new projects.
-fn fresh_console() -> MixerState {
-    let mut first = StripState::new(StripId(0), "Ch 1".into());
-    first.input = Some(InputAssign {
-        device: None,
-        device_channel: 0,
-    });
-    MixerState {
-        strips: vec![first],
-        buses: vec![
-            BusState::new(BusId(0), BusKind::Aux, "FX 1".into()),
-            BusState::new(BusId(1), BusKind::Aux, "FX 2".into()),
-        ],
-        fx: vec![
-            FxState {
-                id: FxId(0),
-                name: "Verb".into(),
-                input: BusId(0),
-                params: FxParams::default_reverb(),
-                return_level_db: -10.0,
-            },
-            FxState {
-                id: FxId(1),
-                name: "Echo".into(),
-                input: BusId(1),
-                params: FxParams::default_delay(),
-                return_level_db: -10.0,
-            },
-        ],
-        ..MixerState::default()
-    }
 }
 
 async fn shutdown_signal() {

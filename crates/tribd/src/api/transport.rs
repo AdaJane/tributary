@@ -7,8 +7,12 @@ use super::ws::{LoopRegionDto, MonitorTarget, TransportDto};
 use super::{ApiError, AppState};
 use crate::engine_host::TransportError;
 
-fn map_transport_err(e: TransportError) -> ApiError {
+pub(crate) fn map_transport_err(e: TransportError) -> ApiError {
     match e {
+        // "That take/session is not here" is a 404; "there are none at
+        // all" stays a 422 with advice, below.
+        TransportError::NoSuchTake => ApiError::NotFound,
+        TransportError::NoSuchSession => ApiError::NotFound,
         TransportError::AlreadyRecording => ApiError::Conflict("already recording".into()),
         TransportError::NothingArmed => {
             ApiError::Invalid("nothing armed — arm a channel or the master first".into())
@@ -23,6 +27,41 @@ fn map_transport_err(e: TransportError) -> ApiError {
         TransportError::BadSetting(detail) => ApiError::Invalid(detail),
         TransportError::Io(detail) => ApiError::Internal(detail),
     }
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SelectTakeBody {
+    pub take: u32,
+}
+
+/// Point the transport at a take of the open session.
+///
+/// A property of the transport, so PUT with a body — the same shape as
+/// `PUT /transport/loop` and `/monitor`, not a verb path like
+/// `record/start`. Selecting is what makes `lanes`, `total_frames` and the
+/// waveform describe that take, which is why it is separate from PLAY: the
+/// point is to be able to LOOK at a take.
+#[utoipa::path(
+    put,
+    path = "/api/v1/transport/take",
+    request_body = SelectTakeBody,
+    responses(
+        (status = 200, description = "Selected", body = TransportDto),
+        (status = 404, description = "No such take in the open session"),
+        (status = 409, description = "Recording"),
+    )
+)]
+pub async fn select_take(
+    State(state): State<AppState>,
+    Json(body): Json<SelectTakeBody>,
+) -> Result<Json<TransportDto>, ApiError> {
+    state
+        .control
+        .select_take(body.take)
+        .await
+        .map(Json)
+        .map_err(map_transport_err)
 }
 
 #[utoipa::path(

@@ -1,0 +1,96 @@
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  min-width: 280px;
+  max-width: 420px;
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: auto auto auto 1fr;
+  align-items: baseline;
+  gap: var(--s2);
+  padding: var(--s2);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  background: var(--surface-control);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-value);
+  text-align: left;
+  cursor: pointer;
+}
+
+.row:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Latched, not merely tinted — the selected take also sits inset. */
+.row[data-selected] {
+  box-shadow: var(--depth-inset);
+  border-color: var(--focus-color);
+}
+
+.take {
+  font-family: var(--font-label);
+  letter-spacing: var(--track-print);
+  color: var(--text-label);
+}
+
+.time,
+.duration,
+.tracks {
+  color: var(--text-dim);
+}
+
+.damaged,
+.unplayable {
+  grid-column: 1 / -1;
+  font-family: var(--font-ui);
+  color: var(--state-record);
+}
+
+.unplayable {
+  color: var(--text-dim);
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s2);
+  padding-block-start: var(--s2);
+  border-block-start: 1px solid var(--border-divider);
+}
+
+.confirm {
+  flex: 1 1 100%;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  color: var(--text-value);
+}
+
+.hint {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
+}
+
+.error {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  color: var(--state-record);
+}

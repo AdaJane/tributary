@@ -7,7 +7,7 @@ use utoipa::ToSchema;
 
 use super::{ApiError, AppState};
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct TakeTrackDto {
     pub file: String,
     pub channels: u16,
@@ -18,7 +18,7 @@ pub struct TakeTrackDto {
     pub strip_id: Option<u32>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct TakeDto {
     pub take: u32,
     pub started_at_unix: u64,
@@ -37,9 +37,49 @@ pub struct TakeDto {
 )]
 pub async fn list_takes(State(state): State<AppState>) -> Json<Vec<TakeDto>> {
     let project = state.project.borrow().clone();
-    let takes = trib_project::list_takes(&project)
+    Json(take_dtos(&project))
+}
+
+/// Permanently remove one take — audio, peaks and manifest together.
+///
+/// Refused while recording, and refused for the take being played: the
+/// feeder threads hold open readers and reopen the files on every loop
+/// pass, so unlinking underneath them would run playback off unlinked
+/// inodes until a later wrap died somewhere confusing.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/takes/{take}",
+    params(("take" = u32, Path, description = "Take number")),
+    responses(
+        (status = 200, description = "Deleted; the remaining takes, newest first", body = [TakeDto]),
+        (status = 404, description = "No such take"),
+        (status = 409, description = "Recording, or that take is playing"),
+    )
+)]
+pub async fn delete_take(
+    State(state): State<AppState>,
+    UrlPath(take): UrlPath<u32>,
+) -> Result<Json<Vec<TakeDto>>, ApiError> {
+    state
+        .control
+        .delete_take(take)
+        .await
+        .map_err(super::transport::map_transport_err)?;
+    let project = state.project.borrow().clone();
+    let takes = tokio::task::spawn_blocking(move || take_dtos(&project))
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(takes))
+}
+
+/// The take list, shaped for the wire. Shared by the GET, the delete
+/// handler and the control task's push, so a polled list and a pushed one
+/// can never disagree. Blocking — reads every take manifest.
+pub fn take_dtos(project: &trib_project::Project) -> Vec<TakeDto> {
+    trib_project::list_takes(project)
         .into_iter()
         .map(|info| {
+            // The longest track defines the take's length.
             let frames = info.tracks.iter().map(|t| t.frames).max().unwrap_or(0);
             TakeDto {
                 take: info.take,
@@ -60,8 +100,7 @@ pub async fn list_takes(State(state): State<AppState>) -> Json<Vec<TakeDto>> {
                     .collect(),
             }
         })
-        .collect();
-    Json(takes)
+        .collect()
 }
 
 /// Assemble the binary peaks body for one take (see the endpoint doc for

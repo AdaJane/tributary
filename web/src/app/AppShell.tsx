@@ -1,5 +1,6 @@
 import { Suspense, lazy } from 'react';
 
+import { useSessionFeed } from '../state/useSessionFeed';
 import { useUi } from '../state/ui';
 import styles from './AppShell.module.css';
 import { ConnectionBadge } from './ConnectionBadge';
@@ -21,6 +22,8 @@ export function AppShell() {
   const view = useUi((s) => s.view);
   const setView = useUi((s) => s.setView);
   const active = TABS.some((t) => t.id === view) ? view : 'console';
+
+  useSessionFeed();
 
   return (
     <div className={styles.shell}>

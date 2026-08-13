@@ -6,7 +6,7 @@ daemon_port := "4600"
 ui_port := "5180"
 
 # The bar for a PR: `just check` green.
-check: fmt-check clippy test web-test
+check: fmt-check clippy test web-test script-test
 
 fmt:
     cargo fmt
@@ -22,6 +22,23 @@ test:
 
 web-test:
     cd web && npm run -s test
+
+# The image helpers' pure derivations, plus shellcheck over every script.
+# These run at boot or at hotplug on a box with no console, so a rotted
+# derivation surfaces as silence on hardware — not as a failing test.
+script-test:
+    #!/usr/bin/env bash
+    # `A && B || C` would swallow shellcheck's verdict into the skip branch
+    # — the very SC2015 pattern it warns about. Gate at warning: the info
+    # level flags style notes in scripts that already work.
+    set -euo pipefail
+    scripts/pi-image/test-helpers.sh
+    if command -v shellcheck >/dev/null; then
+        shellcheck --severity=warning scripts/pi-image/*.sh \
+            packaging/deb/postinst packaging/deb/postrm
+    else
+        echo "shellcheck not installed — skipped"
+    fi
 
 # Regenerate the committed OpenAPI spec (CI fails on drift).
 openapi:

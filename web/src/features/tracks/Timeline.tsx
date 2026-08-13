@@ -3,27 +3,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { $api } from '../../api/client';
 import { ActionButton } from '../../design/ActionButton';
 import { useMixer } from '../../state/mixer';
-import { usePeaksStore, type TrackMeta } from '../../state/peaks';
+import { usePeaksStore } from '../../state/peaks';
 import { useTransport } from '../../state/transport';
-import type { StripState } from '../../ws/messages';
 import { Lane } from './Lane';
 import { Playhead } from './Playhead';
 import { TimeRuler } from './TimeRuler';
+import { laneName } from './lane-name';
 import { RECORD_FPP, clampFpp, fitFpp, totalPx } from './timeline';
 import { followScroll } from './follow';
 import styles from './Timeline.module.css';
-
-function laneName(meta: TrackMeta | undefined, strips: StripState[]): string {
-  if (!meta) return '—';
-  if (meta.channels === 2) return 'Master';
-  if (meta.stripId !== null) {
-    const strip = strips.find((s) => s.id === meta.stripId);
-    if (strip) return strip.name;
-  }
-  // Pre-strip_id takes: recover the name from the chNN-slug filename.
-  const stem = meta.file.replace(/\.wav$/, '');
-  return stem.replace(/^ch\d+-/, '') || stem;
-}
 
 /**
  * The multitrack editor surface. The view is VIRTUAL: an absolutely

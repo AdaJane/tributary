@@ -1,0 +1,13 @@
+# The appliance's one privileged escape hatch. tribd runs as a systemd
+# USER unit under a nologin service account with no capabilities, and
+# partitioning a drive needs CAP_SYS_ADMIN.
+#
+# No argument restriction, deliberately: sudoers wildcard matching is
+# famously escapable, so validation belongs in the script — which is
+# root-owned and not writable by the caller. The grant is therefore "may
+# run this exact program as root", nothing narrower and nothing wider, and
+# the program is the thing to review.
+#
+# Consequence, stated so nobody has to discover it: anyone who can reach
+# the console can erase an attached USB drive. That is the feature.
+tributary ALL=(root:root) NOPASSWD: /usr/local/lib/tributary/format-drive.sh

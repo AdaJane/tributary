@@ -2,6 +2,7 @@ import { MASTER_LED_STOPS, litSegments } from '../../audio/leds';
 import { Fader } from '../../design/Fader';
 import { LedMeter } from '../../design/LedMeter';
 import { TapeLabel } from '../../design/TapeLabel';
+import { renameSession, useSessions } from '../../state/sessions';
 import { SILENT_READING, readingClip, useMeters } from '../../state/meters';
 import { gesture } from '../../ws/send';
 import { FxRack } from './FxRack';
@@ -17,11 +18,20 @@ export function MasterSection({ masterDb }: { masterDb: number }) {
   );
   const peakDb = useMeters((s) => (s.byKey['master'] ?? SILENT_READING).peakDb);
   const clearClip = useMeters((s) => s.clearClip);
+  const session = useSessions((s) => s.sessions.find((row) => row.open) ?? null);
   const target = { kind: 'master' } as const;
 
   return (
     <aside className={styles.master}>
-      <TapeLabel id="project" name="Session" />
+      {/* The open session's own name, and the rename affordance the
+          console uses everywhere else. This was hardcoded to "Session"
+          while the daemon had been sending the real name all along —
+          after opening a differently-named session the tape simply lied. */}
+      <TapeLabel
+        id="session"
+        name={session?.name ?? 'Session'}
+        onRename={session ? (name) => void renameSession(session.id, name) : undefined}
+      />
       <div className={styles.meters}>
         {/* One master reading feeds both columns until stereo metering
             lands with the bus work. */}

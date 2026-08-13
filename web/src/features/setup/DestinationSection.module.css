@@ -176,3 +176,67 @@
   background: var(--led-red-on);
   box-shadow: var(--glow-red);
 }
+
+/* One block per physical drive. A flashed OS image reads as one drive
+   needing preparation rather than as loose mystery partitions — but every
+   volume stays on screen: MASTER.md forbids folding drive status. */
+.group {
+  margin-block-end: var(--s4);
+}
+
+.groupHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s2);
+  margin: 0 0 var(--s2);
+  padding-block-end: var(--s1);
+  border-block-end: 1px solid var(--border-divider);
+}
+
+.groupTitle {
+  font-family: var(--font-label);
+  font-size: var(--text-xs);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-label);
+}
+
+.groupDetail {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
+}
+
+.groupHeadline {
+  margin: 0 0 var(--s2);
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  color: var(--state-record);
+}
+
+/* Unusable volumes are de-emphasised, never hidden. The reason line
+   carries the meaning; the lamp only agrees with it. */
+.tileStatus[data-usable] {
+  color: var(--led-green-on);
+}
+
+.tileStatus[data-usable] .statusDot {
+  background: var(--led-green-on);
+  box-shadow: var(--glow-green);
+}
+
+.groupActions {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0 0 var(--s2);
+}
+
+/* A blocked Format button stays visible with its reason beside it: a
+   control that disappears teaches nothing about why. */
+.blocked {
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
+}

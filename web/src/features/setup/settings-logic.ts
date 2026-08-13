@@ -7,8 +7,10 @@
 export type DriveStatus = 'ready' | 'read-only' | 'missing';
 
 export interface DriveLike {
-  mountPath: string;
-  writable: boolean;
+  /** `null` when the drive is present but nothing mounted it. */
+  mountPath: string | null;
+  /** The daemon's verdict. Only `ready` means "recording will work". */
+  state: string;
 }
 
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'] as const;
@@ -40,13 +42,19 @@ export function destinationStatus(
     return 'missing';
   }
   const mount = drives
-    .filter((d) => destination === d.mountPath || destination.startsWith(withSlash(d.mountPath)))
+    .filter((d) => d.mountPath !== null)
+    .filter(
+      (d) => destination === d.mountPath || destination.startsWith(withSlash(d.mountPath as string)),
+    )
     .reduce<DriveLike | null>(
-      (best, d) => (best === null || d.mountPath.length > best.mountPath.length ? d : best),
+      (best, d) =>
+        best === null || (d.mountPath as string).length > (best.mountPath as string).length
+          ? d
+          : best,
       null,
     );
   if (mount === null) return 'ready';
-  return mount.writable ? 'ready' : 'read-only';
+  return mount.state === 'ready' ? 'ready' : 'read-only';
 }
 
 function withSlash(mount: string): string {

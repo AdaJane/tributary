@@ -58,6 +58,13 @@ export interface PeaksState {
   trackMeta: TrackMeta[];
   /** Recorded frames so far while live (max lane length × bin size). */
   liveFrames: number;
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  /** Why the waveform is missing. Null while it is fine. */
+  error: string | null;
+  /** Start loading a take: empties the document first, so a failed load
+   *  can never leave the PREVIOUS take's waveform under the new header. */
+  beginLoad: (take: number) => void;
+  failLoad: (message: string) => void;
   setPeaks: (take: number, peaks: TakePeaks, meta: TrackMeta[]) => void;
   /** Begin a live document: one empty growable lane per meta entry. */
   startLive: (take: number, meta: TrackMeta[]) => void;
@@ -71,6 +78,21 @@ export const usePeaksStore = create<PeaksState>((set, get) => ({
   tracks: [],
   trackMeta: [],
   liveFrames: 0,
+  status: 'idle',
+  error: null,
+  beginLoad: (take) => {
+    dropPendingBump();
+    liveBuffers = [];
+    set({
+      take,
+      tracks: [],
+      trackMeta: [],
+      liveFrames: 0,
+      status: 'loading',
+      error: null,
+    });
+  },
+  failLoad: (error) => set({ status: 'error', error, tracks: [], trackMeta: [] }),
   setPeaks: (take, peaks, meta) => {
     dropPendingBump();
     liveBuffers = [];
@@ -80,6 +102,8 @@ export const usePeaksStore = create<PeaksState>((set, get) => ({
       tracks: peaks.tracks,
       trackMeta: meta,
       liveFrames: 0,
+      status: 'ready',
+      error: null,
     });
   },
   startLive: (take, meta) => {
@@ -90,6 +114,8 @@ export const usePeaksStore = create<PeaksState>((set, get) => ({
       tracks: liveBuffers.map(() => new Int16Array(0)),
       trackMeta: meta,
       liveFrames: 0,
+      status: 'ready',
+      error: null,
     });
   },
   appendBins: (take, track, startBin, bins) => {
@@ -111,7 +137,14 @@ export const usePeaksStore = create<PeaksState>((set, get) => ({
   clear: () => {
     dropPendingBump();
     liveBuffers = [];
-    set({ take: null, tracks: [], trackMeta: [], liveFrames: 0 });
+    set({
+      take: null,
+      tracks: [],
+      trackMeta: [],
+      liveFrames: 0,
+      status: 'idle',
+      error: null,
+    });
   },
 }));
 

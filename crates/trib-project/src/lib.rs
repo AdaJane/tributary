@@ -13,8 +13,9 @@ pub use peaks::{
     PEAK_SAMPLES_PER_BIN, PeakAccum, compute_from_audio, read_or_compute, read_sidecar,
 };
 pub use project::{
-    Project, ProjectError, ProjectManifest, SCHEMA_VERSION, TakeInfo, TakeTrackInfo,
-    create_project, list_takes, load_latest, save_manifest,
+    Project, ProjectError, ProjectManifest, SCHEMA_VERSION, SessionDir, SessionSummary, TakeInfo,
+    TakeTrackInfo, create_project, delete_session, delete_take, list_sessions, list_takes,
+    load_latest, manifest_of, open_session, rename_session, resolve, save_manifest, validate_name,
 };
 pub use reader::{FeederHandle, PLAYBACK_RING_SECS, PlaybackSource, TrackFile, open_and_prime};
 pub use writer::{PeakBatch, PeaksTap, TakeTrackSpec, TrackSink, spawn_writer};

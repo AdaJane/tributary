@@ -58,21 +58,25 @@ docker run --rm \
     -w /repo \
     debian:trixie-slim bash -euc "
         export DEBIAN_FRONTEND=noninteractive
+        # Only /cargo and /rustup persist between runs — the container is
+        # fresh every time, so its trust store and dpkg state are not
+        # cached and both guards below would always miss. ca-certificates
+        # in particular has to be unconditional: with a warm toolchain
+        # cache the old code skipped installing it, and the first NEW
+        # crate that needed downloading died on a TLS handshake. Nothing
+        # catches that until a dependency is added, which is the worst
+        # possible time to be debugging the build container.
+        # ALSA headers are for the TARGET arch — cpal needs them, and the
+        # host copy is the wrong architecture.
+        dpkg --add-architecture arm64
+        apt-get update -qq
+        apt-get install -y -qq ca-certificates curl \
+            build-essential gcc-aarch64-linux-gnu pkg-config libasound2-dev:arm64 >/dev/null
         if [ ! -x /cargo/bin/cargo ]; then
-            apt-get update -qq
-            apt-get install -y -qq curl ca-certificates >/dev/null
             curl -fsSL https://sh.rustup.rs \
                 | sh -s -- -y --no-modify-path --default-toolchain '$TOOLCHAIN' >/dev/null
         fi
         export PATH=/cargo/bin:\$PATH
-        # ALSA headers for the TARGET arch — cpal needs them, and the host
-        # copy is the wrong architecture.
-        if ! dpkg -l gcc-aarch64-linux-gnu 2>/dev/null | grep -q '^ii'; then
-            dpkg --add-architecture arm64
-            apt-get update -qq
-            apt-get install -y -qq \
-                build-essential gcc-aarch64-linux-gnu pkg-config libasound2-dev:arm64 >/dev/null
-        fi
         rustup target add '$TARGET' >/dev/null
         cargo build --release -p tribd --features embed-ui
     "

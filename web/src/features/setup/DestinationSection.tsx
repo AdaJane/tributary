@@ -1,42 +1,13 @@
+import { useState } from 'react';
 import { FolderOpen, HardDrive, Usb } from 'lucide-react';
 
 import { ActionButton } from '../../design/ActionButton';
 import { TextField } from '../../design/TextField';
 import { loadDestinations, saveSettings, useSettings } from '../../state/settings';
-import type { Destination, RecordingSettings } from '../../state/settings';
-import { destinationStatus, formatBytes, owningPath } from './settings-logic';
+import { EMPTY_STATE_COPY, emptyState, groupDrives } from './drives-logic';
+import { FormatDiskModal } from './FormatDiskModal';
+import { destinationStatus, owningPath } from './settings-logic';
 import styles from './DestinationSection.module.css';
-
-/** Where a drive tile points recording: a tidy subdir, not the drive root. */
-const DRIVE_SUBDIR = 'tributary';
-
-interface Tile {
-  path: string;
-  label: string;
-  detail: string;
-  icon: 'internal' | 'usb' | 'drive';
-  status: 'ready' | 'read-only';
-}
-
-function driveTiles(settings: RecordingSettings, drives: readonly Destination[]): Tile[] {
-  const internal: Tile = {
-    path: settings.defaultDestination,
-    label: 'Internal',
-    detail: 'default',
-    icon: 'internal',
-    status: 'ready',
-  };
-  const mounted = drives
-    .filter((d) => d.mountPath !== '/')
-    .map<Tile>((d) => ({
-      path: `${d.mountPath}/${DRIVE_SUBDIR}`,
-      label: d.label,
-      detail: `${formatBytes(d.freeBytes)} free`,
-      icon: d.removable ? 'usb' : 'drive',
-      status: d.writable ? 'ready' : 'read-only',
-    }));
-  return [internal, ...mounted];
-}
 
 const TILE_ICONS = { internal: FolderOpen, usb: Usb, drive: HardDrive } as const;
 
@@ -48,16 +19,23 @@ const TILE_ICONS = { internal: FolderOpen, usb: Usb, drive: HardDrive } as const
 export function DestinationSection({ locked }: { locked: boolean }) {
   const settings = useSettings((s) => s.settings);
   const drives = useSettings((s) => s.destinations);
+  const canFormat = useSettings((s) => s.canFormat);
   const error = useSettings((s) => s.error);
+  const [formatting, setFormatting] = useState<string | null>(null);
 
   if (settings === null) {
     return <p className={styles.waiting}>waiting for the daemon…</p>;
   }
 
-  const tiles = driveTiles(settings, drives);
+  const groups = groupDrives(settings.defaultDestination, drives, {
+    canFormat,
+    recording: locked,
+  });
+  const empty = emptyState(groups);
+  const formattingGroup = groups.find((g) => g.key === formatting) ?? null;
   const selected = owningPath(
     settings.destination,
-    tiles.map((t) => t.path),
+    groups.flatMap((g) => g.tiles.map((t) => t.path)).filter((p): p is string => p !== null),
   );
   const pathStatus = destinationStatus(settings.destination, settings.configuredDestination, drives);
 
@@ -67,32 +45,67 @@ export function DestinationSection({ locked }: { locked: boolean }) {
 
   return (
     <div>
-      <div className={styles.tiles} role="listbox" aria-label="Destination drive">
-        {tiles.map((tile) => {
-          const Icon = TILE_ICONS[tile.icon];
-          return (
-            <button
-              key={tile.path}
-              type="button"
-              role="option"
-              className={styles.tile}
-              aria-selected={tile.path === selected}
-              data-selected={tile.path === selected || undefined}
-              data-status={tile.status}
-              disabled={locked || tile.status === 'read-only'}
-              onClick={() => choose(tile.path)}
-            >
-              <Icon size={18} aria-hidden />
-              <span className={styles.tileLabel}>{tile.label}</span>
-              <span className={styles.tileDetail}>{tile.detail}</span>
-              <span className={styles.tileStatus} data-status={tile.status}>
-                <span className={styles.statusDot} />
-                {tile.status}
-              </span>
-            </button>
-          );
-        })}
-      </div>
+      {groups.map((group) => (
+        <section key={group.key} className={styles.group}>
+          <h3 className={styles.groupHead}>
+            <span className={styles.groupTitle}>{group.title}</span>
+            <span className={styles.groupDetail}>{group.detail}</span>
+          </h3>
+          {group.headline && (
+            <p className={styles.groupHeadline} role="status">
+              {group.headline}
+            </p>
+          )}
+          {group.key !== 'internal' && (
+            <p className={styles.groupActions}>
+              <ActionButton
+                label="Format…"
+                ariaLabel={`Format ${group.title}`}
+                onPress={() => setFormatting(group.key)}
+                disabled={group.formatBlocked !== null}
+              />
+              {group.formatBlocked && (
+                <span className={styles.blocked}>{group.formatBlocked}</span>
+              )}
+            </p>
+          )}
+          <div className={styles.tiles} role="listbox" aria-label={`Volumes on ${group.title}`}>
+            {group.tiles.map((tile) => {
+              const Icon = TILE_ICONS[tile.icon];
+              const isSelected = tile.path !== null && tile.path === selected;
+              return (
+                <button
+                  key={tile.path ?? `${group.key}:${tile.label}`}
+                  type="button"
+                  role="option"
+                  className={styles.tile}
+                  aria-selected={isSelected}
+                  data-selected={isSelected || undefined}
+                  data-state={tile.state}
+                  disabled={locked || !tile.selectable}
+                  onClick={() => tile.path !== null && choose(tile.path)}
+                >
+                  <Icon size={18} aria-hidden />
+                  <span className={styles.tileLabel}>{tile.label}</span>
+                  <span className={styles.tileDetail}>{tile.detail}</span>
+                  {/* The reason is text, never colour alone — a dot that
+                      only differs by hue says nothing to half the room. */}
+                  <span className={styles.tileStatus} data-usable={tile.selectable || undefined}>
+                    <span className={styles.statusDot} />
+                    {tile.reason ?? 'ready'}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      ))}
+
+      {empty && (
+        <p className={styles.hint} role="status">
+          {EMPTY_STATE_COPY[empty]}
+        </p>
+      )}
 
       <div className={styles.custom}>
         <span className={styles.customLabel}>Custom</span>
@@ -123,6 +136,9 @@ export function DestinationSection({ locked }: { locked: boolean }) {
         <p className={styles.lockHint} role="status">
           destination locked while recording
         </p>
+      )}
+      {formattingGroup && (
+        <FormatDiskModal group={formattingGroup} open onClose={() => setFormatting(null)} />
       )}
       {error?.field === 'destination' && (
         <p className={styles.error} role="status">

@@ -10,6 +10,11 @@ use trib_core::MixerState;
 pub const SCHEMA_VERSION: u32 = 1;
 const MANIFEST_FILE: &str = "project.toml";
 
+/// Longest session name we accept. The name is slugged into a directory
+/// component, and 255 bytes is the ceiling on both ext4 and exFAT — this
+/// leaves room for the `{unix}-` prefix with a wide margin.
+const MAX_NAME: usize = 64;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
     #[error("io: {0}")]
@@ -18,6 +23,98 @@ pub enum ProjectError {
     Parse(#[from] toml::de::Error),
     #[error("manifest: {0}")]
     Serialize(#[from] toml::ser::Error),
+    #[error("name: {0}")]
+    BadName(&'static str),
+    /// A client-supplied id that is not a single, ordinary path component.
+    #[error("not a session id")]
+    BadId,
+    /// The id resolved outside the root, or to a directory holding no
+    /// manifest — so not a session this daemon created.
+    #[error("no session there")]
+    NotASession,
+    /// A session directory of that name already exists.
+    #[error("a session of that name already exists")]
+    Exists,
+}
+
+/// Trimmed, single-line, 1..=64 characters.
+///
+/// Traversal through the *name* is already impossible — `create_project`
+/// slugs every non-alphanumeric character to `-`, so `"../../etc"` becomes
+/// `"-------"`. This guards length and legibility, not containment; that
+/// job belongs to [`resolve`].
+pub fn validate_name(name: &str) -> Result<&str, ProjectError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(ProjectError::BadName("name the session"));
+    }
+    if trimmed.chars().count() > MAX_NAME {
+        return Err(ProjectError::BadName("at most 64 characters"));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(ProjectError::BadName("one line, no control characters"));
+    }
+    Ok(trimmed)
+}
+
+/// A directory proved to be a session directly under a projects root.
+///
+/// Constructed only by [`resolve`], so nothing downstream can be handed a
+/// client's path by accident — the type *is* the proof.
+#[derive(Debug, Clone)]
+pub struct SessionDir(PathBuf);
+
+impl SessionDir {
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// The directory name — the stable id a client holds.
+    pub fn id(&self) -> &str {
+        self.0
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("resolve only builds from a validated component")
+    }
+}
+
+/// Turn a client-supplied id into a session directory, or refuse.
+///
+/// The one place a client string becomes a path, and the security boundary
+/// of the whole sessions feature. Three gates, each covering something the
+/// others do not:
+///
+/// 1. The id must be exactly one ordinary path component that round-trips
+///    to the string we were given. Required because axum percent-decodes
+///    path params *before* the handler sees them, so `..%2F..%2Fetc`
+///    arrives here as the single string `../../etc`.
+/// 2. Canonicalised, the candidate must be a DIRECT CHILD of the
+///    canonicalised root. `starts_with` would wave through
+///    `<root>/gig/takes/take-001`; canonicalising is what defeats a
+///    symlink planted in the root.
+/// 3. It must hold a manifest. The destination is user-chosen and can
+///    legitimately be a home directory — without this, listing and
+///    deleting sessions would be a file manager for it.
+pub fn resolve(projects_root: &Path, id: &str) -> Result<SessionDir, ProjectError> {
+    let mut parts = Path::new(id).components();
+    match (parts.next(), parts.next()) {
+        (Some(std::path::Component::Normal(part)), None) if part == id => {}
+        _ => return Err(ProjectError::BadId),
+    }
+    let root = projects_root
+        .canonicalize()
+        .map_err(|_| ProjectError::NotASession)?;
+    let dir = root
+        .join(id)
+        .canonicalize()
+        .map_err(|_| ProjectError::NotASession)?;
+    if dir.parent() != Some(root.as_path()) {
+        return Err(ProjectError::NotASession);
+    }
+    if !dir.join(MANIFEST_FILE).is_file() {
+        return Err(ProjectError::NotASession);
+    }
+    Ok(SessionDir(dir))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +169,7 @@ pub fn create_project(
     name: &str,
     state: &MixerState,
 ) -> Result<Project, ProjectError> {
+    let name = validate_name(name)?;
     let created = now_unix();
     let slug: String = name
         .to_lowercase()
@@ -79,6 +177,18 @@ pub fn create_project(
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect();
     let dir = projects_root.join(format!("{created}-{slug}"));
+    // `create_dir`, deliberately not `create_dir_all`: the latter succeeds
+    // on an existing directory, so two creates in the same second would
+    // silently land on one — the second overwriting the first's manifest
+    // and inheriting its takes. The failing mkdir IS the collision check.
+    std::fs::create_dir_all(projects_root)?;
+    match std::fs::create_dir(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(ProjectError::Exists);
+        }
+        Err(e) => return Err(e.into()),
+    }
     std::fs::create_dir_all(dir.join("takes"))?;
     let project = Project {
         dir,
@@ -168,18 +278,144 @@ pub fn list_takes(project: &Project) -> Vec<TakeInfo> {
     takes
 }
 
-/// The most recently created project under the root, if any. Unreadable
-/// manifests are skipped with a warning — one corrupt directory must not
-/// stop the daemon from booting.
-pub fn load_latest(projects_root: &Path) -> Option<(Project, ProjectManifest)> {
-    let entries = std::fs::read_dir(projects_root).ok()?;
+/// Candidate project directories, newest first.
+///
+/// The directory name leads with the creation timestamp, so a lexicographic
+/// sort is chronological. `load_latest` and `list_sessions` share this so
+/// they can never disagree about which session is newest — the head of the
+/// browser's list must be the one an adopt would open.
+fn project_dirs(projects_root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(projects_root) else {
+        return Vec::new();
+    };
     let mut dirs: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.is_dir())
         .collect();
     dirs.sort();
-    for dir in dirs.into_iter().rev() {
+    dirs.reverse();
+    dirs
+}
+
+/// One session, as the browser lists it. Deliberately not the manifest:
+/// a list must not carry a full `MixerState` per row.
+#[derive(Debug, Clone)]
+pub struct SessionSummary {
+    /// The directory name — the stable id, unchanged by a rename.
+    pub id: String,
+    pub name: String,
+    pub created_at_unix: u64,
+    pub take_count: usize,
+}
+
+/// Every readable session under the root, newest first.
+///
+/// Take counting stats `take.toml` rather than parsing it: thirty sessions
+/// of forty takes would otherwise be twelve hundred TOML parses per list,
+/// over USB. The one divergence from [`list_takes`] is that a present but
+/// corrupt manifest is counted here and hidden there.
+///
+/// Blocking. Degrades like `load_latest` rather than failing — an
+/// unreadable root is an empty list, which is what a drive with nothing on
+/// it should render as.
+pub fn list_sessions(projects_root: &Path) -> Vec<SessionSummary> {
+    project_dirs(projects_root)
+        .into_iter()
+        .filter_map(|dir| {
+            let manifest = load_manifest(&dir).ok()?;
+            let id = dir.file_name()?.to_str()?.to_owned();
+            Some(SessionSummary {
+                id,
+                name: manifest.name,
+                created_at_unix: manifest.created_at_unix,
+                take_count: count_takes(&dir),
+            })
+        })
+        .collect()
+}
+
+fn count_takes(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir.join("takes")) else {
+        return 0;
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().join("take.toml").is_file())
+        .count()
+}
+
+/// Open one specific session — the by-id counterpart to `load_latest`,
+/// which is otherwise the only way a project ever gets opened.
+pub fn open_session(dir: &SessionDir) -> Result<(Project, ProjectManifest), ProjectError> {
+    let manifest = load_manifest(dir.path())?;
+    Ok((
+        Project {
+            dir: dir.path().to_owned(),
+            name: manifest.name.clone(),
+        },
+        manifest,
+    ))
+}
+
+/// The manifest of a project we already hold — for a freshly created one,
+/// where there is no id to resolve through yet.
+pub fn manifest_of(project: &Project) -> Result<ProjectManifest, ProjectError> {
+    load_manifest(&project.dir)
+}
+
+/// Retitle a session: read the manifest, replace the name, write it back.
+///
+/// The DIRECTORY is never renamed, and that is deliberate. Its name is the
+/// session's identity — the id in every client's list and in any in-flight
+/// request — and `load_latest` orders sessions by it, so re-slugging would
+/// silently move a session in the boot-time "newest" ordering. It also
+/// keeps open take paths valid: the take writer captures its directory up
+/// front and the playback feeder reopens files on every loop pass.
+pub fn rename_session(dir: &SessionDir, new_name: &str) -> Result<ProjectManifest, ProjectError> {
+    let new_name = validate_name(new_name)?;
+    let manifest = load_manifest(dir.path())?;
+    let project = Project {
+        dir: dir.path().to_owned(),
+        name: new_name.to_owned(),
+    };
+    save_manifest(&project, &manifest.mixer, manifest.created_at_unix)?;
+    load_manifest(dir.path())
+}
+
+/// Permanently remove a session and every take in it. The first
+/// destructive filesystem operation in this crate.
+///
+/// The manifest is unlinked first so the delete commits at a single
+/// `unlink`: `remove_dir_all` is not atomic, and a power cut mid-delete on
+/// a USB stick is a realistic event here. After that first step any
+/// remainder is inert — both `list_sessions` and `load_latest` require a
+/// readable manifest, so it is never listed, never adopted and never
+/// recorded into. It does still occupy space until someone clears it.
+///
+/// Takes the proof token by value: deleting twice is unrepresentable.
+pub fn delete_session(dir: SessionDir) -> Result<(), ProjectError> {
+    std::fs::remove_file(dir.path().join(MANIFEST_FILE))?;
+    std::fs::remove_dir_all(dir.path())?;
+    Ok(())
+}
+
+/// Remove one take — audio, peaks sidecars and manifest together.
+///
+/// The number is formatted into `take-NNN` here, so no caller-supplied
+/// path ever reaches the filesystem. Note `Project::next_take` is max + 1,
+/// so deleting the newest take frees its number for the next recording;
+/// deleting a middle one leaves a permanent gap. Both are intended.
+pub fn delete_take(project: &Project, take: u32) -> Result<(), ProjectError> {
+    std::fs::remove_dir_all(project.takes_dir().join(format!("take-{take:03}")))?;
+    Ok(())
+}
+
+/// The most recently created project under the root, if any. Unreadable
+/// manifests are skipped with a warning — one corrupt directory must not
+/// stop the daemon from booting.
+pub fn load_latest(projects_root: &Path) -> Option<(Project, ProjectManifest)> {
+    for dir in project_dirs(projects_root) {
         match load_manifest(&dir) {
             Ok(manifest) => {
                 let project = Project {
@@ -207,6 +443,11 @@ mod tests {
         }
     }
 
+    /// A minimal finished take, for tests that only care that one exists.
+    const TAKE: &str = "schema_version = 1\nstarted_at_unix = 100\nsample_rate = 48000\n\
+                        damaged = false\n\n[[tracks]]\nfile = \"master.wav\"\n\
+                        channels = 2\nframes = 96000\ndropped_samples = 0\n";
+
     #[test]
     fn create_save_load_round_trips_the_mixer() {
         let root = tempfile::tempdir().unwrap();
@@ -216,6 +457,241 @@ mod tests {
         assert_eq!(manifest.schema_version, SCHEMA_VERSION);
         assert_eq!(manifest.mixer, state());
         assert_eq!(project.next_take(), 1);
+    }
+
+    /// The security test. Every one of these strings is something a client
+    /// can put in a URL path segment, and `resolve` is the only thing
+    /// between them and `remove_dir_all`.
+    #[test]
+    fn resolve_refuses_anything_that_is_not_a_session_directly_under_the_root() {
+        let root = tempfile::tempdir().unwrap();
+        create_project(root.path(), "gig", &state()).unwrap();
+        let id = list_sessions(root.path())[0].id.clone();
+        // The happy path, so the refusals below mean something.
+        assert!(resolve(root.path(), &id).is_ok());
+
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../..",
+            // What `..%2F..%2Fetc` becomes: axum percent-decodes before the
+            // handler sees it, so a scan for '/' in the raw param is not
+            // enough — the component check is what catches this.
+            "../../etc",
+            "a/b",
+            "/etc",
+            "/",
+            "gig/takes",
+        ] {
+            assert!(
+                matches!(
+                    resolve(root.path(), bad),
+                    Err(ProjectError::BadId | ProjectError::NotASession)
+                ),
+                "resolve accepted {bad:?}"
+            );
+        }
+
+        // A real directory under the root that this daemon did not create.
+        // The destination is user-chosen and can be a home directory, so
+        // without the manifest check this API would be a file manager.
+        std::fs::create_dir(root.path().join("holiday-photos")).unwrap();
+        assert!(matches!(
+            resolve(root.path(), "holiday-photos"),
+            Err(ProjectError::NotASession)
+        ));
+
+        // A nested directory of a real session is not itself a session.
+        assert!(resolve(root.path(), &format!("{id}/takes")).is_err());
+    }
+
+    /// Two sessions created inside one second must not merge. Before the
+    /// `create_dir` fix, the second silently overwrote the first's manifest
+    /// and inherited its takes.
+    #[test]
+    fn two_sessions_created_in_the_same_second_do_not_collide() {
+        let root = tempfile::tempdir().unwrap();
+        let first = create_project(root.path(), "gig", &state()).unwrap();
+        std::fs::create_dir_all(first.dir.join("takes/take-001")).unwrap();
+        std::fs::write(first.dir.join("takes/take-001/take.toml"), TAKE).unwrap();
+
+        // Same name, same second: refused rather than silently merged.
+        assert!(matches!(
+            create_project(root.path(), "gig", &state()),
+            Err(ProjectError::Exists)
+        ));
+        // And the first session is untouched.
+        let sessions = list_sessions(root.path());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "gig");
+        assert_eq!(sessions[0].take_count, 1);
+    }
+
+    #[test]
+    fn a_name_that_is_empty_or_too_long_or_multiline_is_refused() {
+        assert!(validate_name("Friday Night").is_ok());
+        // Trimmed, not rejected.
+        assert_eq!(validate_name("  Gig  ").unwrap(), "Gig");
+        for bad in ["", "   ", "line\nbreak", "nul\0byte"] {
+            assert!(validate_name(bad).is_err(), "accepted {bad:?}");
+        }
+        assert!(validate_name(&"x".repeat(64)).is_ok());
+        // 65 characters would push the slugged directory component toward
+        // the 255-byte filesystem ceiling.
+        assert!(validate_name(&"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn list_sessions_reports_every_session_newest_first_with_take_counts() {
+        let root = tempfile::tempdir().unwrap();
+        // Distinct directory names, since the prefix is a whole second.
+        for (dir, name) in [("100-old", "old"), ("200-mid", "mid"), ("300-new", "new")] {
+            let project = Project {
+                dir: root.path().join(dir),
+                name: name.into(),
+            };
+            std::fs::create_dir_all(project.dir.join("takes")).unwrap();
+            save_manifest(&project, &state(), 1).unwrap();
+        }
+        let with_takes = root.path().join("200-mid/takes");
+        for take in ["take-001", "take-002"] {
+            std::fs::create_dir_all(with_takes.join(take)).unwrap();
+            std::fs::write(with_takes.join(take).join("take.toml"), TAKE).unwrap();
+        }
+        // A take directory with no manifest is mid-recording or torn, and
+        // is invisible to `list_takes` — so it must not be counted here.
+        std::fs::create_dir_all(with_takes.join("take-003")).unwrap();
+
+        let sessions = list_sessions(root.path());
+        assert_eq!(
+            sessions.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["new", "mid", "old"]
+        );
+        assert_eq!(sessions[1].id, "200-mid");
+        assert_eq!(sessions[1].take_count, 2);
+        assert_eq!(sessions[0].take_count, 0);
+    }
+
+    /// The head of the browser's list must be the session an adopt opens,
+    /// or the console and the daemon disagree about what is current.
+    #[test]
+    fn list_sessions_and_load_latest_agree_on_the_newest() {
+        let root = tempfile::tempdir().unwrap();
+        for (dir, name) in [("100-old", "old"), ("300-new", "new")] {
+            let project = Project {
+                dir: root.path().join(dir),
+                name: name.into(),
+            };
+            std::fs::create_dir_all(project.dir.join("takes")).unwrap();
+            save_manifest(&project, &state(), 1).unwrap();
+        }
+        // A directory with no manifest must not win either race.
+        std::fs::create_dir_all(root.path().join("999-not-a-session")).unwrap();
+
+        let listed = &list_sessions(root.path())[0];
+        let (adopted, _) = load_latest(root.path()).unwrap();
+        assert_eq!(listed.name, adopted.name);
+        assert_eq!(
+            listed.id,
+            adopted.dir.file_name().unwrap().to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_rename_moves_the_manifest_name_and_never_the_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let created = create_project(root.path(), "gig", &state()).unwrap();
+        let id = created
+            .dir
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+
+        let dir = resolve(root.path(), &id).unwrap();
+        rename_session(&dir, "Saturday").unwrap();
+
+        // The directory — the identity — is untouched, so outstanding ids
+        // stay valid and the boot-time ordering does not move.
+        assert!(created.dir.is_dir());
+        assert_eq!(list_sessions(root.path())[0].id, id);
+        assert_eq!(list_sessions(root.path())[0].name, "Saturday");
+        assert!(resolve(root.path(), &id).is_ok());
+        // And the console survived the round trip.
+        let (_, manifest) = open_session(&resolve(root.path(), &id).unwrap()).unwrap();
+        assert_eq!(manifest.mixer, state());
+    }
+
+    #[test]
+    fn delete_removes_the_session_and_leaves_its_siblings_alone() {
+        let root = tempfile::tempdir().unwrap();
+        for (dir, name) in [("100-keep", "keep"), ("200-drop", "drop")] {
+            let project = Project {
+                dir: root.path().join(dir),
+                name: name.into(),
+            };
+            std::fs::create_dir_all(project.dir.join("takes/take-001")).unwrap();
+            std::fs::write(project.dir.join("takes/take-001/take.toml"), TAKE).unwrap();
+            save_manifest(&project, &state(), 1).unwrap();
+        }
+        delete_session(resolve(root.path(), "200-drop").unwrap()).unwrap();
+
+        assert!(!root.path().join("200-drop").exists());
+        let left = list_sessions(root.path());
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].name, "keep");
+        assert_eq!(left[0].take_count, 1);
+    }
+
+    /// The interrupted-delete invariant. The real interruption is not
+    /// unit-testable without fault injection, so this pins the property it
+    /// relies on: once the manifest is gone the remainder is inert.
+    #[test]
+    fn a_session_whose_manifest_is_gone_is_invisible_to_list_and_load_latest() {
+        let root = tempfile::tempdir().unwrap();
+        let good = Project {
+            dir: root.path().join("100-good"),
+            name: "good".into(),
+        };
+        std::fs::create_dir_all(good.dir.join("takes")).unwrap();
+        save_manifest(&good, &state(), 1).unwrap();
+
+        let torn = root.path().join("900-half-deleted");
+        std::fs::create_dir_all(torn.join("takes/take-001")).unwrap();
+
+        assert_eq!(list_sessions(root.path()).len(), 1);
+        assert_eq!(load_latest(root.path()).unwrap().0.name, "good");
+        assert!(matches!(
+            resolve(root.path(), "900-half-deleted"),
+            Err(ProjectError::NotASession)
+        ));
+    }
+
+    #[test]
+    fn delete_take_removes_the_whole_take_and_frees_the_newest_number() {
+        let root = tempfile::tempdir().unwrap();
+        let project = create_project(root.path(), "gig", &state()).unwrap();
+        for take in ["take-001", "take-002", "take-003"] {
+            let dir = project.takes_dir().join(take);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("take.toml"), TAKE).unwrap();
+            std::fs::write(dir.join("ch01-test.wav"), b"audio").unwrap();
+            std::fs::write(dir.join("ch01-test.peaks"), b"peaks").unwrap();
+        }
+        assert_eq!(project.next_take(), 4);
+
+        delete_take(&project, 3).unwrap();
+        assert!(!project.takes_dir().join("take-003").exists());
+        assert_eq!(list_takes(&project).len(), 2);
+        // Deleting the newest frees its number — rewind and record over it.
+        assert_eq!(project.next_take(), 3);
+
+        // Deleting a middle take leaves a permanent gap, which is correct.
+        delete_take(&project, 1).unwrap();
+        assert_eq!(project.next_take(), 3);
+        assert_eq!(list_takes(&project).len(), 1);
     }
 
     #[test]

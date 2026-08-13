@@ -1912,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "trib-audio"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "assert_no_alloc",
  "cpal",
@@ -1926,7 +1926,7 @@ dependencies = [
 
 [[package]]
 name = "trib-core"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1936,7 +1936,7 @@ dependencies = [
 
 [[package]]
 name = "trib-dsp"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "biquad",
  "trib-core",
@@ -1944,7 +1944,7 @@ dependencies = [
 
 [[package]]
 name = "trib-engine"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "assert_no_alloc",
  "rtrb",
@@ -1954,7 +1954,7 @@ dependencies = [
 
 [[package]]
 name = "trib-project"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "flacenc",
  "hound",
@@ -1972,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "tribd"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "axum",
  "clap",
@@ -1981,6 +1981,7 @@ dependencies = [
  "hound",
  "rtrb",
  "rust-embed",
+ "rustix",
  "serde",
  "serde_json",
  "sysinfo",

@@ -1,11 +1,13 @@
 import { useEffect } from 'react';
 
-import { $api, API_BASE_URL } from '../../api/client';
+import { API_BASE_URL } from '../../api/client';
 import { useMixer } from '../../state/mixer';
 import { usePeaksStore } from '../../state/peaks';
+import { useTakes } from '../../state/takes';
 import { useTransport } from '../../state/transport';
 import { wsClient } from '../../ws/client-instance';
 import { parsePeaks } from './peaks-parse';
+import { peaksErrorMessage } from './take-errors';
 
 /** Keep the take document current: finished takes load wholesale; while
  * recording, lanes for the armed strips grow from the Waveform channel. */
@@ -46,30 +48,53 @@ export function usePeaks(): void {
     };
   }, []);
 
+  // Metadata comes from the take store, which the browser keeps current
+  // anyway. This used to GET the whole take list on every take change and
+  // throw away every row but one.
+  const info = useTakes((s) => s.takes.find((t) => t.take === take) ?? null);
+
   useEffect(() => {
-    if (take === null || recording) return;
+    if (take === null) {
+      // The shelf emptied — stop painting a take that is gone.
+      usePeaksStore.getState().clear();
+      return;
+    }
+    if (recording || info === null) return;
     let cancelled = false;
-    void Promise.all([
-      fetch(`${API_BASE_URL}/api/v1/takes/${take}/peaks`).then((res) =>
-        res.ok ? res.arrayBuffer() : null,
-      ),
-      $api.GET('/api/v1/takes').then(({ data }) => data?.find((t) => t.take === take) ?? null),
-    ])
-      .then(([buffer, info]) => {
-        if (cancelled || !buffer || !info) return;
-        const parsed = parsePeaks(buffer);
-        if (!parsed) return;
-        const meta = info.tracks.map((t) => ({
-          file: t.file,
-          channels: t.channels,
-          stripId: t.strip_id ?? null,
-          damaged: t.dropped_samples > 0,
-        }));
-        usePeaksStore.getState().setPeaks(take, parsed, meta);
+    const store = usePeaksStore.getState();
+    store.beginLoad(take);
+    // Every failure below says something. This whole path used to end in
+    // `.catch(() => undefined)` with a non-ok response resolving to null,
+    // so a broken take rendered as an empty room and nothing else.
+    void fetch(`${API_BASE_URL}/api/v1/takes/${take}/peaks`)
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) {
+          usePeaksStore.getState().failLoad(peaksErrorMessage(res.status));
+          return;
+        }
+        const parsed = parsePeaks(await res.arrayBuffer());
+        if (cancelled) return;
+        if (!parsed) {
+          usePeaksStore.getState().failLoad(peaksErrorMessage('malformed'));
+          return;
+        }
+        usePeaksStore.getState().setPeaks(
+          take,
+          parsed,
+          info.tracks.map((t) => ({
+            file: t.file,
+            channels: t.channels,
+            stripId: t.stripId,
+            damaged: t.damaged,
+          })),
+        );
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (!cancelled) usePeaksStore.getState().failLoad(peaksErrorMessage('network'));
+      });
     return () => {
       cancelled = true;
     };
-  }, [take, recording]);
+  }, [take, recording, info]);
 }

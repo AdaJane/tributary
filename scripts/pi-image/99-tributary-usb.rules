@@ -1,0 +1,35 @@
+# Mount USB filesystems for the Tributary console.
+#
+# Raspberry Pi OS Lite has no automounter: udisks2 ships in the base image
+# and runs, but it only mounts when a client calls Filesystem.Mount, and a
+# headless install has no such client. Without this rule a plugged-in stick
+# never reaches the mount table, and the console's destination list — which
+# reads the mount table — stays blind to it.
+#
+# ID_BUS is the discriminator, verified on hardware: the USB stick's
+# partitions carry ID_BUS=usb, and the SD card's mmcblk0p2 carries no ID_BUS
+# at all, so the boot media can never match. A Pi booted *from* USB does
+# match, and usb-mount.sh's already-mounted guard covers that case.
+#
+# ID_FS_USAGE=filesystem admits both partitions and whole disks written
+# without a partition table.
+
+# `change`, not just `add`: it is what a card reader emits when the card is
+# swapped without replugging the reader, and what the kernel emits once
+# mkfs closes the device — which is how a drive formatted from the console
+# remounts itself with no physical replug. It also means this rule fires
+# more than once per device, so the helper's already-mounted guard is
+# load-bearing rather than defensive.
+ACTION!="add|change",           GOTO="tributary_usb_end"
+SUBSYSTEM!="block",             GOTO="tributary_usb_end"
+ENV{ID_FS_USAGE}!="filesystem", GOTO="tributary_usb_end"
+ENV{ID_BUS}!="usb",             GOTO="tributary_usb_end"
+# A whole disk carrying both a filesystem signature and a partition table
+# is a hybrid ISO; it belongs to its partitions, not to us. A true
+# superfloppy (mkfs straight onto /dev/sda, no table) has no
+# ID_PART_TABLE_TYPE and still matches, which is the case this keeps working.
+ENV{DEVTYPE}=="disk", ENV{ID_PART_TABLE_TYPE}!="", GOTO="tributary_usb_end"
+
+RUN+="/usr/local/lib/tributary/usb-mount.sh %E{DEVNAME} %E{ID_FS_TYPE} %E{ID_FS_LABEL}"
+
+LABEL="tributary_usb_end"

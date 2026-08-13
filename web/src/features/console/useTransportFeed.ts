@@ -13,7 +13,7 @@ export function useTransportFeed(): void {
       if (message.type === 'transport') {
         useTransport.getState().apply(message.state);
       } else if (message.type === 'playback_position') {
-        useTransport.getState().applyPosition(message.frames);
+        useTransport.getState().applyPosition(message.take, message.frames);
       }
     });
     void $api.GET('/api/v1/transport').then(({ data }) => {

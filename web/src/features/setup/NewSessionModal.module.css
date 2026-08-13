@@ -1,0 +1,53 @@
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  min-width: 280px;
+  max-width: 400px;
+}
+
+.seed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.consequence {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+/* Words, not colour: the warning has to survive a greyscale screen. */
+.warn {
+  margin: 0;
+  padding: var(--s2);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  color: var(--text-value);
+}
+
+.hint {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
+}
+
+.error {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  color: var(--state-record);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s2);
+}

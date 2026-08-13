@@ -51,8 +51,13 @@ pub enum TransportError {
     Busy(&'static str),
     /// PLAY with an empty shelf.
     NoTake,
+    /// A take number that is not in the open session — distinct from
+    /// `NoTake`, which is "there are none at all".
+    NoSuchTake,
     /// A lane index past the take's tracks.
     NoSuchLane,
+    /// A session id that does not name a session under the active root.
+    NoSuchSession,
     /// A loop region the take can't honor.
     BadLoop(&'static str),
     /// The take was cut at a different rate than the engine runs — no
@@ -62,6 +67,27 @@ pub enum TransportError {
     /// off-whitelist rate).
     BadSetting(String),
     Io(String),
+}
+
+/// Which session is open. The id is its directory name — stable across a
+/// rename, because a rename never moves the directory.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionRef {
+    pub id: String,
+    pub name: String,
+}
+
+impl SessionRef {
+    fn of(project: &Project) -> Self {
+        SessionRef {
+            id: project
+                .dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            name: project.name.clone(),
+        }
+    }
 }
 
 pub enum ControlMsg {
@@ -106,6 +132,42 @@ pub enum ControlMsg {
         solo: Option<bool>,
         mute: Option<bool>,
         reply: oneshot::Sender<Result<TransportDto, TransportError>>,
+    },
+    /// Point the transport at a take of the open session.
+    SelectTake {
+        take: u32,
+        reply: oneshot::Sender<Result<TransportDto, TransportError>>,
+    },
+    /// Remove one take from the open session, permanently.
+    DeleteTake {
+        take: u32,
+        reply: oneshot::Sender<Result<(), TransportError>>,
+    },
+    /// Tear off fresh tape in the active root and put it on the machine.
+    CreateSession {
+        name: String,
+        seed: crate::console::SessionSeed,
+        reply: oneshot::Sender<Result<SessionRef, TransportError>>,
+    },
+    /// Put a different existing session on the machine.
+    OpenSession {
+        id: String,
+        reply: oneshot::Sender<Result<SessionRef, TransportError>>,
+    },
+    /// Retitle a session — the open one or any other in the active root.
+    RenameSession {
+        id: String,
+        name: String,
+        reply: oneshot::Sender<Result<SessionRef, TransportError>>,
+    },
+    /// Permanently delete a session that is not the open one.
+    DeleteSession {
+        id: String,
+        reply: oneshot::Sender<Result<(), TransportError>>,
+    },
+    /// Which session is open, for the sessions listing and the tape label.
+    Session {
+        reply: oneshot::Sender<SessionRef>,
     },
     Transport {
         reply: oneshot::Sender<TransportDto>,
@@ -266,6 +328,91 @@ impl ControlHandle {
         response.await.expect("control task replies")
     }
 
+    pub async fn select_take(&self, take: u32) -> Result<TransportDto, TransportError> {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(ControlMsg::SelectTake { take, reply })
+            .await
+            .expect("control task outlives its callers");
+        response.await.expect("control task replies")
+    }
+
+    pub async fn delete_take(&self, take: u32) -> Result<(), TransportError> {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(ControlMsg::DeleteTake { take, reply })
+            .await
+            .expect("control task outlives its callers");
+        response.await.expect("control task replies")
+    }
+
+    pub async fn create_session(
+        &self,
+        name: String,
+        seed: crate::console::SessionSeed,
+    ) -> Result<SessionRef, TransportError> {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(ControlMsg::CreateSession { name, seed, reply })
+            .await
+            .expect("control task outlives its callers");
+        response.await.expect("control task replies")
+    }
+
+    pub async fn open_session(&self, id: String) -> Result<SessionRef, TransportError> {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(ControlMsg::OpenSession { id, reply })
+            .await
+            .expect("control task outlives its callers");
+        response.await.expect("control task replies")
+    }
+
+    pub async fn rename_session(
+        &self,
+        id: String,
+        name: String,
+    ) -> Result<SessionRef, TransportError> {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(ControlMsg::RenameSession { id, name, reply })
+            .await
+            .expect("control task outlives its callers");
+        response.await.expect("control task replies")
+    }
+
+    pub async fn delete_session(&self, id: String) -> Result<(), TransportError> {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(ControlMsg::DeleteSession { id, reply })
+            .await
+            .expect("control task outlives its callers");
+        response.await.expect("control task replies")
+    }
+
+    /// Stand in for the writer-join task, which is what normally reports a
+    /// finished take. Tests need to move the shelf without recording.
+    #[cfg(test)]
+    async fn take_finalized(&self) {
+        self.tx
+            .send(ControlMsg::TakeFinalized)
+            .await
+            .expect("control task outlives its callers");
+        // The message is fire-and-forget; a round trip through a replying
+        // message is how we know it has been handled.
+        let _ = self.transport().await;
+    }
+
+    /// Which session is open. Cheap — no disk.
+    pub async fn session(&self) -> SessionRef {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(ControlMsg::Session { reply })
+            .await
+            .expect("control task outlives its callers");
+        response.await.expect("control task replies")
+    }
+
     /// The orchestrator thread's slot updates — blocking send, called
     /// off-runtime only.
     pub fn input_slots_changed_blocking(&self, slots: trib_engine::InputSlots) {
@@ -416,10 +563,12 @@ enum TransportState {
     Recording(RecordingTake),
 }
 
-/// The latest take, cached so every transport reply doesn't re-read disk.
-/// Refreshed at boot and on `TakeFinalized`.
+/// The take the transport points at: what PLAY rolls, what `lanes` gate,
+/// what the ruler measures. Cached so every transport reply doesn't
+/// re-read disk. Defaults to the newest and follows every new take; the
+/// console can point it anywhere in the open session.
 #[derive(Clone)]
-struct LatestTake {
+struct SelectedTake {
     take: u32,
     sample_rate: u32,
     format: trib_project::RecordFormat,
@@ -427,22 +576,38 @@ struct LatestTake {
     tracks: Vec<TakeTrackInfo>,
 }
 
-fn load_latest_take(project: &Project) -> Option<LatestTake> {
-    let info = list_takes(project).into_iter().next()?;
-    Some(LatestTake {
+/// Pure over a manifest, so the shape is testable without disk.
+fn take_summary(info: trib_project::TakeInfo) -> SelectedTake {
+    SelectedTake {
         take: info.take,
         sample_rate: info.sample_rate,
         format: info.format,
         total_frames: info.tracks.iter().map(|t| t.frames).max().unwrap_or(0),
         tracks: info.tracks,
-    })
+    }
+}
+
+fn load_latest_take(project: &Project) -> Option<SelectedTake> {
+    list_takes(project).into_iter().next().map(take_summary)
+}
+
+fn load_take(project: &Project, take: u32) -> Option<SelectedTake> {
+    list_takes(project)
+        .into_iter()
+        .find(|info| info.take == take)
+        .map(take_summary)
 }
 
 /// All transport state, bundled so the helpers stay readable.
 struct TransportCtl {
     state: TransportState,
-    latest: Option<LatestTake>,
-    /// Playback gates, index-aligned with the latest take's tracks.
+    /// What PLAY would roll. Not necessarily the newest — the console can
+    /// point this at any take of the open session.
+    selected: Option<SelectedTake>,
+    /// The newest finished take on the shelf, so a client can say "you are
+    /// not on the newest" without holding the whole list.
+    latest_take: Option<u32>,
+    /// Playback gates, index-aligned with the SELECTED take's tracks.
     lanes: Vec<LaneDto>,
     loop_region: Option<LoopRegionDto>,
     /// Where PLAY resumes; parked by stop, moved by seek, 0 after the end.
@@ -455,11 +620,12 @@ struct TransportCtl {
 
 impl TransportCtl {
     fn new(project: &Project, engine_rate: u32, monitor_generation: Arc<AtomicU32>) -> Self {
-        let latest = load_latest_take(project);
-        let lanes = vec![LaneDto::default(); latest.as_ref().map_or(0, |l| l.tracks.len())];
+        let selected = load_latest_take(project);
+        let lanes = vec![LaneDto::default(); selected.as_ref().map_or(0, |s| s.tracks.len())];
         TransportCtl {
             state: TransportState::Stopped,
-            latest,
+            latest_take: selected.as_ref().map(|s| s.take),
+            selected,
             lanes,
             loop_region: None,
             stopped_position: 0,
@@ -470,13 +636,31 @@ impl TransportCtl {
         }
     }
 
-    /// A new take resets the review posture: gates open, loop gone, tape
-    /// rewound.
-    fn refresh_latest(&mut self, project: &Project) {
-        self.latest = load_latest_take(project);
-        self.lanes = vec![LaneDto::default(); self.latest.as_ref().map_or(0, |l| l.tracks.len())];
+    /// Point the transport at a take.
+    ///
+    /// A different tape resets the review posture: gates open, loop gone,
+    /// tape rewound. `lanes` is index-aligned with the take's tracks and
+    /// `loop_region`'s frames are only valid against its length, so those
+    /// three cannot move independently without lying about each other.
+    fn select(&mut self, selected: Option<SelectedTake>) {
+        self.lanes = vec![LaneDto::default(); selected.as_ref().map_or(0, |s| s.tracks.len())];
+        self.selected = selected;
         self.loop_region = None;
         self.stopped_position = 0;
+    }
+
+    /// Point at the newest take and re-read the shelf's high mark. The one
+    /// reset point for "the shelf moved" — a finished take, or a different
+    /// session opening.
+    fn select_latest(&mut self, project: &Project) {
+        let latest = load_latest_take(project);
+        self.latest_take = latest.as_ref().map(|s| s.take);
+        self.select(latest);
+    }
+
+    /// Re-read the high mark only; the selection is untouched.
+    fn refresh_latest_number(&mut self, project: &Project) {
+        self.latest_take = list_takes(project).first().map(|info| info.take);
     }
 
     fn recording(&self) -> bool {
@@ -484,43 +668,65 @@ impl TransportCtl {
     }
 
     fn dto(&self) -> TransportDto {
-        let (phase, take, started_at_unix, position_frames) = match &self.state {
-            TransportState::Stopped => (
-                TransportPhase::Stopped,
-                self.latest.as_ref().map(|l| l.take),
-                None,
-                self.stopped_position,
-            ),
-            TransportState::Playing(s) => (
-                TransportPhase::Playing,
-                self.latest.as_ref().map(|l| l.take),
-                None,
-                timeline_position(
-                    s.start_frame,
-                    s.loop_region,
-                    s.shared.position.load(Ordering::Relaxed),
+        // Every field that describes "the tape on the machine" is decided
+        // inside this match, together. They used to be split: `lanes`,
+        // `total_frames` and `sample_rate` were computed from the selected
+        // take even while RECORDING, so during a take they described the
+        // PREVIOUS one — a 44.1 kHz take selected before hitting REC made
+        // the recording counter run ~9% slow, and the lane gates addressed
+        // a playback set that did not exist.
+        let (phase, take, started_at_unix, position_frames, lanes, total_frames, sample_rate) =
+            match &self.state {
+                TransportState::Stopped => (
+                    TransportPhase::Stopped,
+                    self.selected.as_ref().map(|s| s.take),
+                    None,
+                    self.stopped_position,
+                    self.lanes.clone(),
+                    self.selected.as_ref().map_or(0, |s| s.total_frames),
+                    self.selected
+                        .as_ref()
+                        .map_or(self.engine_rate, |s| s.sample_rate),
                 ),
-            ),
-            TransportState::Recording(r) => (
-                TransportPhase::Recording,
-                Some(r.take),
-                Some(r.started_at_unix),
-                0,
-            ),
-        };
+                TransportState::Playing(s) => (
+                    TransportPhase::Playing,
+                    self.selected.as_ref().map(|sel| sel.take),
+                    None,
+                    timeline_position(
+                        s.start_frame,
+                        s.loop_region,
+                        s.shared.position.load(Ordering::Relaxed),
+                    ),
+                    self.lanes.clone(),
+                    self.selected.as_ref().map_or(0, |sel| sel.total_frames),
+                    self.selected
+                        .as_ref()
+                        .map_or(self.engine_rate, |sel| sel.sample_rate),
+                ),
+                // Recording describes the take being CUT: no playback
+                // gates, no known length yet, and the engine's own rate.
+                TransportState::Recording(r) => (
+                    TransportPhase::Recording,
+                    Some(r.take),
+                    Some(r.started_at_unix),
+                    0,
+                    Vec::new(),
+                    0,
+                    self.engine_rate,
+                ),
+            };
         TransportDto {
             state: phase,
             take,
+            latest_take: self.latest_take,
             started_at_unix,
             position_frames,
-            sample_rate: self
-                .latest
-                .as_ref()
-                .map_or(self.engine_rate, |l| l.sample_rate),
-            total_frames: self.latest.as_ref().map_or(0, |l| l.total_frames),
+            sample_rate,
+            engine_sample_rate: self.engine_rate,
+            total_frames,
             loop_region: self.loop_region,
             monitor: self.monitor,
-            lanes: self.lanes.clone(),
+            lanes,
         }
     }
 }
@@ -590,6 +796,30 @@ async fn control_loop(
         devices.wanted_changed(last_wanted.clone());
     }
     let mut save_generation: u64 = 0;
+    // Borrowing thirteen loop locals at a call site is unreadable and
+    // borrow-checks badly if hoisted into a variable, so the bundle is
+    // built fresh at each use. A macro rather than a function because
+    // every field is a `&mut` into this scope.
+    macro_rules! swap_ctx {
+        () => {
+            SwapCtx {
+                hub: &hub,
+                cmd_tx: &mut cmd_tx,
+                state: &mut state,
+                params: &mut params,
+                config: &config,
+                meter_keys: &meter_keys,
+                input_slots: &input_slots,
+                last_wanted: &mut last_wanted,
+                devices: &devices,
+                project: &mut project,
+                project_created_at: &mut project_created_at,
+                save_generation: &mut save_generation,
+                recording: &mut recording,
+                ctl: &mut ctl,
+            }
+        };
+    }
     while let Some(msg) = rx.recv().await {
         match msg {
             ControlMsg::Apply {
@@ -738,7 +968,7 @@ async fn control_loop(
                         Err(TransportError::Busy("no seeking while recording"))
                     }
                     TransportState::Stopped => {
-                        let total = ctl.latest.as_ref().map_or(0, |l| l.total_frames);
+                        let total = ctl.selected.as_ref().map_or(0, |s| s.total_frames);
                         ctl.stopped_position = frames.min(total);
                         publish_transport(&hub, &ctl);
                         Ok(ctl.dto())
@@ -747,7 +977,7 @@ async fn control_loop(
                     // samples by construction.
                     TransportState::Playing(_) => {
                         stop_playback(&mut ctl, &mut cmd_tx, &hub);
-                        let total = ctl.latest.as_ref().map_or(0, |l| l.total_frames);
+                        let total = ctl.selected.as_ref().map_or(0, |s| s.total_frames);
                         ctl.stopped_position = frames.min(total);
                         start_playback(&mut ctl, &project, &mut cmd_tx, &hub, &self_tx).await
                     }
@@ -759,7 +989,7 @@ async fn control_loop(
                     if ctl.recording() {
                         break 'set Err(TransportError::Busy("no loop edits while recording"));
                     }
-                    let Some(latest) = &ctl.latest else {
+                    let Some(latest) = &ctl.selected else {
                         break 'set Err(TransportError::NoTake);
                     };
                     if let Some(l) = region {
@@ -809,7 +1039,14 @@ async fn control_loop(
                 mute,
                 reply,
             } => {
-                let result = if (track as usize) >= ctl.lanes.len() {
+                // Gates address the SELECTED take's playback set, and
+                // while tape rolls there is none. Before this guard the
+                // handler indexed whatever lanes were left over from the
+                // previous take and pushed a solo at a session that did
+                // not exist.
+                let result = if ctl.recording() {
+                    Err(TransportError::Busy("no playback gates while recording"))
+                } else if (track as usize) >= ctl.lanes.len() {
                     Err(TransportError::NoSuchLane)
                 } else {
                     let lane = &mut ctl.lanes[track as usize];
@@ -847,7 +1084,7 @@ async fn control_loop(
                 }
             }
             ControlMsg::TakeFinalized => {
-                ctl.refresh_latest(&project);
+                ctl.select_latest(&project);
                 publish_transport(&hub, &ctl);
             }
             ControlMsg::InputSlotsChanged { slots } => {
@@ -870,6 +1107,226 @@ async fn control_loop(
                     // No MixerSnapshot: the document didn't change, only
                     // where its patches physically land.
                 }
+            }
+            ControlMsg::SelectTake { take, reply } => {
+                let result = 'select: {
+                    // While tape rolls, `take` IS the take being cut;
+                    // pointing the selection elsewhere would make take,
+                    // lanes and total_frames describe two tapes at once.
+                    if ctl.recording() {
+                        break 'select Err(TransportError::Busy(
+                            "no take switching while recording",
+                        ));
+                    }
+                    // Already there: leave the review posture alone. A row
+                    // is easy to double-tap on a phone, and losing a
+                    // hand-drawn loop to a fat finger is the worse outcome.
+                    if ctl.selected.as_ref().is_some_and(|s| s.take == take) {
+                        break 'select Ok(ctl.dto());
+                    }
+                    let Some(selected) = load_take(&project, take) else {
+                        break 'select Err(TransportError::NoSuchTake);
+                    };
+                    // Playback holds this session's file descriptors open.
+                    if matches!(ctl.state, TransportState::Playing(_)) {
+                        stop_playback(&mut ctl, &mut cmd_tx, &hub);
+                    }
+                    // A rate mismatch does NOT block selection: the
+                    // waveform, length and track names are all true, and
+                    // refusing to show it would make an unplayable take
+                    // indistinguishable from one that isn't there. PLAY is
+                    // where the refusal belongs.
+                    ctl.select(Some(selected));
+                    publish_transport(&hub, &ctl);
+                    Ok(ctl.dto())
+                };
+                let _ = reply.send(result);
+            }
+            ControlMsg::DeleteTake { take, reply } => {
+                let result = 'del: {
+                    if ctl.recording() {
+                        break 'del Err(TransportError::Busy(
+                            "stop recording before deleting a take",
+                        ));
+                    }
+                    // The feeder threads hold open readers and reopen the
+                    // files on every loop pass, so unlinking underneath
+                    // them would run playback off unlinked inodes until a
+                    // later wrap died somewhere confusing.
+                    if matches!(ctl.state, TransportState::Playing(_))
+                        && ctl.selected.as_ref().is_some_and(|s| s.take == take)
+                    {
+                        break 'del Err(TransportError::Busy(
+                            "stop playback before deleting the take you're playing",
+                        ));
+                    }
+                    if load_take(&project, take).is_none() {
+                        break 'del Err(TransportError::NoSuchTake);
+                    }
+                    if let Err(e) = trib_project::delete_take(&project, take) {
+                        break 'del Err(TransportError::Io(e.to_string()));
+                    }
+                    // Deleting what we were reviewing falls back to the
+                    // newest remaining; deleting anything else leaves the
+                    // selection where it is.
+                    if ctl.selected.as_ref().is_some_and(|s| s.take == take) {
+                        ctl.select_latest(&project);
+                    } else {
+                        ctl.refresh_latest_number(&project);
+                    }
+                    publish_transport(&hub, &ctl);
+                    publish_takes(&hub, &project);
+                    Ok(())
+                };
+                let _ = reply.send(result);
+            }
+            ControlMsg::Session { reply } => {
+                let _ = reply.send(SessionRef::of(&project));
+            }
+            ControlMsg::CreateSession { name, seed, reply } => {
+                let result = 'create: {
+                    if ctl.recording() {
+                        break 'create Err(TransportError::Busy(
+                            "stop recording before starting a new session",
+                        ));
+                    }
+                    // The desk the new session starts from is the user's
+                    // choice: a clean template, the same channel mapping,
+                    // or an exact copy of what is running.
+                    let console = crate::console::seed_console(seed, &state);
+                    let root = recording.active_root.clone();
+                    let made = tokio::task::spawn_blocking(move || {
+                        trib_project::create_project(&root, &name, &console)
+                            .and_then(|p| trib_project::manifest_of(&p).map(|m| (p, m)))
+                    })
+                    .await
+                    .expect("session task is never cancelled");
+                    let (new_project, manifest) = match made {
+                        Ok(made) => made,
+                        Err(e) => break 'create Err(session_error(e)),
+                    };
+                    if matches!(ctl.state, TransportState::Playing(_)) {
+                        stop_playback(&mut ctl, &mut cmd_tx, &hub);
+                    }
+                    // Always an adopt: under Template or Mapping the new
+                    // manifest's console differs from the running desk, and
+                    // under Console the swap is simply a no-op on it. One
+                    // route beats a second branch that could drift.
+                    adopt_project(swap_ctx!(), new_project, manifest, true);
+                    publish_sessions(&hub, &project);
+                    publish_takes(&hub, &project);
+                    Ok(SessionRef::of(&project))
+                };
+                let _ = reply.send(result);
+            }
+            ControlMsg::OpenSession { id, reply } => {
+                let result = 'open: {
+                    if ctl.recording() {
+                        break 'open Err(TransportError::Busy(
+                            "stop recording before switching sessions",
+                        ));
+                    }
+                    // Already open: harmless, and must not cost the review
+                    // posture or a needless graph swap.
+                    if SessionRef::of(&project).id == id {
+                        break 'open Ok(SessionRef::of(&project));
+                    }
+                    let root = recording.active_root.clone();
+                    let opened = tokio::task::spawn_blocking(move || {
+                        trib_project::resolve(&root, &id)
+                            .and_then(|dir| trib_project::open_session(&dir))
+                    })
+                    .await
+                    .expect("session task is never cancelled");
+                    let (new_project, manifest) = match opened {
+                        Ok(opened) => opened,
+                        Err(e) => break 'open Err(session_error(e)),
+                    };
+                    if matches!(ctl.state, TransportState::Playing(_)) {
+                        stop_playback(&mut ctl, &mut cmd_tx, &hub);
+                    }
+                    // Opening a session is always an adopt: its console IS
+                    // the session.
+                    adopt_project(swap_ctx!(), new_project, manifest, true);
+                    publish_sessions(&hub, &project);
+                    publish_takes(&hub, &project);
+                    Ok(SessionRef::of(&project))
+                };
+                let _ = reply.send(result);
+            }
+            ControlMsg::RenameSession { id, name, reply } => {
+                // Allowed while recording: this rewrites a name, not audio,
+                // and scribbling on the tape while it rolls is exactly the
+                // gesture the label was designed for.
+                let result = 'rename: {
+                    let open = SessionRef::of(&project);
+                    if open.id == id {
+                        let name = match trib_project::validate_name(&name) {
+                            Ok(name) => name.to_owned(),
+                            Err(e) => break 'rename Err(session_error(e)),
+                        };
+                        project.name = name;
+                        if let Err(e) = save_manifest(&project, &state, project_created_at) {
+                            break 'rename Err(TransportError::Io(e.to_string()));
+                        }
+                        let _ = recording.project_watch.send(Arc::new(project.clone()));
+                        publish_sessions(&hub, &project);
+                        break 'rename Ok(SessionRef::of(&project));
+                    }
+                    // Renaming a session we do not have open: the manifest
+                    // is rewritten in place and the desk is untouched.
+                    let root = recording.active_root.clone();
+                    let id_for_reply = id.clone();
+                    let renamed = tokio::task::spawn_blocking(move || {
+                        trib_project::resolve(&root, &id)
+                            .and_then(|dir| trib_project::rename_session(&dir, &name))
+                    })
+                    .await
+                    .expect("session task is never cancelled");
+                    let manifest = match renamed {
+                        Ok(manifest) => manifest,
+                        Err(e) => break 'rename Err(session_error(e)),
+                    };
+                    publish_sessions(&hub, &project);
+                    Ok(SessionRef {
+                        id: id_for_reply,
+                        name: manifest.name,
+                    })
+                };
+                let _ = reply.send(result);
+            }
+            ControlMsg::DeleteSession { id, reply } => {
+                let result = 'delete: {
+                    if ctl.recording() {
+                        break 'delete Err(TransportError::Busy(
+                            "stop recording before deleting a session",
+                        ));
+                    }
+                    // Refusing to delete the OPEN session is not fussiness.
+                    // One gesture would otherwise make two state changes,
+                    // the second irreversible — and if it were the only
+                    // session, "delete" would have to create one. It also
+                    // subsumes two guards for free: playback holds file
+                    // descriptors only under the open project, and in-
+                    // flight autosaves target only the open project.
+                    if SessionRef::of(&project).id == id {
+                        break 'delete Err(TransportError::Busy(
+                            "open a different session before deleting this one",
+                        ));
+                    }
+                    let root = recording.active_root.clone();
+                    let deleted = tokio::task::spawn_blocking(move || {
+                        trib_project::resolve(&root, &id).and_then(trib_project::delete_session)
+                    })
+                    .await
+                    .expect("session task is never cancelled");
+                    if let Err(e) = deleted {
+                        break 'delete Err(session_error(e));
+                    }
+                    publish_sessions(&hub, &project);
+                    Ok(())
+                };
+                let _ = reply.send(result);
             }
             ControlMsg::Transport { reply } => {
                 let _ = reply.send(ctl.dto());
@@ -921,48 +1378,32 @@ async fn control_loop(
                             Ok(opened) => opened,
                             Err(e) => break 'update Err(e),
                         };
-                        if adopted {
-                            // The boot path, mid-flight: the destination's
-                            // own console takes over the desk.
-                            state = manifest.mixer;
-                            let wanted = wanted_devices(&state);
-                            if wanted != last_wanted {
-                                last_wanted = wanted.clone();
-                                if let Some(devices) = &devices {
-                                    devices.wanted_changed(wanted);
-                                }
-                            }
-                            let compiled = compile(
-                                &state,
-                                config.sample_rate,
-                                config.block_size,
-                                &input_slots,
-                            );
-                            params = compiled.params;
-                            let _ = meter_keys.send(compiled.meter_keys);
-                            push(
-                                &mut cmd_tx,
-                                EngineCommand::SwapGraph {
-                                    graph: compiled.graph,
-                                },
-                            );
-                            hub.publish(
-                                Channel::Mixer,
-                                &ServerMessage::MixerSnapshot {
-                                    state: state.clone(),
-                                },
-                            );
-                        }
-                        // In-flight autosaves aimed at the old dir are
-                        // stale now.
-                        save_generation += 1;
-                        project = new_project;
-                        project_created_at = manifest.created_at_unix;
+                        // The destination's own console takes over the desk
+                        // when it had one; otherwise the manifest we just
+                        // wrote IS this console, so there is nothing to swap.
+                        adopt_project(
+                            SwapCtx {
+                                hub: &hub,
+                                cmd_tx: &mut cmd_tx,
+                                state: &mut state,
+                                params: &mut params,
+                                config: &config,
+                                meter_keys: &meter_keys,
+                                input_slots: &input_slots,
+                                last_wanted: &mut last_wanted,
+                                devices: &devices,
+                                project: &mut project,
+                                project_created_at: &mut project_created_at,
+                                save_generation: &mut save_generation,
+                                recording: &mut recording,
+                                ctl: &mut ctl,
+                            },
+                            new_project,
+                            manifest,
+                            adopted,
+                        );
                         recording.prefs.destination = Some(new_root.clone());
                         recording.active_root = new_root;
-                        let _ = recording.project_watch.send(Arc::new(project.clone()));
-                        ctl.refresh_latest(&project);
-                        publish_transport(&hub, &ctl);
                     }
                     if let Some(format) = format {
                         recording.prefs.format = format;
@@ -981,6 +1422,136 @@ async fn control_loop(
     }
 }
 
+/// Map a session-layer failure onto the transport vocabulary the API
+/// already knows how to turn into a status code.
+fn session_error(e: trib_project::ProjectError) -> TransportError {
+    use trib_project::ProjectError;
+    match e {
+        ProjectError::BadId | ProjectError::NotASession => TransportError::NoSuchSession,
+        ProjectError::BadName(why) => TransportError::BadSetting(why.to_owned()),
+        ProjectError::Exists => TransportError::Busy("a session of that name already exists"),
+        other => TransportError::Io(other.to_string()),
+    }
+}
+
+/// Push the open session's take list. Called wherever the shelf moves — a
+/// finished take, a deleted one, or a different session opening.
+fn publish_takes(hub: &Hub, project: &Project) {
+    hub.publish(
+        Channel::Transport,
+        &ServerMessage::TakesChanged {
+            takes: crate::api::takes::take_dtos(project),
+        },
+    );
+}
+
+/// Push which session is open. Carries only the open one: a client showing
+/// the list refetches, and building the list here would mean a directory
+/// walk on the control task.
+fn publish_sessions(hub: &Hub, project: &Project) {
+    let open = SessionRef::of(project);
+    hub.publish(
+        Channel::Sessions,
+        &ServerMessage::SessionsChanged {
+            open_id: open.id,
+            open_name: open.name,
+        },
+    );
+}
+
+/// Everything a project swap touches, borrowed from the control loop.
+///
+/// Bundled into one struct so `adopt_project` is a single call rather than
+/// a thirteen-argument function — every field here is a loop local that a
+/// swap genuinely has to move.
+struct SwapCtx<'a> {
+    hub: &'a Hub,
+    cmd_tx: &'a mut Producer<EngineCommand>,
+    state: &'a mut MixerState,
+    params: &'a mut ParamMap,
+    config: &'a EngineConfig,
+    meter_keys: &'a watch::Sender<Vec<MeterKey>>,
+    input_slots: &'a trib_engine::InputSlots,
+    last_wanted: &'a mut std::collections::BTreeSet<Option<String>>,
+    devices: &'a Option<crate::device_host::DeviceHandle>,
+    project: &'a mut Project,
+    project_created_at: &'a mut u64,
+    save_generation: &'a mut u64,
+    recording: &'a mut RecordingHost,
+    ctl: &'a mut TransportCtl,
+}
+
+/// Put a different tape on the machine.
+///
+/// THE one live-swap sequence: every path that changes which project is
+/// open comes through here, so a destination change, a session switch and
+/// a session create cannot drift apart.
+///
+/// `adopted` means the incoming manifest's console replaces the running
+/// desk. True for a session switch (you are opening someone else's desk)
+/// and for an explicit create under `Template`/`Mapping`; false only when
+/// the manifest was just written FROM the running console, where replacing
+/// it would be a no-op.
+///
+/// The caller must have stopped playback first — the outgoing project's
+/// feeder threads hold open file descriptors under it.
+fn adopt_project(cx: SwapCtx<'_>, new_project: Project, manifest: ProjectManifest, adopted: bool) {
+    // Flush the desk we are leaving, synchronously, BEFORE rebinding.
+    // Autosave is debounced by 500 ms and the generation bump below
+    // cancels whatever is pending, so without this an edit made in the
+    // half-second before a swap is simply lost — nudge a fader, switch
+    // session, come back, and the nudge is gone. A failed save (drive
+    // yanked) must not block the switch: log it and carry on.
+    if let Err(e) = save_manifest(cx.project, cx.state, *cx.project_created_at) {
+        tracing::error!(%e, dir = %cx.project.dir.display(), "could not save the outgoing session");
+    }
+
+    if adopted {
+        *cx.state = manifest.mixer;
+        let wanted = wanted_devices(cx.state);
+        if wanted != *cx.last_wanted {
+            *cx.last_wanted = wanted.clone();
+            if let Some(devices) = cx.devices {
+                devices.wanted_changed(wanted);
+            }
+        }
+        let compiled = compile(
+            cx.state,
+            cx.config.sample_rate,
+            cx.config.block_size,
+            cx.input_slots,
+        );
+        *cx.params = compiled.params;
+        let _ = cx.meter_keys.send(compiled.meter_keys);
+        push(
+            cx.cmd_tx,
+            EngineCommand::SwapGraph {
+                graph: compiled.graph,
+            },
+        );
+        cx.hub.publish(
+            Channel::Mixer,
+            &ServerMessage::MixerSnapshot {
+                state: cx.state.clone(),
+            },
+        );
+    }
+
+    // Fences the debounced autosave: the flush above wrote the outgoing
+    // manifest exactly once, and this guarantees not twice.
+    *cx.save_generation += 1;
+    *cx.project = new_project;
+    *cx.project_created_at = manifest.created_at_unix;
+    let _ = cx
+        .recording
+        .project_watch
+        .send(Arc::new(cx.project.clone()));
+    // A different tape resets the review posture: gates open, loop gone,
+    // playhead rewound, pointed at this session's newest take.
+    cx.ctl.select_latest(cx.project);
+    publish_transport(cx.hub, cx.ctl);
+}
+
 /// Blocking: ensure the destination exists and is writable, then adopt its
 /// newest project — or tear off fresh tape seeded with the current console.
 fn open_destination(
@@ -989,12 +1560,14 @@ fn open_destination(
 ) -> Result<(Project, ProjectManifest, bool), TransportError> {
     std::fs::create_dir_all(root)
         .map_err(|e| TransportError::BadSetting(format!("{}: {e}", root.display())))?;
-    let probe = root.join(".tribd-probe");
-    std::fs::write(&probe, b"tributary")
-        .and_then(|()| std::fs::remove_file(&probe))
-        .map_err(|e| {
-            TransportError::BadSetting(format!("{} is not writable: {e}", root.display()))
-        })?;
+    // Same probe the destination list uses, so a tile that says "ready"
+    // and a save that succeeds can never disagree.
+    if !crate::destinations::writable(root) {
+        return Err(TransportError::BadSetting(format!(
+            "{} is not writable",
+            root.display()
+        )));
+    }
     if let Some((project, manifest)) = load_latest(root) {
         return Ok((project, manifest, true));
     }
@@ -1038,7 +1611,7 @@ async fn start_playback(
         TransportState::Playing(_) => return Ok(ctl.dto()), // idempotent
         TransportState::Stopped => {}
     }
-    let latest = ctl.latest.clone().ok_or(TransportError::NoTake)?;
+    let latest = ctl.selected.clone().ok_or(TransportError::NoTake)?;
     if latest.sample_rate != ctl.engine_rate {
         return Err(TransportError::SampleRateMismatch);
     }
@@ -1280,6 +1853,10 @@ fn start_recording(
             }),
         },
     );
+    // The previous take's gates describe a playback set that is gone.
+    // `dto()` reports empty lanes while recording anyway; clearing here
+    // means nothing stale survives to be reapplied at the next build.
+    ctl.lanes.clear();
     ctl.state = TransportState::Recording(RecordingTake {
         take,
         started_at_unix,
@@ -1570,11 +2147,15 @@ mod tests {
 
     /// A finished take on disk: one mono WAV + its manifest.
     fn fake_take(project: &Project, take: u32, frames: u32) {
+        fake_take_at(project, take, frames, 48_000);
+    }
+
+    fn fake_take_at(project: &Project, take: u32, frames: u32, rate: u32) {
         let dir = project.takes_dir().join(format!("take-{take:03}"));
         std::fs::create_dir_all(&dir).unwrap();
         let spec = hound::WavSpec {
             channels: 1,
-            sample_rate: 48_000,
+            sample_rate: rate,
             bits_per_sample: 32,
             sample_format: hound::SampleFormat::Float,
         };
@@ -1586,12 +2167,205 @@ mod tests {
         std::fs::write(
             dir.join("take.toml"),
             format!(
-                "schema_version = 1\nstarted_at_unix = 100\nsample_rate = 48000\n\
+                "schema_version = 1\nstarted_at_unix = 100\nsample_rate = {rate}\n\
                  damaged = false\n\n[[tracks]]\nfile = \"ch01-test.wav\"\n\
                  channels = 1\nframes = {frames}\ndropped_samples = 0\n"
             ),
         )
         .unwrap();
+    }
+
+    /// A session with three takes on the shelf, newest = 3.
+    async fn shelf() -> (ControlHandle, tempfile::TempDir) {
+        let hub = Hub::new(32);
+        let (cmd_tx, mut _cmd_rx) = rtrb::RingBuffer::new(64);
+        let (state, params, keys) = initial();
+        let (keys_tx, _keys_rx) = watch::channel(keys);
+        let dir = tempfile::tempdir().unwrap();
+        let project = trib_project::create_project(dir.path(), "test", &state).unwrap();
+        for take in 1..=3 {
+            fake_take(&project, take, 48_000 * take);
+        }
+        let control = spawn_test_in(hub, cmd_tx, state, params, keys_tx, project);
+        (control, dir)
+    }
+
+    #[tokio::test]
+    async fn a_take_can_be_selected_and_it_is_what_play_rolls() {
+        let (control, _dir) = shelf().await;
+        // Boots pointed at the newest.
+        let dto = control.transport().await;
+        assert_eq!(dto.take, Some(3));
+        assert_eq!(dto.latest_take, Some(3));
+
+        let dto = control.select_take(1).await.unwrap();
+        assert_eq!(dto.take, Some(1), "selection moved");
+        assert_eq!(dto.latest_take, Some(3), "the shelf did not");
+        assert_eq!(dto.total_frames, 48_000, "the ruler measures take 1");
+
+        // And PLAY rolls what is selected, not the newest.
+        let played = control.play().await.unwrap();
+        assert_eq!(played.take, Some(1));
+    }
+
+    /// A different tape resets the review posture. `lanes` is index-aligned
+    /// with the take's tracks and a loop's frames are only valid against
+    /// its length, so these cannot move independently.
+    #[tokio::test]
+    async fn selecting_a_different_take_resets_gates_loop_and_playhead() {
+        let (control, _dir) = shelf().await;
+        control.set_lane_gate(0, Some(true), None).await.unwrap();
+        control
+            .set_loop(Some(LoopRegionDto {
+                start_frames: 0,
+                end_frames: 24_000,
+            }))
+            .await
+            .unwrap();
+        control.seek(12_000).await.unwrap();
+
+        let dto = control.select_take(2).await.unwrap();
+        assert!(!dto.lanes[0].solo, "gates open");
+        assert!(dto.loop_region.is_none(), "loop gone");
+        assert_eq!(dto.position_frames, 0, "tape rewound");
+    }
+
+    /// A row is easy to double-tap on a phone; losing a hand-drawn loop to
+    /// a fat finger is the worse outcome.
+    #[tokio::test]
+    async fn re_selecting_the_open_take_leaves_the_posture_alone() {
+        let (control, _dir) = shelf().await;
+        control
+            .set_loop(Some(LoopRegionDto {
+                start_frames: 0,
+                end_frames: 24_000,
+            }))
+            .await
+            .unwrap();
+        let dto = control.select_take(3).await.unwrap();
+        assert!(dto.loop_region.is_some(), "the loop survived");
+    }
+
+    #[tokio::test]
+    async fn selecting_a_take_that_is_not_there_is_not_found() {
+        let (control, _dir) = shelf().await;
+        assert!(matches!(
+            control.select_take(99).await,
+            Err(TransportError::NoSuchTake)
+        ));
+        // And the selection did not move.
+        assert_eq!(control.transport().await.take, Some(3));
+    }
+
+    /// A take cut at another rate still has a true waveform, length and
+    /// track names. Refusing to SHOW it would make it indistinguishable
+    /// from a take that is not there; PLAY is where the refusal belongs.
+    #[tokio::test]
+    async fn a_take_cut_at_another_rate_selects_but_will_not_play() {
+        let hub = Hub::new(32);
+        let (cmd_tx, mut _cmd_rx) = rtrb::RingBuffer::new(64);
+        let (state, params, keys) = initial();
+        let (keys_tx, _keys_rx) = watch::channel(keys);
+        let dir = tempfile::tempdir().unwrap();
+        let project = trib_project::create_project(dir.path(), "test", &state).unwrap();
+        fake_take_at(&project, 1, 44_100, 44_100);
+        fake_take(&project, 2, 48_000);
+        let control = spawn_test_in(hub, cmd_tx, state, params, keys_tx, project);
+
+        let dto = control.select_take(1).await.unwrap();
+        assert_eq!(dto.take, Some(1), "selectable");
+        assert_eq!(dto.sample_rate, 44_100, "its own rate");
+        assert_eq!(
+            dto.engine_sample_rate, 48_000,
+            "and the engine's, to compare"
+        );
+        assert!(matches!(
+            control.play().await,
+            Err(TransportError::SampleRateMismatch)
+        ));
+    }
+
+    /// Pressing REC already replaces the Tracks room with the live
+    /// document, so the user's place is gone at REC, not at finalize.
+    /// Snapping to what you just cut continues what they are watching.
+    #[tokio::test]
+    async fn a_finished_take_becomes_the_selection_even_after_browsing() {
+        let (control, dir) = shelf().await;
+        control.select_take(1).await.unwrap();
+        // Simulate the writer finishing take 4.
+        let project = trib_project::load_latest(dir.path()).unwrap().0;
+        fake_take(&project, 4, 4_800);
+        control.take_finalized().await;
+        let dto = control.transport().await;
+        assert_eq!(dto.take, Some(4));
+        assert_eq!(dto.latest_take, Some(4));
+    }
+
+    /// The bug, encoded. `lanes`, `total_frames` and `sample_rate` used to
+    /// be computed outside the phase match, so during a take they all
+    /// described the PREVIOUS one — a 44.1 kHz take selected before REC
+    /// made the recording counter run ~9% slow, and the gates addressed a
+    /// playback set that did not exist.
+    #[tokio::test]
+    async fn recording_reports_its_own_tape_not_the_previous_take() {
+        let hub = Hub::new(32);
+        let (cmd_tx, mut _cmd_rx) = rtrb::RingBuffer::new(64);
+        let (state, params, keys) = armed();
+        let (keys_tx, _keys_rx) = watch::channel(keys);
+        let dir = tempfile::tempdir().unwrap();
+        let project = trib_project::create_project(dir.path(), "test", &state).unwrap();
+        fake_take_at(&project, 1, 44_100, 44_100);
+        let control = spawn_test_in(hub, cmd_tx, state, params, keys_tx, project);
+        assert_eq!(control.transport().await.sample_rate, 44_100);
+
+        control.record_start().await.unwrap();
+        let dto = control.transport().await;
+        assert_eq!(dto.sample_rate, 48_000, "the ENGINE's rate, not the take's");
+        assert_eq!(dto.total_frames, 0, "the new take has no known length yet");
+        assert!(dto.lanes.is_empty(), "no playback set to gate");
+        // And a gate is refused rather than silently addressing the old take.
+        assert!(matches!(
+            control.set_lane_gate(0, Some(true), None).await,
+            Err(TransportError::Busy(_))
+        ));
+        control.record_stop().await;
+    }
+
+    #[tokio::test]
+    async fn deleting_a_take_reselects_only_when_it_was_the_one_selected() {
+        let (control, dir) = shelf().await;
+        let project = trib_project::load_latest(dir.path()).unwrap().0;
+
+        // Deleting something else leaves the selection where it is.
+        control.delete_take(1).await.unwrap();
+        assert_eq!(control.transport().await.take, Some(3));
+        assert!(!project.takes_dir().join("take-001").exists());
+
+        // Deleting what we were reviewing falls back to the newest left.
+        control.delete_take(3).await.unwrap();
+        let dto = control.transport().await;
+        assert_eq!(dto.take, Some(2));
+        assert_eq!(dto.latest_take, Some(2));
+
+        // And emptying the shelf leaves nothing to play.
+        control.delete_take(2).await.unwrap();
+        assert_eq!(control.transport().await.take, None);
+        assert!(matches!(control.play().await, Err(TransportError::NoTake)));
+    }
+
+    /// The feeder threads hold open readers and reopen the files on every
+    /// loop pass, so unlinking underneath them would run playback off
+    /// unlinked inodes until a later wrap died somewhere confusing.
+    #[tokio::test]
+    async fn deleting_the_take_being_played_is_refused_and_the_files_survive() {
+        let (control, dir) = shelf().await;
+        let project = trib_project::load_latest(dir.path()).unwrap().0;
+        control.play().await.unwrap();
+        assert!(matches!(
+            control.delete_take(3).await,
+            Err(TransportError::Busy(_))
+        ));
+        assert!(project.takes_dir().join("take-003").exists());
     }
 
     #[tokio::test]
@@ -1984,6 +2758,227 @@ mod tests {
         assert_eq!(dto.configured_sample_rate, 96_000);
         assert!(dto.restart_required, "engine still runs 48k");
         control.record_stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_new_session_starts_from_the_chosen_seed() {
+        use crate::console::{SessionSeed, fresh_console};
+        let hub = Hub::new(32);
+        let (cmd_tx, mut _cmd_rx) = rtrb::RingBuffer::new(64);
+        let (state, params, keys) = initial();
+        let (keys_tx, _keys_rx) = watch::channel(keys);
+        let dir = tempfile::tempdir().unwrap();
+        let project = trib_project::create_project(dir.path(), "first", &state).unwrap();
+        let control = spawn_test_in(hub, cmd_tx, state.clone(), params, keys_tx, project);
+        control
+            .apply(
+                MixCommand::SetFader {
+                    target: FaderTarget::Strip { id: StripId(0) },
+                    level_db: -6.0,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let made = control
+            .create_session("Clean".into(), SessionSeed::Template)
+            .await
+            .unwrap();
+        assert_eq!(made.name, "Clean");
+        assert_eq!(
+            control.snapshot().await,
+            fresh_console(),
+            "the template replaces the desk"
+        );
+        let dto = control.transport().await;
+        assert_eq!(dto.take, None, "a brand new session has an empty shelf");
+        assert_eq!(dto.total_frames, 0);
+
+        // Console copies the desk outright.
+        let before = control.snapshot().await;
+        control
+            .create_session("Copy".into(), SessionSeed::Console)
+            .await
+            .unwrap();
+        assert_eq!(control.snapshot().await, before);
+    }
+
+    /// The session you left keeps its own console AND its own takes, and
+    /// both come back. This is the core promise of the whole feature.
+    #[tokio::test]
+    async fn switching_away_and_back_restores_the_console_and_the_takes() {
+        use crate::console::SessionSeed;
+        let hub = Hub::new(32);
+        let (cmd_tx, mut _cmd_rx) = rtrb::RingBuffer::new(64);
+        let (state, params, keys) = initial();
+        let (keys_tx, _keys_rx) = watch::channel(keys);
+        let dir = tempfile::tempdir().unwrap();
+        let project = trib_project::create_project(dir.path(), "first", &state).unwrap();
+        fake_take(&project, 1, 48_000);
+        let first_id = trib_project::list_sessions(dir.path())[0].id.clone();
+        let control = spawn_test_in(hub, cmd_tx, state, params, keys_tx, project);
+
+        control
+            .apply(
+                MixCommand::SetFader {
+                    target: FaderTarget::Strip { id: StripId(0) },
+                    level_db: -6.0,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        control
+            .create_session("Second".into(), SessionSeed::Template)
+            .await
+            .unwrap();
+        assert_eq!(control.transport().await.take, None, "a fresh shelf");
+
+        control.open_session(first_id).await.unwrap();
+        assert_eq!(
+            control.snapshot().await.strips[0].fader_db,
+            -6.0,
+            "the first session's console came back"
+        );
+        assert_eq!(control.transport().await.take, Some(1), "and its takes");
+    }
+
+    #[tokio::test]
+    async fn a_session_cannot_be_deleted_while_it_is_open() {
+        use crate::console::SessionSeed;
+        let hub = Hub::new(32);
+        let (cmd_tx, mut _cmd_rx) = rtrb::RingBuffer::new(64);
+        let (state, params, keys) = initial();
+        let (keys_tx, _keys_rx) = watch::channel(keys);
+        let dir = tempfile::tempdir().unwrap();
+        let project = trib_project::create_project(dir.path(), "first", &state).unwrap();
+        let first_id = trib_project::list_sessions(dir.path())[0].id.clone();
+        let control = spawn_test_in(hub, cmd_tx, state, params, keys_tx, project);
+
+        assert!(matches!(
+            control.delete_session(first_id.clone()).await,
+            Err(TransportError::Busy(_)),
+        ));
+        assert!(dir.path().join(&first_id).is_dir(), "still there");
+
+        // Open something else and it becomes deletable.
+        control
+            .create_session("Second".into(), SessionSeed::Template)
+            .await
+            .unwrap();
+        control.delete_session(first_id.clone()).await.unwrap();
+        assert!(!dir.path().join(&first_id).exists());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_session_id_is_refused_and_nothing_changes() {
+        let (control, _dir) = shelf().await;
+        let before = control.session().await;
+        for bad in ["../escape", "nope", "a/b"] {
+            assert!(
+                matches!(
+                    control.open_session(bad.into()).await,
+                    Err(TransportError::NoSuchSession)
+                ),
+                "accepted {bad:?}"
+            );
+        }
+        assert_eq!(control.session().await, before);
+        assert_eq!(control.transport().await.take, Some(3));
+    }
+
+    /// A rename writes a name, not audio — and scribbling on the tape
+    /// while it rolls is exactly the gesture the label was designed for.
+    #[tokio::test]
+    async fn a_rename_is_allowed_while_recording_and_lands_in_the_manifest() {
+        let hub = Hub::new(32);
+        let (cmd_tx, mut _cmd_rx) = rtrb::RingBuffer::new(64);
+        let (state, params, keys) = armed();
+        let (keys_tx, _keys_rx) = watch::channel(keys);
+        let dir = tempfile::tempdir().unwrap();
+        let project = trib_project::create_project(dir.path(), "first", &state).unwrap();
+        let id = trib_project::list_sessions(dir.path())[0].id.clone();
+        let control = spawn_test_in(hub, cmd_tx, state, params, keys_tx, project);
+
+        control.record_start().await.unwrap();
+        let renamed = control
+            .rename_session(id.clone(), "Take Two".into())
+            .await
+            .unwrap();
+        assert_eq!(renamed.name, "Take Two");
+        assert_eq!(renamed.id, id, "the id is stable across a rename");
+        control.record_stop().await;
+        assert_eq!(trib_project::list_sessions(dir.path())[0].name, "Take Two");
+    }
+
+    #[tokio::test]
+    async fn creating_or_switching_is_refused_while_recording() {
+        use crate::console::SessionSeed;
+        let hub = Hub::new(32);
+        let (cmd_tx, mut _cmd_rx) = rtrb::RingBuffer::new(64);
+        let (state, params, keys) = armed();
+        let (keys_tx, _keys_rx) = watch::channel(keys);
+        let dir = tempfile::tempdir().unwrap();
+        let project = trib_project::create_project(dir.path(), "first", &state).unwrap();
+        let id = trib_project::list_sessions(dir.path())[0].id.clone();
+        let control = spawn_test_in(hub, cmd_tx, state.clone(), params, keys_tx, project);
+
+        control.record_start().await.unwrap();
+        assert!(matches!(
+            control
+                .create_session("Nope".into(), SessionSeed::Template)
+                .await,
+            Err(TransportError::Busy(_))
+        ));
+        assert!(matches!(
+            control.open_session(id).await,
+            Err(TransportError::Busy(_))
+        ));
+        assert_eq!(control.snapshot().await, state, "the desk is untouched");
+        control.record_stop().await;
+    }
+
+    #[tokio::test]
+    /// Autosave is debounced by 500 ms and a swap cancels whatever is
+    /// pending, so before the pre-swap flush an edit made in the half
+    /// second before switching was simply lost: nudge a fader, switch
+    /// away, come back, and the nudge is gone. This is the test that pins
+    /// the fix, and it fails without it.
+    async fn a_console_edit_just_before_a_swap_survives_the_round_trip() {
+        let hub = Hub::new(16);
+        let (cmd_tx, mut _cmd_rx) = rtrb::RingBuffer::new(64);
+        let (state, params, keys) = initial();
+        let (keys_tx, _keys_rx) = watch::channel(keys);
+        let home = tempfile::tempdir().unwrap();
+        let project = trib_project::create_project(home.path(), "first", &state).unwrap();
+        let control = spawn_test_in(hub, cmd_tx, state.clone(), params, keys_tx, project);
+
+        // A fader move, then a swap well inside the autosave debounce.
+        control
+            .apply(
+                MixCommand::SetFader {
+                    target: FaderTarget::Strip { id: StripId(0) },
+                    level_db: -12.0,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let away = tempfile::tempdir().unwrap();
+        control
+            .update_recording(Some(away.path().to_path_buf()), None, None)
+            .await
+            .unwrap();
+        // Back to where we started — this re-adopts the first session's
+        // manifest, which is where the edit had to have landed.
+        control
+            .update_recording(Some(home.path().to_path_buf()), None, None)
+            .await
+            .unwrap();
+
+        let fader = control.snapshot().await.strips[0].fader_db;
+        assert_eq!(fader, -12.0, "the edit was lost in the swap");
     }
 
     #[tokio::test]

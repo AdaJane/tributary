@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 
 use super::AppState;
 
-/// Cap on distinct channels one socket may subscribe to. Only three channels
+/// Cap on distinct channels one socket may subscribe to. Five channels
 /// exist today; the cap bounds a hostile client's registry footprint.
 const MAX_SUBSCRIPTIONS_PER_CLIENT: usize = 8;
 
@@ -33,6 +33,13 @@ pub enum Channel {
     Transport,
     /// Live waveform bins while recording (droppable, Tracks-view only).
     Waveform,
+    /// Recording destinations, pushed when the mount table changes. This
+    /// is what makes a drive appear on its own: the daemon watches
+    /// /proc/self/mountinfo for POLLPRI rather than anyone polling.
+    Destinations,
+    /// Which session is open. Pushed on create, open, rename and delete so
+    /// a second console follows along.
+    Sessions,
 }
 
 /// Tags a `state_changed` broadcast with the client gesture that caused it,
@@ -116,18 +123,30 @@ pub struct LaneDto {
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct TransportDto {
     pub state: TransportPhase,
-    /// Recording: the take being written. Otherwise: the latest take —
-    /// what PLAY would roll.
+    /// The selected take — what PLAY would roll. While recording, the take
+    /// being written.
     pub take: Option<u32>,
+    /// The newest finished take on the shelf. Equals `take` unless the
+    /// console is reviewing an older one. `null` on an empty session.
+    pub latest_take: Option<u32>,
     /// Recording only.
     pub started_at_unix: Option<u64>,
     pub position_frames: u64,
+    /// The SELECTED take's rate; the engine's own while recording.
     pub sample_rate: u32,
-    /// Length of the latest take (its longest track).
+    /// What the engine graph runs at — immutable per boot. A take cut at
+    /// another rate can be selected and read, but not played: there is no
+    /// resampler, so PLAY refuses. Carried here so the console can disable
+    /// PLAY and print why rather than discovering it via a 422.
+    pub engine_sample_rate: u32,
+    /// Length of the selected take (its longest track); 0 while recording,
+    /// where the client uses its own live frame count instead.
     pub total_frames: u64,
     #[serde(rename = "loop")]
     pub loop_region: Option<LoopRegionDto>,
     pub monitor: MonitorTarget,
+    /// Playback gates for the SELECTED take, index-aligned with its
+    /// tracks. Empty while recording — there is no playback set to gate.
     pub lanes: Vec<LaneDto>,
 }
 
@@ -168,6 +187,26 @@ pub enum ServerMessage {
         start_bin: u64,
         samples_per_bin: u32,
         bins: Vec<i16>,
+    },
+    /// The candidate drive list, pushed when the mount table changes and
+    /// once on subscribe. Carries only the drives — the active and default
+    /// destinations belong to the recording settings the client already
+    /// holds, and duplicating them here would give them two homes.
+    Destinations {
+        drives: Vec<super::destinations::DriveDto>,
+    },
+    /// The open session's takes, newest first — pushed whenever the shelf
+    /// changes. Same mapping as `GET /api/v1/takes`, so a push and a poll
+    /// can never disagree.
+    TakesChanged {
+        takes: Vec<super::takes::TakeDto>,
+    },
+    /// The open session changed — created, opened or renamed. Carries only
+    /// the open one; a client showing the list refetches, and one showing
+    /// just the tape label never has to.
+    SessionsChanged {
+        open_id: String,
+        open_name: String,
     },
     Subscribed {
         channel: Channel,
@@ -409,6 +448,8 @@ async fn client_loop(socket: WebSocket, state: AppState) {
                 match action {
                     Some(WsAction::Registry(delta)) => {
                         let subscribed_mixer = matches!(delta, RegistryDelta::Add(Channel::Mixer));
+                        let subscribed_destinations =
+                            matches!(delta, RegistryDelta::Add(Channel::Destinations));
                         match delta {
                             RegistryDelta::Add(channel) => state.registry.add(&channel),
                             RegistryDelta::Remove(channel) => state.registry.remove(&channel),
@@ -422,6 +463,17 @@ async fn client_loop(socket: WebSocket, state: AppState) {
                             if !send(&mut sink, &snapshot).await {
                                 break;
                             }
+                        }
+                        // Same idiom for drives, and it is also the safety
+                        // net: if the mount watcher is dead, opening Setup
+                        // still shows the truth — only hotplug-while-
+                        // watching is lost, never correctness.
+                        if subscribed_destinations
+                            && let Ok(drives) =
+                                tokio::task::spawn_blocking(super::destinations::drive_dtos).await
+                            && !send(&mut sink, &ServerMessage::Destinations { drives }).await
+                        {
+                            break;
                         }
                     }
                     Some(WsAction::Apply { command, ack }) => {
@@ -610,9 +662,13 @@ mod tests {
             state: TransportDto {
                 state: TransportPhase::Playing,
                 take: Some(2),
+                // Reviewing take 2 while take 5 is the newest — the case
+                // the browser exists for.
+                latest_take: Some(5),
                 started_at_unix: None,
                 position_frames: 480,
-                sample_rate: 48_000,
+                sample_rate: 44_100,
+                engine_sample_rate: 48_000,
                 total_frames: 96_000,
                 loop_region: Some(LoopRegionDto {
                     start_frames: 0,
@@ -627,7 +683,21 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&transport).unwrap(),
-            r#"{"type":"transport","state":{"state":"playing","take":2,"started_at_unix":null,"position_frames":480,"sample_rate":48000,"total_frames":96000,"loop":{"start_frames":0,"end_frames":4800},"monitor":"hardware","lanes":[{"solo":true,"mute":false}]}}"#
+            r#"{"type":"transport","state":{"state":"playing","take":2,"latest_take":5,"started_at_unix":null,"position_frames":480,"sample_rate":44100,"engine_sample_rate":48000,"total_frames":96000,"loop":{"start_frames":0,"end_frames":4800},"monitor":"hardware","lanes":[{"solo":true,"mute":false}]}}"#
+        );
+
+        let takes = ServerMessage::TakesChanged { takes: Vec::new() };
+        assert_eq!(
+            serde_json::to_string(&takes).unwrap(),
+            r#"{"type":"takes_changed","takes":[]}"#
+        );
+        let sessions = ServerMessage::SessionsChanged {
+            open_id: "1786380405-gig".into(),
+            open_name: "Gig".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&sessions).unwrap(),
+            r#"{"type":"sessions_changed","open_id":"1786380405-gig","open_name":"Gig"}"#
         );
     }
 

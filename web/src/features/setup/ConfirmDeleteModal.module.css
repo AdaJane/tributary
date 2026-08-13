@@ -1,0 +1,46 @@
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  min-width: 280px;
+  max-width: 380px;
+}
+
+/* Irreversible, so it says so first — before any control. */
+.warn {
+  margin: 0;
+  padding: var(--s2);
+  border: 1px solid var(--state-record);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  color: var(--text-value);
+}
+
+.detail {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
+}
+
+.hint {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
+}
+
+.error {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  color: var(--state-record);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s2);
+}

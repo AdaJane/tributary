@@ -21,28 +21,36 @@ export interface LoopRegion {
  */
 export interface TransportState {
   phase: TransportPhase;
-  /** Recording: the take being cut. Otherwise: the latest take. */
+  /** The selected take — what PLAY rolls. Recording: the take being cut. */
   take: number | null;
+  /** The newest take on the shelf; differs from `take` while reviewing. */
+  latestTake: number | null;
   startedAtUnix: number | null;
   positionFrames: number;
   /** performance.now() at the last position update — playhead interpolation. */
   positionAtMs: number;
+  /** The selected take's rate; the engine's own while recording. */
   sampleRate: number;
+  /** What the engine runs at. A take cut at another rate can be viewed
+   *  but not played, and the console needs both numbers to say so. */
+  engineSampleRate: number;
   totalFrames: number;
   loop: LoopRegion | null;
   monitor: 'hardware' | 'stream';
   lanes: Lane[];
   apply: (dto: TransportDto) => void;
-  applyPosition: (frames: number) => void;
+  applyPosition: (take: number, frames: number) => void;
 }
 
 export const useTransport = create<TransportState>((set) => ({
   phase: 'stopped',
   take: null,
+  latestTake: null,
   startedAtUnix: null,
   positionFrames: 0,
   positionAtMs: 0,
   sampleRate: 48_000,
+  engineSampleRate: 48_000,
   totalFrames: 0,
   loop: null,
   monitor: 'hardware',
@@ -51,10 +59,12 @@ export const useTransport = create<TransportState>((set) => ({
     set({
       phase: dto.state,
       take: dto.take ?? null,
+      latestTake: dto.latest_take ?? null,
       startedAtUnix: dto.started_at_unix ?? null,
       positionFrames: dto.position_frames,
       positionAtMs: performance.now(),
       sampleRate: dto.sample_rate,
+      engineSampleRate: dto.engine_sample_rate,
       totalFrames: dto.total_frames,
       loop: dto.loop
         ? { startFrames: dto.loop.start_frames, endFrames: dto.loop.end_frames }
@@ -62,5 +72,11 @@ export const useTransport = create<TransportState>((set) => ({
       monitor: dto.monitor,
       lanes: dto.lanes.map((lane) => ({ solo: lane.solo, mute: lane.mute })),
     }),
-  applyPosition: (frames) => set({ positionFrames: frames, positionAtMs: performance.now() }),
+  // A tick queued before a take switch can land after it. Ignoring one
+  // for a take we are no longer on stops it dragging the new take's
+  // playhead — the message has always carried `take`; nothing read it.
+  applyPosition: (take, frames) =>
+    set((s) =>
+      take === s.take ? { positionFrames: frames, positionAtMs: performance.now() } : {},
+    ),
 }));

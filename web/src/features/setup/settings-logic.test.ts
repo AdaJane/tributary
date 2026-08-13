@@ -23,9 +23,9 @@ describe('formatBytes', () => {
 
 describe('destinationStatus', () => {
   const drives = [
-    { mountPath: '/', writable: true },
-    { mountPath: '/run/media/user/STICK', writable: true },
-    { mountPath: '/run/media/user/LOCKED', writable: false },
+    { mountPath: '/', state: 'ready' },
+    { mountPath: '/run/media/user/STICK', state: 'ready' },
+    { mountPath: '/run/media/user/LOCKED', state: 'read_only' },
   ];
 
   it('reports ready on a writable mount, by longest prefix', () => {
@@ -41,7 +41,7 @@ describe('destinationStatus', () => {
   it('does not treat a sibling mount name as a prefix', () => {
     expect(
       destinationStatus('/run/media/user/LOCKED2', null, [
-        { mountPath: '/run/media/user/LOCKED', writable: false },
+        { mountPath: '/run/media/user/LOCKED', state: 'read_only' },
       ]),
     ).toBe('ready');
   });

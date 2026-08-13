@@ -225,9 +225,10 @@ strips. Bus strips: no GAIN, no ARM; INPUT reads "SOURCES".
   the second removes the strip. Disabled while recording (layout frozen).
 
 ### MasterSection (fixed right panel)
-Project TapeLabel (editable) · transport (REC/STOP, **ARM ALL**, elapsed in
-mono) · 12-LED stereo meters · master fader · FX RETURN / MONITOR / PHONES
-knobs. `--master-w` wide, `--surface-section`, left `--border-panel` edge.
+Session TapeLabel (editable — renames the open session) · transport
+(REC/STOP, **ARM ALL**, elapsed in mono) · 12-LED stereo meters · master
+fader · FX RETURN / MONITOR / PHONES knobs. `--master-w` wide,
+`--surface-section`, left `--border-panel` edge.
 
 ### ViewPager — Console ↔ Tracks
 - The two rooms stack SPATIALLY: Tracks above, Console below. A slide
@@ -240,7 +241,21 @@ knobs. `--master-w` wide, `--surface-section`, left `--border-panel` edge.
   dominance (`app/swipe.ts`) so strip scrolling never pages.
 - The Tracks room is the multitrack editor (below).
 
-### Tracks editor — TransportBar · Timeline · Lane · TimeRuler · Playhead
+### Tracks editor — TakeButton · TransportBar · Timeline · Lane · TimeRuler · Playhead
+- **TakeButton**: prints the selected take ("TAKE T03") in the header and
+  opens the browser. An amber OLD chip appears when the selection is not
+  the newest take — reviewing history rather than the last thing you cut
+  is otherwise invisible. A word, not a colour.
+- **TakeBrowserModal**: every take of the open session as a
+  `role="listbox"` — `T03` · time of day · duration · track count, with a
+  DAMAGED chip and, for a take cut at another rate, the reason PLAY will
+  not roll it ("cut at 44.1 kHz · the engine runs 48 kHz"). Such a take
+  stays *selectable*: refusing to show it would make it indistinguishable
+  from a take that is not there. Rows disable while tape rolls, with the
+  reason stated once. Delete lives in the footer and acts on the selected
+  take only — a two-step confirm rather than a per-row ✕ that a thumb can
+  find by accident, and no nested `<dialog>` (fiddly on iOS Safari).
+  A modal, not a panel: vertical space in this view belongs to waveform.
 - **TransportBar**: the tape-deck row — RTZ (ActionButton), PLAY (pfl
   PushButton, latched by server state), STOP (ActionButton, stops whatever
   runs), REC (arm PushButton, blinks while recording), the mono counter
@@ -285,20 +300,75 @@ knobs. `--master-w` wide, `--surface-section`, left `--border-panel` edge.
 The console's rear panel: a third top-level tab rendered INSTEAD of the
 ViewPager (the Bench pattern — lazy, unmounts when left; the pager's two
 live views stay untouched). One centered column (max 680px) of always-open
-panels: DESTINATION · FILE FORMAT · SAMPLE RATE. Every panel is a
+panels: SESSION · DESTINATION · FILE FORMAT · SAMPLE RATE. Every panel is a
 `--surface-strip` card with the print header row; nothing here folds —
 drive status must never be hidden.
 
-- **Destination**: a `role="listbox"` grid of drive tiles — Internal
-  (default root, FolderOpen) first, then mounted drives (Usb/HardDrive
-  icon, label, mono "14.2 GB free", status word + LED: green `ready`,
-  amber `read-only`). Selecting a drive records to `<mount>/tributary`.
-  Exactly one tile lights (`aria-selected` + focus ring), chosen by
-  longest-path containment. Below: a Custom `TextField` (absolute path)
-  + Rescan `ActionButton` (manual only — the daemon never polls), and a
-  REC PATH inset readout (mono, tail-preserving ellipsis) with its own
-  lamp — red `missing` when the daemon booted on the fallback because the
-  configured drive was gone.
+- **Session**: the reels of tape on this drive, newest first, as a
+  `role="listbox"` of rows. Each row is a `TapeLabel` (the rename
+  affordance — double-click, Enter or F2) plus a mono take count, Open and
+  Delete. The open row is latched `aria-selected` with `--depth-inset` AND
+  carries the word "open": colour is never the sole signal. A blocked Open
+  or Delete renders disabled with its reason beside it ("open another
+  session first", "stop recording first") — a control that vanishes
+  teaches nothing.
+  - **New session…** opens a dialog: a name field and a `SegmentedControl`
+    for what the desk starts from — **Clean desk** / **Same channels** /
+    **Copy this desk**, defaulting to Same channels, because on an
+    appliance you are usually starting the next song on a rig you already
+    wired. A live consequence line under the control says what resets
+    ("8 channels keep their inputs and arming; EQ, sends and levels
+    reset"), and a short warning appears only for the two seeds that
+    actually replace the console. A confirmation that fires when nothing
+    will change is the kind that gets tapped through without reading.
+  - **Delete** uses the typed-word gate, not a two-click SURE?. Same
+    sentence as the drive format: a strip costs nothing to rebuild,
+    someone's recordings do not.
+  - Two empty states, never merged: "No sessions on this drive yet" versus
+    "the recording drive is not connected — its sessions cannot be
+    listed".
+
+- **Destination**: one section per physical drive, each with a print
+  header (drive name + mono "57.8 GB · USB") over a `role="listbox"` grid
+  of volume tiles. Internal (default root, FolderOpen) is always the first
+  section; every attached drive follows, removable first, then by usable
+  capacity — a drive with a ready 58 GB volume outranks one holding only
+  junk. Grouping by drive is what stops a 512 MB boot partition sitting as
+  an equal peer to a real stick; it is **not** a disclosure. Every volume
+  of every drive is rendered, always.
+  - A tile carries icon, label, and either mono "14.2 GB free" (ready) or
+    "537 MB · vfat" — free space on a volume you cannot write to is a
+    meaningless number. Then a status line: green LED + `ready`, or a dim
+    LED and the daemon's own reason in words (`too small to record onto`,
+    `connected, but nothing mounted it`, `mounted, but the recorder cannot
+    write to it`, `system disk — the appliance runs from it`). The reason
+    is the signal; the LED only agrees with it.
+  - Unusable tiles are `disabled` and de-emphasised, never removed. A
+    drive with no usable volume gets a red headline — "no volume on this
+    drive can be recorded to" — and Format as the obvious next step.
+  - **Format…** `ActionButton` per drive. Blocked reasons render the
+    button disabled with the reason beside it, never hidden: `stop
+    recording first`, `only removable drives can be formatted`, `not
+    available on this installation`. It opens the wipe `Modal`, which
+    prints NOW (every existing volume) against AFTER (`1 partition ·
+    exFAT · TRIBUTARY · 57.8 GB`), takes a drive name (≤11 chars, exFAT's
+    limit), and gates the confirm button behind the typed word `ERASE`.
+    Two-click SURE? is deliberately *not* enough here — a strip costs
+    nothing to rebuild, someone's recordings do not.
+  - Selecting a volume records to `<mount>/tributary`. Exactly one tile
+    lights (`aria-selected` + focus ring), by longest-path containment.
+  - Empty states are two different sentences, never one: "No USB drive
+    connected…" vs "A drive is connected, but nothing on it can be
+    recorded to." A connected drive that renders as an empty port is the
+    bug this panel exists to not have.
+  - Below: a Custom `TextField` (absolute path) + Rescan `ActionButton`,
+    and a REC PATH inset readout (mono, tail-preserving ellipsis) with its
+    own lamp — red `missing` when the daemon booted on the fallback
+    because the configured drive was gone.
+  - The list arrives on the `destinations` WS channel: the daemon watches
+    `/proc/self/mountinfo` for `POLLPRI` and pushes, so a drive plugged in
+    while Setup is open appears on its own. Still no polling on either
+    side — Rescan is now the manual belt, not the only path.
 - **File format** (`SegmentedControl`): WAV 16 / WAV 24 / WAV 32F /
   FLAC 16 / FLAC 24 — applies to the next recording.
 - **Sample rate** (`SegmentedControl`): 44.1 / 48 / 96 kHz + an ENGINE

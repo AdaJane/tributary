@@ -20,6 +20,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/destinations/format": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["format_drive"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/devices": {
         parameters: {
             query?: never;
@@ -96,6 +112,54 @@ export interface paths {
         get?: never;
         put: operations["update_master"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_sessions"];
+        put?: never;
+        post: operations["create_session"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["rename_session"];
+        post?: never;
+        delete: operations["delete_session"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{id}/open": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["open_session"];
         delete?: never;
         options?: never;
         head?: never;
@@ -182,6 +246,29 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/takes/{take}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Permanently remove one take — audio, peaks and manifest together.
+         * @description Refused while recording, and refused for the take being played: the
+         *     feeder threads hold open readers and reopen the files on every loop
+         *     pass, so unlinking underneath them would run playback off unlinked
+         *     inodes until a later wrap died somewhere confusing.
+         */
+        delete: operations["delete_take"];
         options?: never;
         head?: never;
         patch?: never;
@@ -353,6 +440,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/transport/take": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Point the transport at a take of the open session.
+         * @description A property of the transport, so PUT with a body — the same shape as
+         *     `PUT /transport/loop` and `/monitor`, not a verb path like
+         *     `record/start`. Selecting is what makes `lanes`, `total_frames` and the
+         *     waveform describe that take, which is why it is separate from PLAY: the
+         *     point is to be able to LOOK at a take.
+         */
+        put: operations["select_take"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -414,6 +525,12 @@ export interface components {
         } | {
             /** @enum {string} */
             kind: "waveform";
+        } | {
+            /** @enum {string} */
+            kind: "destinations";
+        } | {
+            /** @enum {string} */
+            kind: "sessions";
         };
         /** @description The Folio-style 3-band strip EQ: LF shelf, swept mid peak, HF shelf. */
         ChannelEq: {
@@ -443,11 +560,22 @@ export interface components {
             seq: number;
         };
         DestinationsDto: {
+            /**
+             * @description Whether this installation can format a drive. False on package
+             *     installs, which ship no privileged helper — the console shows the
+             *     control disabled with a reason rather than failing on tap.
+             */
+            can_format: boolean;
             /** @description The active recording destination (projects root). */
             current: string;
             /** @description The boot-config fallback root. */
             default: string;
-            /** @description Mounted filesystems, removable first. */
+            /**
+             * @description Every candidate filesystem, usable first — never filtered down to
+             *     the usable ones. A drive that is plugged in but unusable rendering
+             *     as nothing is indistinguishable from an empty port, which is the
+             *     failure this endpoint exists to make impossible.
+             */
             drives: components["schemas"]["DriveDto"][];
         };
         /** @description One row of the patchbay device document. */
@@ -520,15 +648,44 @@ export interface components {
         /** @enum {string} */
         DeviceStatus: "open" | "available" | "failed" | "absent";
         DriveDto: {
-            /** Format: int64 */
-            available_bytes: number;
+            /**
+             * Format: int64
+             * @description Only knowable while mounted.
+             */
+            available_bytes?: number | null;
+            /** @description The block device, when one backs this filesystem. */
+            device?: string | null;
+            /**
+             * @description The whole disk this lives on, so the console can group partitions
+             *     under the drive they came from.
+             */
+            disk?: string | null;
+            /** @description "exfat", "ext4", … `null` when the kernel recognised none. */
+            filesystem?: string | null;
             label: string;
-            mount_point: string;
-            read_only: boolean;
+            /**
+             * @description `null` when the drive is present but nothing mounted it — the case
+             *     that used to render as no drive at all.
+             */
+            mount_point?: string | null;
+            /** @description Why this is not a usable destination; `null` when it is. */
+            reason?: string | null;
             removable: boolean;
+            state: components["schemas"]["DriveState"];
             /** Format: int64 */
             total_bytes: number;
         };
+        /**
+         * @description Why a drive is or is not a usable destination.
+         *
+         *     Evaluated top-down, and the order is the point: these overlap (a
+         *     root-owned partition on the boot disk is both `System` and
+         *     `NotWritable`), so the winner is the reason the user can do least
+         *     about. "It is the boot disk" ends the conversation; "it is not
+         *     writable" invites a reformat.
+         * @enum {string}
+         */
+        DriveState: "system" | "read_only" | "too_small" | "unknown_filesystem" | "not_mounted" | "not_writable" | "ready";
         /**
          * @description One EQ band of a strip. `kind` is fixed per slot (low/mid/high); freq is
          *     only user-swept on the mid band, but carrying it uniformly keeps the DSP
@@ -560,6 +717,15 @@ export interface components {
         } | {
             /** @enum {string} */
             kind: "master";
+        };
+        FormatRequest: {
+            /**
+             * @description The whole disk, as `DriveDto.disk` names it ("/dev/sda"). A
+             *     partition is refused: formatting one strands the rest of the drive.
+             */
+            device: string;
+            /** @description The exFAT volume label, which becomes the drive's printed name. */
+            label: string;
         };
         /**
          * Format: int32
@@ -802,6 +968,11 @@ export interface components {
          * @enum {string}
          */
         MonitorTarget: "hardware" | "stream";
+        NewSession: {
+            name: string;
+            /** @description What the new session's desk starts from. */
+            seed: components["schemas"]["SessionSeed"];
+        };
         NewStrip: {
             name?: string | null;
         };
@@ -843,6 +1014,9 @@ export interface components {
             project_name: string;
             restart_required: boolean;
         };
+        RenameSession: {
+            name: string;
+        };
         /** @description Where a strip's main (post-fader, post-pan) signal goes. */
         RouteTarget: {
             /** @enum {string} */
@@ -855,6 +1029,10 @@ export interface components {
         SeekBody: {
             /** Format: int64 */
             position_frames: number;
+        };
+        SelectTakeBody: {
+            /** Format: int32 */
+            take: number;
         };
         /** @description One aux send from a strip toward a bus. */
         SendState: {
@@ -909,6 +1087,19 @@ export interface components {
             /** @enum {string} */
             type: "waveform_bins";
         } | {
+            drives: components["schemas"]["DriveDto"][];
+            /** @enum {string} */
+            type: "destinations";
+        } | {
+            takes: components["schemas"]["TakeDto"][];
+            /** @enum {string} */
+            type: "takes_changed";
+        } | {
+            open_id: string;
+            open_name: string;
+            /** @enum {string} */
+            type: "sessions_changed";
+        } | {
             channel: components["schemas"]["Channel"];
             /** @enum {string} */
             type: "subscribed";
@@ -924,6 +1115,38 @@ export interface components {
         } | {
             /** @enum {string} */
             type: "pong";
+        };
+        SessionDto: {
+            /** Format: int64 */
+            created_at_unix: number;
+            /**
+             * @description The directory name. Stable across a rename — renaming retitles the
+             *     manifest and never moves the directory, so an id a client is
+             *     holding stays valid.
+             */
+            id: string;
+            name: string;
+            /** @description Exactly one session in a list is open. */
+            open: boolean;
+            take_count: number;
+        };
+        /**
+         * @description What a new session's desk starts from, ordered by how much of the
+         *     current rig it keeps.
+         * @enum {string}
+         */
+        SessionSeed: "template" | "mapping" | "console";
+        SessionsDto: {
+            /** @description The projects root these live under — the active destination. */
+            root: string;
+            /**
+             * @description False when the destination has gone away (drive unplugged). An
+             *     empty list then means "we cannot see them", not "there are none" —
+             *     two different sentences the console must not merge.
+             */
+            root_present: boolean;
+            /** @description Newest first, in the same order an adopt would pick from. */
+            sessions: components["schemas"]["SessionDto"][];
         };
         /** @description Which profile to put a sound card into. */
         SetCardProfile: {
@@ -1126,12 +1349,33 @@ export interface components {
          *     and served over REST. Position ticks ride `PlaybackPosition` instead.
          */
         TransportDto: {
+            /**
+             * Format: int32
+             * @description What the engine graph runs at — immutable per boot. A take cut at
+             *     another rate can be selected and read, but not played: there is no
+             *     resampler, so PLAY refuses. Carried here so the console can disable
+             *     PLAY and print why rather than discovering it via a 422.
+             */
+            engine_sample_rate: number;
+            /**
+             * @description Playback gates for the SELECTED take, index-aligned with its
+             *     tracks. Empty while recording — there is no playback set to gate.
+             */
             lanes: components["schemas"]["LaneDto"][];
+            /**
+             * Format: int32
+             * @description The newest finished take on the shelf. Equals `take` unless the
+             *     console is reviewing an older one. `null` on an empty session.
+             */
+            latest_take?: number | null;
             loop?: null | components["schemas"]["LoopRegionDto"];
             monitor: components["schemas"]["MonitorTarget"];
             /** Format: int64 */
             position_frames: number;
-            /** Format: int32 */
+            /**
+             * Format: int32
+             * @description The SELECTED take's rate; the engine's own while recording.
+             */
             sample_rate: number;
             /**
              * Format: int64
@@ -1141,13 +1385,14 @@ export interface components {
             state: components["schemas"]["TransportPhase"];
             /**
              * Format: int32
-             * @description Recording: the take being written. Otherwise: the latest take —
-             *     what PLAY would roll.
+             * @description The selected take — what PLAY would roll. While recording, the take
+             *     being written.
              */
             take?: number | null;
             /**
              * Format: int64
-             * @description Length of the latest take (its longest track).
+             * @description Length of the selected take (its longest track); 0 while recording,
+             *     where the client uses its own live frame count instead.
              */
             total_frames: number;
         };
@@ -1189,7 +1434,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Mounted drives and the active destination */
+            /** @description Every candidate drive and the active destination */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1197,6 +1442,49 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["DestinationsDto"];
                 };
+            };
+        };
+    };
+    format_drive: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FormatRequest"];
+            };
+        };
+        responses: {
+            /** @description Drive formatted; it remounts on its own */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Recording, or the drive is in use */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused — not a removable whole disk, or a bad label */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description This installation has no format helper */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -1302,6 +1590,177 @@ export interface operations {
             };
             /** @description A value out of range */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_sessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sessions on the active destination */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionsDto"];
+                };
+            };
+        };
+    };
+    create_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NewSession"];
+            };
+        };
+        responses: {
+            /** @description Created and opened */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionDto"];
+                };
+            };
+            /** @description Recording, or that name is taken */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad name */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    rename_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session directory name */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RenameSession"];
+            };
+        };
+        responses: {
+            /** @description Renamed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionDto"];
+                };
+            };
+            /** @description No session by that id */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad name */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session directory name */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted, permanently */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No session by that id */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Recording, or that session is open */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    open_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session directory name */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Opened */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionDto"];
+                };
+            };
+            /** @description No session by that id */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Recording */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1504,6 +1963,43 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TakeDto"][];
                 };
+            };
+        };
+    };
+    delete_take: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Take number */
+                take: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted; the remaining takes, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TakeDto"][];
+                };
+            };
+            /** @description No such take */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Recording, or that take is playing */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -1809,6 +2305,44 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TransportDto"];
                 };
+            };
+        };
+    };
+    select_take: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SelectTakeBody"];
+            };
+        };
+        responses: {
+            /** @description Selected */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TransportDto"];
+                };
+            };
+            /** @description No such take in the open session */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Recording */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

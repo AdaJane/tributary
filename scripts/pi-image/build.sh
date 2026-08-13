@@ -280,6 +280,24 @@ sed -i 's/^WirelessEnabled=.*/WirelessEnabled=true/' \
 echo "net.ipv4.ip_unprivileged_port_start=80" \
     > "$ROOT/etc/sysctl.d/80-tributary.conf"
 
+echo "==> USB automount"
+# Raspberry Pi OS Lite ships no automounter. udisks2 is in the base image
+# and runs, but it only mounts when a client calls Filesystem.Mount and a
+# headless install has none — so without this a plugged-in stick reaches
+# the kernel and stops there, invisible to tribd's mount-table scan.
+# Config only: every binary this needs (systemd-mount, findmnt, mountpoint)
+# is already in the base, and exfat/ntfs3 ship as kernel modules.
+install -D -m 755 "$HERE/usb-mount.sh" "$ROOT/usr/local/lib/tributary/usb-mount.sh"
+install -D -m 644 "$HERE/99-tributary-usb.rules" \
+    "$ROOT/etc/udev/rules.d/99-tributary-usb.rules"
+# The console's Format button. tribd is a systemd USER unit under a nologin
+# account with no capabilities, so partitioning needs one root-owned script
+# and a sudoers line naming it. 0440 and no dot in the filename: sudo
+# ignores a mode-permissive drop-in, and skips any name containing a '.'.
+install -D -m 755 "$HERE/format-drive.sh" "$ROOT/usr/local/lib/tributary/format-drive.sh"
+install -D -m 440 "$HERE/tributary-format.sudoers" \
+    "$ROOT/etc/sudoers.d/020_tributary-format"
+
 if [ -n "$DEV_SSH_KEY" ]; then
     echo "==> DEV image: ssh login + debugging tools"
     in_chroot "apt-get install -y -qq $DEV_PACKAGES && apt-get clean"
@@ -404,6 +422,59 @@ v grep -q "ieee80211_regdom=$AP_COUNTRY" "$ROOT/etc/modprobe.d/tributary-regdom.
 # error anywhere on the device.
 v grep -q '^WirelessEnabled=true' "$ROOT/var/lib/NetworkManager/NetworkManager.state"
 v grep -q '^net.ipv4.ip_unprivileged_port_start=80' "$ROOT/etc/sysctl.d/80-tributary.conf"
+# USB automount. Without the rule a stick never reaches the mount table and
+# the console's destination list stays blind to it — silently, which is the
+# failure this whole path exists to prevent.
+USB_RULE="$ROOT/etc/udev/rules.d/99-tributary-usb.rules"
+v test -f "$USB_RULE"
+v test -x "$ROOT/usr/local/lib/tributary/usb-mount.sh"
+# ID_BUS is what keeps the boot media out: the SD card carries no ID_BUS at
+# all, so losing this line would put / on the destination list.
+v grep -q 'ENV{ID_BUS}!="usb"' "$USB_RULE"
+# The rule names the helper by absolute path; a rename on one side only
+# would fail silently at hotplug time, which nothing else here would catch.
+v grep -q 'RUN+="/usr/local/lib/tributary/usb-mount.sh' "$USB_RULE"
+# `change` is how a console-formatted drive remounts without a replug.
+v grep -q 'ACTION!="add|change"' "$USB_RULE"
+# Behaviour of the SHIPPED helper, not the repo copy — the scripts are
+# arch-independent text, so the build host can run the aarch64 image's own
+# file and assert the strings the kernel would actually receive.
+USB_HELPER="$ROOT/usr/local/lib/tributary/usb-mount.sh"
+USB_OPTS="$(bash "$USB_HELPER" --print-options vfat 999 985)"
+case ",$USB_OPTS," in
+*,sync,* | *,flush,*) fail "verify: mount options include sync/flush — a take is a sustained write" ;;
+esac
+case "$USB_OPTS" in
+*uid=999,gid=985*) ;;
+*) fail "verify: vfat carries no uid=/gid= — the daemon could not write: $USB_OPTS" ;;
+esac
+case "$(bash "$USB_HELPER" --print-options ext4 999 985)" in
+*uid=*) fail "verify: uid= passed to ext4 — that mount fails outright" ;;
+esac
+[ "$(bash "$USB_HELPER" --print-type ntfs)" = ntfs3 ] \
+    || fail "verify: ntfs would route to the ntfs-3g FUSE helper"
+# The format helper's trust boundary is one script plus the sudoers line
+# naming it, so ownership and mode are as load-bearing as the contents.
+FMT="$ROOT/usr/local/lib/tributary/format-drive.sh"
+v test -x "$FMT"
+[ "$(stat -c '%u:%g:%a' "$FMT")" = 0:0:755 ] \
+    || fail "verify: format-drive.sh must be root-owned and not writable by $TRIB_USER"
+[ "$(stat -c '%u:%g:%a' "$ROOT/usr/local/lib/tributary")" = 0:0:755 ] \
+    || fail "verify: /usr/local/lib/tributary is not root-owned"
+FMT_SUDO="$ROOT/etc/sudoers.d/020_tributary-format"
+v test -f "$FMT_SUDO"
+[ "$(stat -c%a "$FMT_SUDO")" = 440 ] \
+    || fail "verify: sudoers drop-in mode — sudo ignores anything more permissive"
+v grep -q "^$TRIB_USER ALL=(root:root) NOPASSWD: /usr/local/lib/tributary/format-drive.sh\$" "$FMT_SUDO"
+[ "$(bash "$FMT" --print-label-check TRIBUTARY)" = ok ] || fail "verify: label check"
+[ "$(bash "$FMT" --print-label-check 'has space')" = refused ] || fail "verify: label check"
+# The filesystems a stick actually arrives formatted as. vfat is builtin;
+# these two are modules, and mkfs.exfat is what the format helper needs.
+for m in exfat ntfs3; do
+    compgen -G "$ROOT/lib/modules/*/kernel/fs/$m/$m.ko*" >/dev/null \
+        || fail "verify: no $m kernel module — USB sticks of that type cannot mount"
+done
+v test -x "$ROOT/sbin/mkfs.exfat"
 # pi must stay locked (no accidental credentials) at UID 1000 (the rename
 # target Imager customization depends on).
 v grep -q '^pi:x:1000:1000:' "$ROOT/etc/passwd"
@@ -442,9 +513,18 @@ else
     if [ -e "$ROOT/etc/ssh/sshd_config.d/10-tributary-dev.conf" ]; then
         fail "verify: dev sshd config in a non-dev image"
     fi
-    if compgen -G "$ROOT/etc/sudoers.d/010_*-nopasswd" >/dev/null; then
-        fail "verify: passwordless sudo in a non-dev image"
-    fi
+    # An allowlist, not a glob for the dev rule. The appliance now ships one
+    # NOPASSWD entry of its own (the format helper), so a check that only
+    # looked for `010_*-nopasswd` would stay green while the promise it
+    # encodes — "no passwordless sudo here" — quietly stopped being true.
+    # Enumerating is the only form that keeps meaning as the image grows.
+    for f in "$ROOT"/etc/sudoers.d/*; do
+        [ -e "$f" ] || continue
+        case "${f##*/}" in
+        README | 020_tributary-format) ;;
+        *) fail "verify: unexpected sudoers drop-in in a release image: ${f##*/}" ;;
+        esac
+    done
     # Baked host keys are fine for a one-off dev image and wrong for a
     # release: every card flashed from it would share an identity.
     if compgen -G "$ROOT/etc/ssh/ssh_host_*_key" >/dev/null; then

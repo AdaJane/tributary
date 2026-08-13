@@ -1,0 +1,84 @@
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  min-width: 280px;
+  max-width: 380px;
+}
+
+/* Irreversible, so it says so first — before the drive's name, before any
+   control. Text, not a colour: the warning has to survive a greyscale
+   screen and a colour-blind reader. */
+.warn {
+  margin: 0;
+  padding: var(--s2);
+  border: 1px solid var(--state-record);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  color: var(--text-value);
+}
+
+.panel {
+  padding: var(--s2);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+}
+
+.panelHead {
+  margin: 0 0 var(--s1);
+  font-family: var(--font-label);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-label);
+}
+
+.device,
+.promise {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-value);
+}
+
+.rows {
+  margin: var(--s1) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s2);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
+}
+
+.rowDetail {
+  color: var(--text-dim);
+}
+
+.hint {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
+}
+
+.error {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  color: var(--state-record);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s2);
+}

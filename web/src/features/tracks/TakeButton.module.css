@@ -1,0 +1,35 @@
+.button {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s2);
+  min-height: var(--btn-h);
+  padding: 0 var(--s2);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-sm);
+  background: var(--surface-control);
+  box-shadow: var(--depth-raised);
+  cursor: pointer;
+}
+
+.label {
+  font-family: var(--font-label);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-label);
+}
+
+.value {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-value);
+}
+
+/* Reviewing history rather than the last thing you cut. A word, not a
+   colour — this has to read on a greyscale screen. */
+.old {
+  font-family: var(--font-label);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-print);
+  color: var(--led-amber-on);
+}

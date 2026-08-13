@@ -1,0 +1,74 @@
+.waiting {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-block-end: var(--s3);
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  background: var(--surface-control);
+}
+
+/* The open session is latched, not merely tinted: it also carries the
+   word "open", because colour is never the sole signal. */
+.row[data-open] {
+  box-shadow: var(--depth-inset);
+  border-color: var(--focus-color);
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
+}
+
+.openTag {
+  font-family: var(--font-label);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--led-green-on);
+}
+
+.rowActions {
+  display: flex;
+  gap: var(--s2);
+}
+
+.blocked,
+.hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
+}
+
+.error {
+  margin: var(--s2) 0 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  color: var(--state-record);
+}
