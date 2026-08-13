@@ -12,6 +12,12 @@ pub const MAX_INPUT_CHANNELS: usize = 64;
 pub enum SlotError {
     /// Not enough contiguous space left in the frame.
     Exhausted { needed: u16 },
+    /// The device already holds a slot of a different width — a card
+    /// profile switch is the usual cause. Its stream is still feeding the
+    /// old range, so the caller must close and release it before the slot
+    /// can be resized; quietly keeping the old width would leave the new
+    /// channels resolving to silence.
+    WidthChanged { held: u16, wanted: u16 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,11 +36,20 @@ pub struct InputSlots {
 }
 
 impl InputSlots {
-    /// Reserve a contiguous range for `device`. Re-allocating a device
-    /// that already holds a slot returns its existing offset.
+    /// Reserve a contiguous range for `device`. Re-allocating a device that
+    /// already holds a slot of the SAME width returns its existing offset
+    /// (the open path is idempotent); a different width is refused, because
+    /// resizing under a live stream is the caller's job to sequence.
     pub fn allocate(&mut self, device: Option<&str>, channels: u16) -> Result<u16, SlotError> {
-        if let Some((offset, _)) = self.get(device) {
-            return Ok(offset);
+        if let Some((offset, held)) = self.get(device) {
+            return if held == channels {
+                Ok(offset)
+            } else {
+                Err(SlotError::WidthChanged {
+                    held,
+                    wanted: channels,
+                })
+            };
         }
         let mut offset = 0u16;
         for entry in &self.entries {
@@ -133,6 +148,25 @@ mod tests {
         assert_eq!(slots.allocate(Some("dock"), 2), Ok(0));
         assert_eq!(slots.allocate(Some("dock"), 2), Ok(0));
         assert_eq!(slots.devices().count(), 1);
+    }
+
+    #[test]
+    fn a_device_whose_width_changed_must_be_released_first() {
+        let mut slots = InputSlots::default();
+        assert_eq!(slots.allocate(Some("umc"), 2), Ok(0));
+        assert_eq!(
+            slots.allocate(Some("umc"), 18),
+            Err(SlotError::WidthChanged {
+                held: 2,
+                wanted: 18
+            }),
+            "a card profile switch widens the device; silently keeping the \
+             2-wide slot would leave channels 2..18 resolving to silence \
+             while the patchbay drew eighteen jacks"
+        );
+        slots.release(Some("umc"));
+        assert_eq!(slots.allocate(Some("umc"), 18), Ok(0));
+        assert_eq!(slots.resolve(Some("umc"), 17), Some(17));
     }
 
     #[test]

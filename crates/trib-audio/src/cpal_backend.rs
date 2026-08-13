@@ -23,11 +23,11 @@ use rtrb::RingBuffer;
 use trib_engine::{GraphEngine, MAX_INPUT_CHANNELS};
 
 use crate::assembler::{
-    ASSEMBLER_RING_CAPACITY, AssemblerCmd, Attached, InputAssembler, InputShared,
+    ASSEMBLER_RING_CAPACITY, AssemblerCmd, Attached, InputAssembler, InputShared, push_frames,
 };
 use crate::backend::{
-    AudioBackend, AudioError, InputDeviceInfo, InputStreamStatus, OpenInput, StreamConfig,
-    StreamHandle,
+    AudioBackend, AudioError, CardInfo, CardProfile, InputDeviceInfo, InputStreamStatus, OpenInput,
+    StreamConfig, StreamHandle,
 };
 use crate::stall::{StallWatch, Transition};
 
@@ -97,6 +97,7 @@ impl StreamHandle for CpalStream {
                 channels: *channels,
                 failed: shared.failed.load(Ordering::Relaxed),
                 underruns: shared.underruns.load(Ordering::Relaxed),
+                overruns: shared.overruns.load(Ordering::Relaxed),
             })
             .collect()
     }
@@ -129,6 +130,8 @@ impl AudioBackend for CpalBackend {
                     channels: s.channels,
                     active: s.default,
                     pulse: true,
+                    card: s.card,
+                    channel_map: s.channel_map,
                 })
                 .collect();
         }
@@ -155,9 +158,35 @@ impl AudioBackend for CpalBackend {
                     description: None,
                     channels,
                     pulse: false,
+                    // Raw ALSA has no card-profile concept to offer.
+                    card: None,
+                    channel_map: None,
                 })
             })
             .collect()
+    }
+
+    fn input_cards(&self) -> Vec<CardInfo> {
+        crate::pulse::enumerate_cards()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| CardInfo {
+                name: c.name,
+                active_profile: c.active_profile,
+                profiles: c
+                    .profiles
+                    .into_iter()
+                    .map(|p| CardProfile {
+                        name: p.name,
+                        description: p.description,
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    fn set_card_profile(&self, card: &str, profile: &str) -> Result<(), AudioError> {
+        crate::pulse::set_card_profile(card, profile)
     }
 
     fn start(
@@ -477,6 +506,7 @@ fn open_input(
                 config.block_size * usize::from(channels) * INPUT_RING_BLOCKS,
             );
             let error_shared = shared.clone();
+            let cb_shared = shared.clone();
             let stream = device
                 .build_input_stream(
                     &cpal::StreamConfig {
@@ -486,9 +516,12 @@ fn open_input(
                     },
                     move |data: &[f32], _| {
                         // Whole interleaved device frames; the assembler
-                        // re-homes them at this device's offset.
-                        for &sample in data {
-                            let _ = tx.push(sample);
+                        // re-homes them at this device's offset. Frame
+                        // -atomic on purpose: a torn frame rotates every
+                        // one of this device's channels permanently.
+                        let dropped = push_frames(&mut tx, data, usize::from(channels));
+                        if dropped > 0 {
+                            cb_shared.overruns.fetch_add(dropped, Ordering::Relaxed);
                         }
                     },
                     move |e| {

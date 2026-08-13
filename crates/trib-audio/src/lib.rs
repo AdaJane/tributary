@@ -12,8 +12,8 @@ mod pulse;
 mod stall;
 
 pub use backend::{
-    AudioBackend, AudioError, InputDeviceInfo, InputStreamStatus, OpenInput, StreamConfig,
-    StreamHandle,
+    AudioBackend, AudioError, CardInfo, CardProfile, InputDeviceInfo, InputStreamStatus, OpenInput,
+    StreamConfig, StreamHandle,
 };
 #[cfg(feature = "cpal-backend")]
 pub use cpal_backend::CpalBackend;

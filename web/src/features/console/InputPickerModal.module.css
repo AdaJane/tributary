@@ -96,6 +96,51 @@
   color: var(--led-red-on);
 }
 
+/* Which profile the device's CARD is in — the setting that decides how
+ * many jacks exist at all, so it sits directly above them. */
+.profile {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0 0 var(--s2);
+  font-family: var(--font-label);
+  font-size: var(--text-sm);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-label);
+}
+
+.profileLabel {
+  flex-shrink: 0;
+}
+
+.profileSelect {
+  min-width: 0;
+  /* Dense visual, honest hit area (WCAG 2.2 target size) — a native
+   * select can carry its own height, so no pseudo-element is needed. */
+  min-height: 32px;
+  padding: var(--s0) var(--s1);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-1);
+  background: var(--surface-control);
+  box-shadow: var(--depth-raised);
+  font-family: var(--font-label);
+  font-size: var(--text-sm);
+  color: var(--text-value);
+}
+
+.profileSelect:disabled {
+  color: var(--text-dim);
+  box-shadow: var(--depth-inset);
+}
+
+.profileCount {
+  flex-shrink: 0;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text-dim);
+}
+
 .jacks {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

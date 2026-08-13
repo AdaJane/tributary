@@ -112,6 +112,8 @@ mod tests {
             channels: 2,
             active: false,
             pulse: false,
+            card: None,
+            channel_map: None,
         }
     }
 

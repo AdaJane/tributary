@@ -6,7 +6,7 @@
  */
 import type { DeviceReport } from '../../state/devices';
 import type { StripState } from '../../ws/messages';
-import { INPUT_CHANNELS, deviceLetters } from './linked-inputs';
+import { deviceLetters } from './linked-inputs';
 
 export type SectionStatus = 'open' | 'available' | 'failed' | 'absent';
 
@@ -27,9 +27,21 @@ export interface PatchbaySection {
   /** The stored project name this device was matched from (renamed
    * hardware adopted by reconciliation). */
   reconciledFrom: string | null;
+  /** The sound card to address a profile change to. */
+  card: string | null;
+  /** The card's active profile. */
+  profile: string | null;
+  /** Profiles worth offering — empty unless there is a real choice, in
+   * which case `channels` above is a setting rather than a hardware limit. */
+  profiles: DeviceReport['profiles'];
 }
 
 const ROUTING_ALIASES = new Set(['default', 'sysdefault', 'pipewire', 'pulse', 'jack']);
+
+/** The ALSA profile that exposes every channel a card has. The server
+ * publishes no per-profile channel count, so this name is the only honest
+ * hint we can give about which profile reveals the missing inputs. */
+export const PRO_AUDIO_PROFILE = 'pro-audio';
 
 export type SourceKind = 'default' | 'mic' | 'webcam' | 'usb' | 'line';
 
@@ -42,6 +54,15 @@ export function sourceKind(device: string | null, title: string): SourceKind {
   if (/\bmic\b|microphone/.test(print)) return 'mic';
   if (/dock|usb/.test(print)) return 'usb';
   return 'line';
+}
+
+function switchable(device: DeviceReport): boolean {
+  return (
+    device.card !== null &&
+    device.card !== undefined &&
+    device.profiles.length > 1 &&
+    device.profiles.some((p) => p.name === device.profile)
+  );
 }
 
 function patchedMax(strips: readonly StripState[], device: string | null): number {
@@ -70,7 +91,10 @@ export function groupPatchbay(
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const letters = deviceLetters(named.map((d) => d.name));
 
-  const defaultChannels = active?.channels ?? INPUT_CHANNELS;
+  // No enumerated default = no jacks, not a guessed handful. Inventing a
+  // count here drew phantom sockets that looked exactly like a real device
+  // and hid the fact that enumeration had found nothing.
+  const defaultChannels = active?.channels ?? 0;
   const sections: PatchbaySection[] = [
     {
       device: null,
@@ -82,6 +106,11 @@ export function groupPatchbay(
       status: active ? (active.status as SectionStatus) : 'absent',
       error: active?.error ?? null,
       reconciledFrom: null,
+      card: active?.card ?? null,
+      profile: active?.profile ?? null,
+      // Section A follows whatever the system default is; the same device
+      // also gets its own lettered box, and that is where it is configured.
+      profiles: [],
     },
   ];
   for (const device of named) {
@@ -95,6 +124,12 @@ export function groupPatchbay(
       status: device.status as SectionStatus,
       error: device.error ?? null,
       reconciledFrom: device.reconciled_from ?? null,
+      card: device.card ?? null,
+      profile: device.profile ?? null,
+      // Offer the choice only when there IS one, and only when the active
+      // profile is among the options — a picker that cannot show the
+      // current state would misreport it.
+      profiles: switchable(device) ? device.profiles : [],
     });
   }
   return sections;

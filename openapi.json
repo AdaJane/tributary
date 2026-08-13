@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "1.0.1"
+    "version": "1.1.0"
   },
   "paths": {
     "/api/v1/destinations": {
@@ -44,6 +44,44 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/profile": {
+      "put": {
+        "summary": "Switch a sound card's profile.",
+        "description": "The active profile decides how many channels the card's devices expose,\nso this is how an interface with more inputs than the current profile\nshows gets the rest of them. The switch renames, resizes and remaps the\ncard's devices, so the whole document is re-enumerated and returned —\ncallers must replace their copy rather than patch it.",
+        "operationId": "set_card_profile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetCardProfile"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Devices after the profile switch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DeviceReport"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Recording in progress"
+          },
+          "422": {
+            "description": "The card or profile was refused"
           }
         }
       }
@@ -831,17 +869,33 @@
           "active",
           "status",
           "patched",
-          "underruns"
+          "underruns",
+          "overruns",
+          "profiles"
         ],
         "properties": {
           "active": {
             "type": "boolean",
             "description": "The OS default input — what `device: null` patches feed from."
           },
+          "card": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The card this device belongs to. A profile change names the CARD."
+          },
+          "channel_map": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the channel indices mean on the hardware (\"aux0,aux1,…\").\nDiagnostic only — capture always routes by index."
+          },
           "channels": {
             "type": "integer",
             "format": "int32",
-            "description": "0 = unknown (an absent device was never enumerated this boot).",
+            "description": "What the device exposes RIGHT NOW — a property of the card's active\nprofile, not of the hardware. 0 = unknown (an absent device was\nnever enumerated this boot).",
             "minimum": 0
           },
           "error": {
@@ -861,9 +915,29 @@
           "name": {
             "type": "string"
           },
+          "overruns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Whole frames dropped because the engine wasn't draining fast enough.",
+            "minimum": 0
+          },
           "patched": {
             "type": "boolean",
             "description": "Some strip references it (directly, via the default, or via an alias)."
+          },
+          "profile": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The card's active profile, when it has one."
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProfileReport"
+            },
+            "description": "Profiles this device's card can be switched into. More than one\nmeans the channel count above is a choice, not a hardware limit."
           },
           "reconciled_from": {
             "type": [
@@ -1820,6 +1894,24 @@
         },
         "additionalProperties": false
       },
+      "ProfileReport": {
+        "type": "object",
+        "description": "One profile a device's card can be switched into.",
+        "required": [
+          "name",
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "\"Pro Audio\" — what the system sound panel prints."
+          },
+          "name": {
+            "type": "string",
+            "description": "`pro-audio` — what a change request names."
+          }
+        }
+      },
       "RecordFormat": {
         "type": "string",
         "description": "What the take writer puts on disk. Bit depth folds into the variant so\nillegal combinations (float FLAC) are unrepresentable.",
@@ -2206,6 +2298,24 @@
           }
         ],
         "description": "Messages the daemon sends over `/ws`."
+      },
+      "SetCardProfile": {
+        "type": "object",
+        "description": "Which profile to put a sound card into.",
+        "required": [
+          "card",
+          "profile"
+        ],
+        "properties": {
+          "card": {
+            "type": "string",
+            "description": "The card, as `DeviceReport.card` names it. Profiles belong to the\ncard, not to any one of its devices."
+          },
+          "profile": {
+            "type": "string",
+            "description": "One of that card's `DeviceReport.profiles[].name`."
+          }
+        }
       },
       "StateDelta": {
         "oneOf": [

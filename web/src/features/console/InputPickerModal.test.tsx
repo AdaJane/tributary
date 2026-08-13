@@ -11,6 +11,7 @@ import { InputPickerModal } from './InputPickerModal';
 vi.mock('../../api/client', () => ({
   $api: {
     GET: vi.fn().mockResolvedValue({ data: undefined }),
+    PUT: vi.fn().mockResolvedValue({ data: [] }),
     POST: vi.fn().mockResolvedValue({
       data: [
         {
@@ -106,6 +107,8 @@ describe('InputPickerModal', () => {
           status: 'failed',
           patched: true,
           underruns: 0,
+          overruns: 0,
+          profiles: [],
           error: 'audio backend not running',
           reconciled_from: null,
         },
@@ -213,5 +216,76 @@ describe('InputPickerModal', () => {
       screen.getByRole('button', { name: 'Rescan audio devices and retry failed ones' }),
     );
     expect(vi.mocked($api.POST).mock.calls.length).toBe(callsAfterOpen + 1);
+  });
+
+  describe('the card profile picker', () => {
+    const umc = (overrides = {}) => ({
+      name: 'alsa_input.usb-UMC1820.analog-stereo',
+      label: 'UMC1820',
+      channels: 2,
+      active: false,
+      status: 'available' as const,
+      patched: false,
+      underruns: 0,
+      overruns: 0,
+      card: 'alsa_card.usb-UMC1820',
+      profile: 'input:analog-stereo',
+      profiles: [
+        { name: 'input:analog-stereo', description: 'Analog Stereo Input' },
+        { name: 'pro-audio', description: 'Pro Audio' },
+      ],
+      reconciled_from: null,
+      ...overrides,
+    });
+
+    async function openWith(devices: unknown[]) {
+      const { $api } = await import('../../api/client');
+      vi.mocked($api.POST).mockResolvedValue({ data: devices } as never);
+      render(
+        <InputPickerModal
+          strip={snare}
+          strips={console_}
+          open
+          onClose={() => {}}
+          onPatch={() => {}}
+        />,
+      );
+      await screen.findByText('UMC1820');
+      return $api;
+    }
+
+    it('names the profile that reveals the missing inputs', async () => {
+      await openWith([umc()]);
+      const select = screen.getByLabelText('Mode');
+      expect(select).toHaveValue('input:analog-stereo');
+      // pactl publishes no per-profile channel count, so the name is the
+      // only honest guidance we can give.
+      expect(
+        screen.getByRole('option', { name: 'Pro Audio (all inputs)' }),
+      ).toBeInTheDocument();
+      expect(screen.getByText('2 in')).toBeInTheDocument();
+    });
+
+    it('sends the change against the CARD, not the device', async () => {
+      const user = userEvent.setup();
+      const $api = await openWith([umc()]);
+      await user.selectOptions(screen.getByLabelText('Mode'), 'pro-audio');
+      expect(vi.mocked($api.PUT)).toHaveBeenCalledWith('/api/v1/devices/profile', {
+        body: { card: 'alsa_card.usb-UMC1820', profile: 'pro-audio' },
+      });
+    });
+
+    it('surfaces a refused switch instead of silently reverting', async () => {
+      const user = userEvent.setup();
+      const $api = await openWith([umc()]);
+      vi.mocked($api.PUT).mockResolvedValue({ error: 'card is busy' } as never);
+      await user.selectOptions(screen.getByLabelText('Mode'), 'pro-audio');
+      expect(await screen.findByRole('alert')).toHaveTextContent('card is busy');
+    });
+
+    it('stays out of the way when the card offers no alternative', async () => {
+      await openWith([umc({ profiles: [] })]);
+      expect(screen.queryByLabelText('Mode')).not.toBeInTheDocument();
+    });
   });
 });

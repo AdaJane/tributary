@@ -120,6 +120,7 @@ fn api_router() -> OpenApiRouter<AppState> {
         .routes(routes!(takes::take_peaks))
         .routes(routes!(devices::list_devices))
         .routes(routes!(devices::refresh_devices))
+        .routes(routes!(devices::set_card_profile))
         .routes(routes!(
             recording::get_recording,
             recording::update_recording

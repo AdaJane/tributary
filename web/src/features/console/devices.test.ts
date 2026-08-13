@@ -14,9 +14,23 @@ const dev = (
   status: 'available',
   patched: false,
   underruns: 0,
+  overruns: 0,
+  profiles: [],
   reconciled_from: null,
   ...overrides,
 });
+
+/** A device on a card offering a real profile choice. */
+const carded = (name: string, overrides: Partial<DeviceReport> = {}): DeviceReport =>
+  dev(name, {
+    card: 'alsa_card.umc',
+    profile: 'input:analog-stereo',
+    profiles: [
+      { name: 'input:analog-stereo', description: 'Analog Stereo Input' },
+      { name: 'pro-audio', description: 'Pro Audio' },
+    ],
+    ...overrides,
+  });
 
 const strip = (id: number, device: string | null, channel: number): StripState =>
   ({
@@ -118,11 +132,46 @@ describe('groupPatchbay', () => {
     expect(sections[1].reconciledFrom).toBe('Dock USB');
   });
 
-  it('with no enumeration the default box still draws the classic eight', () => {
-    const sections = groupPatchbay([], [strip(0, null, 0)]);
+  it('with no enumeration the default box draws nothing it cannot prove', () => {
+    const sections = groupPatchbay([], []);
     expect(sections).toHaveLength(1);
-    expect(sections[0].jackCount).toBe(8);
+    expect(sections[0].jackCount).toBe(0);
     expect(sections[0].status).toBe('absent');
+  });
+
+  it('keeps a dead patch visible even with no enumeration behind it', () => {
+    const sections = groupPatchbay([], [strip(0, null, 4)]);
+    expect(sections[0].jackCount).toBe(5);
+    expect(sections[0].channels).toBe(0);
+  });
+
+  it('offers a profile switch only where there is a real choice to make', () => {
+    const sections = groupPatchbay(
+      [
+        carded('umc'),
+        dev('webcam', { card: 'alsa_card.webcam', profile: 'x', profiles: [] }),
+        dev('bare'),
+      ],
+      [],
+    );
+    const byTitle = new Map(sections.map((s) => [s.title, s]));
+    expect(byTitle.get('umc')?.profiles).toHaveLength(2);
+    expect(byTitle.get('umc')?.card).toBe('alsa_card.umc');
+    expect(byTitle.get('webcam')?.profiles).toEqual([]);
+    expect(byTitle.get('bare')?.profiles).toEqual([]);
+  });
+
+  it('hides the switch when the active profile is not among the options', () => {
+    // A picker that cannot represent the current state would misreport it.
+    const sections = groupPatchbay([carded('umc', { profile: 'a2dp-sink' })], []);
+    expect(sections[1].profiles).toEqual([]);
+  });
+
+  it('never offers a profile switch on the follower box', () => {
+    const sections = groupPatchbay([carded('umc', { active: true })], []);
+    expect(sections[0].title).toBe('System default input');
+    expect(sections[0].profiles).toEqual([]);
+    expect(sections[1].profiles).toHaveLength(2);
   });
 });
 

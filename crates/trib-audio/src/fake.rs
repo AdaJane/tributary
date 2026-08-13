@@ -70,6 +70,7 @@ impl StreamHandle for FakeStream {
                 channels: req.channels,
                 failed: false,
                 underruns: 0,
+                overruns: 0,
             })
             .into_iter()
             .collect()
@@ -97,6 +98,8 @@ impl AudioBackend for FakeBackend {
             channels: 1,
             active: true,
             pulse: false,
+            card: None,
+            channel_map: None,
         }]
     }
 

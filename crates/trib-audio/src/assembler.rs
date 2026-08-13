@@ -21,8 +21,41 @@ pub const ASSEMBLER_RING_CAPACITY: usize = MAX_INPUT_DEVICES * 2;
 #[derive(Debug, Default)]
 pub struct InputShared {
     pub underruns: AtomicU64,
+    /// Whole frames the producer dropped because the ring was full. Kept
+    /// apart from `underruns` (the drained-ring count) because they blame
+    /// opposite ends: overruns mean the engine isn't draining fast enough.
+    pub overruns: AtomicU64,
     /// Set by the cpal error callback; the orchestrator reopens on Refresh.
     pub failed: AtomicBool,
+}
+
+/// Push whole device frames into `tx`, dropping any frame that does not fit
+/// ENTIRELY. Returns the number of frames dropped.
+///
+/// This is the only sanctioned way to feed an input ring, because
+/// [`InputAssembler::fill`] de-interleaves *positionally* — there is no
+/// frame marker in the ring and no resynchronisation anywhere. A ring left
+/// holding a partial frame therefore rotates every one of that device's
+/// channels by the remainder, silently, for the rest of the stream's life.
+/// Dropping a whole frame costs one frame; tearing one costs the take.
+///
+/// Allocation-free: safe to call from an audio callback.
+pub fn push_frames(tx: &mut Producer<f32>, samples: &[f32], channels: usize) -> u64 {
+    debug_assert!(channels > 0, "a device with no channels cannot produce");
+    debug_assert!(
+        samples.len().is_multiple_of(channels),
+        "producer handed a partial frame: {} samples at {channels} channels",
+        samples.len()
+    );
+    samples
+        .chunks_exact(channels)
+        .fold(0, |dropped, frame| match tx.write_chunk_uninit(channels) {
+            Ok(chunk) => {
+                chunk.fill_from_iter(frame.iter().copied());
+                dropped
+            }
+            Err(_) => dropped + 1,
+        })
 }
 
 /// One attached device: its ring consumer and where its channels land in
@@ -180,6 +213,41 @@ mod tests {
                 shared: Arc::new(InputShared::default()),
             }),
         )
+    }
+
+    #[test]
+    fn a_full_ring_drops_whole_frames_never_partial_ones() {
+        // Capacity deliberately NOT a multiple of the channel count: the
+        // ring must still never come to rest holding a torn frame.
+        let (mut tx, rx) = RingBuffer::<f32>::new(5);
+        let samples: Vec<f32> = (0..8).map(|i| i as f32).collect(); // 4 frames
+        let dropped = assert_no_alloc::assert_no_alloc(|| push_frames(&mut tx, &samples, 2));
+        assert_eq!(dropped, 2, "5 slots take 2 whole frames, so 2 are dropped");
+        assert_eq!(
+            rx.slots() % 2,
+            0,
+            "a partial frame in the ring rotates the device's channels forever"
+        );
+        assert_eq!(rx.slots(), 4);
+    }
+
+    #[test]
+    fn surviving_frames_stay_intact_and_in_order() {
+        let (mut tx, mut rx) = RingBuffer::<f32>::new(64);
+        assert_eq!(push_frames(&mut tx, &[1.0, 2.0, 3.0, 4.0], 2), 0);
+        let got: Vec<f32> = std::iter::from_fn(|| rx.pop().ok()).collect();
+        assert_eq!(got, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn a_frame_that_does_not_fit_is_dropped_whole_not_truncated() {
+        // One slot free, a 4-channel frame offered: all four samples must
+        // be refused together.
+        let (mut tx, rx) = RingBuffer::<f32>::new(4);
+        push_frames(&mut tx, &[9.0, 9.0, 9.0], 3);
+        assert_eq!(rx.slots(), 3, "the first frame fits");
+        assert_eq!(push_frames(&mut tx, &[1.0, 2.0, 3.0], 3), 1);
+        assert_eq!(rx.slots(), 3, "the second frame left nothing behind");
     }
 
     #[test]

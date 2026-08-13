@@ -1,12 +1,12 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 
 import { ActionButton } from '../../design/ActionButton';
 import { Modal } from '../../design/Modal';
-import { refreshDevices, useDevices } from '../../state/devices';
+import { refreshDevices, setCardProfile, useDevices } from '../../state/devices';
 import type { StripState } from '../../ws/messages';
 import styles from './InputPickerModal.module.css';
 import { SourceIcon } from './SourceIcon';
-import { groupPatchbay, sourceKind } from './devices';
+import { PRO_AUDIO_PROFILE, groupPatchbay, sourceKind } from './devices';
 import { jackKey, jackLabel, deviceLetters, stripeColor } from './linked-inputs';
 
 export interface PatchTarget {
@@ -46,12 +46,23 @@ export function InputPickerModal({
   const currentDevice = strip.input ? (strip.input.device ?? null) : undefined;
   const currentChannel = strip.input?.device_channel;
   const devices = useDevices((s) => s.devices);
+  const pendingCard = useDevices((s) => s.pendingCard);
+  const [profileError, setProfileError] = useState<{ card: string; message: string } | null>(
+    null,
+  );
 
   useEffect(() => {
     if (open) void refreshDevices();
   }, [open]);
 
+  const changeProfile = async (card: string, profile: string) => {
+    setProfileError(null);
+    const message = await setCardProfile(card, profile);
+    if (message) setProfileError({ card, message });
+  };
+
   const sections = groupPatchbay(devices, strips);
+  const anyProfiles = sections.some((s) => s.profiles.length > 0);
   const letters = deviceLetters(
     sections.filter((s) => s.device !== null).map((s) => s.device as string),
   );
@@ -88,6 +99,40 @@ export function InputPickerModal({
           {section.status === 'failed' && section.error && (
             <p className={styles.deviceError} role="alert">
               {section.error}
+            </p>
+          )}
+          {section.card && section.profiles.length > 0 && (
+            <p className={styles.profile}>
+              <label className={styles.profileLabel} htmlFor={`mode-${section.letter}`}>
+                Mode
+              </label>
+              <select
+                id={`mode-${section.letter}`}
+                className={styles.profileSelect}
+                value={section.profile ?? ''}
+                disabled={pendingCard !== null}
+                onChange={(e) => void changeProfile(section.card as string, e.target.value)}
+              >
+                {section.profiles.map((option) => (
+                  <option key={option.name} value={option.name}>
+                    {option.description}
+                    {option.name === PRO_AUDIO_PROFILE ? ' (all inputs)' : ''}
+                  </option>
+                ))}
+              </select>
+              <span className={styles.profileCount}>
+                {pendingCard === section.card ? 'switching…' : `${section.channels} in`}
+              </span>
+            </p>
+          )}
+          {profileError?.card === section.card && (
+            <p className={styles.deviceError} role="alert">
+              {profileError.message}
+            </p>
+          )}
+          {section.jackCount === 0 && (
+            <p className={styles.deviceHint}>
+              No input device detected. Plug one in and press Refresh.
             </p>
           )}
           <div
@@ -157,6 +202,8 @@ export function InputPickerModal({
         <span className={styles.hint}>
           Patching a jack that's in use links the channels — marked by
           matching tape on both strips.
+          {anyProfiles &&
+            ' Changing a device’s mode reopens it, so its audio drops for a moment.'}
         </span>
         <ActionButton
           label="Refresh"

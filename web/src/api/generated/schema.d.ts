@@ -41,6 +41,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/devices/profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Switch a sound card's profile.
+         * @description The active profile decides how many channels the card's devices expose,
+         *     so this is how an interface with more inputs than the current profile
+         *     shows gets the rest of them. The switch renames, resizes and remaps the
+         *     card's devices, so the whole document is re-enumerated and returned —
+         *     callers must replace their copy rather than patch it.
+         */
+        put: operations["set_card_profile"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/devices/refresh": {
         parameters: {
             query?: never;
@@ -430,9 +454,18 @@ export interface components {
         DeviceReport: {
             /** @description The OS default input — what `device: null` patches feed from. */
             active: boolean;
+            /** @description The card this device belongs to. A profile change names the CARD. */
+            card?: string | null;
+            /**
+             * @description What the channel indices mean on the hardware ("aux0,aux1,…").
+             *     Diagnostic only — capture always routes by index.
+             */
+            channel_map?: string | null;
             /**
              * Format: int32
-             * @description 0 = unknown (an absent device was never enumerated this boot).
+             * @description What the device exposes RIGHT NOW — a property of the card's active
+             *     profile, not of the hardware. 0 = unknown (an absent device was
+             *     never enumerated this boot).
              */
             channels: number;
             /**
@@ -446,8 +479,20 @@ export interface components {
              */
             label?: string | null;
             name: string;
+            /**
+             * Format: int64
+             * @description Whole frames dropped because the engine wasn't draining fast enough.
+             */
+            overruns: number;
             /** @description Some strip references it (directly, via the default, or via an alias). */
             patched: boolean;
+            /** @description The card's active profile, when it has one. */
+            profile?: string | null;
+            /**
+             * @description Profiles this device's card can be switched into. More than one
+             *     means the channel count above is a choice, not a hardware limit.
+             */
+            profiles: components["schemas"]["ProfileReport"][];
             /**
              * @description The stored project name this device was matched from, when name
              *     reconciliation adopted it under a changed name.
@@ -745,6 +790,13 @@ export interface components {
         NewStrip: {
             name?: string | null;
         };
+        /** @description One profile a device's card can be switched into. */
+        ProfileReport: {
+            /** @description "Pro Audio" — what the system sound panel prints. */
+            description: string;
+            /** @description `pro-audio` — what a change request names. */
+            name: string;
+        };
         /**
          * @description What the take writer puts on disk. Bit depth folds into the variant so
          *     illegal combinations (float FLAC) are unrepresentable.
@@ -857,6 +909,16 @@ export interface components {
         } | {
             /** @enum {string} */
             type: "pong";
+        };
+        /** @description Which profile to put a sound card into. */
+        SetCardProfile: {
+            /**
+             * @description The card, as `DeviceReport.card` names it. Profiles belong to the
+             *     card, not to any one of its devices.
+             */
+            card: string;
+            /** @description One of that card's `DeviceReport.profiles[].name`. */
+            profile: string;
         };
         /**
          * @description What a successful `apply` changed — the WS `state_changed` payload.
@@ -1140,6 +1202,44 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["DeviceReport"][];
                 };
+            };
+        };
+    };
+    set_card_profile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetCardProfile"];
+            };
+        };
+        responses: {
+            /** @description Devices after the profile switch */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceReport"][];
+                };
+            };
+            /** @description Recording in progress */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The card or profile was refused */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

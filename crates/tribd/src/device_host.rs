@@ -34,6 +34,15 @@ pub enum DeviceStatus {
     Absent,
 }
 
+/// One profile a device's card can be switched into.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ProfileReport {
+    /// `pro-audio` — what a change request names.
+    pub name: String,
+    /// "Pro Audio" — what the system sound panel prints.
+    pub description: String,
+}
+
 /// One row of the patchbay device document.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct DeviceReport {
@@ -41,7 +50,9 @@ pub struct DeviceReport {
     /// The friendly print the system sound menu shows, when the source
     /// layer provides one.
     pub label: Option<String>,
-    /// 0 = unknown (an absent device was never enumerated this boot).
+    /// What the device exposes RIGHT NOW — a property of the card's active
+    /// profile, not of the hardware. 0 = unknown (an absent device was
+    /// never enumerated this boot).
     pub channels: u16,
     /// The OS default input — what `device: null` patches feed from.
     pub active: bool,
@@ -49,6 +60,18 @@ pub struct DeviceReport {
     /// Some strip references it (directly, via the default, or via an alias).
     pub patched: bool,
     pub underruns: u64,
+    /// Whole frames dropped because the engine wasn't draining fast enough.
+    pub overruns: u64,
+    /// The card this device belongs to. A profile change names the CARD.
+    pub card: Option<String>,
+    /// The card's active profile, when it has one.
+    pub profile: Option<String>,
+    /// Profiles this device's card can be switched into. More than one
+    /// means the channel count above is a choice, not a hardware limit.
+    pub profiles: Vec<ProfileReport>,
+    /// What the channel indices mean on the hardware ("aux0,aux1,…").
+    /// Diagnostic only — capture always routes by index.
+    pub channel_map: Option<String>,
     /// Why capture isn't running, when the failure happened at open time
     /// (post-open stream deaths land in the journal only).
     pub error: Option<String>,
@@ -68,6 +91,14 @@ pub enum DeviceMsg {
     /// the failed, re-run name reconciliation.
     Refresh {
         reply: oneshot::Sender<Vec<DeviceReport>>,
+    },
+    /// Switch a card's profile, then reconcile as for a Refresh — the
+    /// card's devices change name, width and map, so nothing read before
+    /// the switch survives it.
+    SetProfile {
+        card: String,
+        profile: String,
+        reply: oneshot::Sender<Result<Vec<DeviceReport>, String>>,
     },
 }
 
@@ -103,6 +134,25 @@ impl DeviceHandle {
         }
         response.await.unwrap_or_default()
     }
+
+    /// Put `card` into `profile` and return the document that results.
+    pub async fn set_profile(
+        &self,
+        card: String,
+        profile: String,
+    ) -> Result<Vec<DeviceReport>, String> {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(DeviceMsg::SetProfile {
+                card,
+                profile,
+                reply,
+            })
+            .map_err(|_| "device orchestrator is not running".to_owned())?;
+        response
+            .await
+            .map_err(|_| "device orchestrator dropped the request".to_owned())?
+    }
 }
 
 pub fn spawn(
@@ -123,6 +173,12 @@ pub fn spawn(
         })
         .expect("device orchestrator thread spawns");
 }
+
+/// How long to wait for a card profile switch to land, as attempts of
+/// [`PROFILE_SETTLE_STEP`]. Generous: a USB interface renegotiating its
+/// alt-setting is slower than a built-in codec.
+const PROFILE_SETTLE_ATTEMPTS: u32 = 40;
+const PROFILE_SETTLE_STEP: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// A running input stream, keyed by the STORED identity strips patch with.
 struct OpenEntry {
@@ -150,6 +206,11 @@ struct Orchestrator {
     wanted: BTreeSet<Option<String>>,
     /// stored project name → present device name (name reconciliation).
     aliases: HashMap<String, String>,
+    /// Renames this daemon PERFORMED by switching a card profile. Kept
+    /// apart from `aliases` because they are known, not inferred: a switch
+    /// rewrites `…analog-stereo` into `…pro-audio`, which shares no token
+    /// with its old name and so is invisible to the matching heuristic.
+    profile_aliases: HashMap<String, String>,
     open: HashMap<Option<String>, OpenEntry>,
     open_errors: HashMap<Option<String>, String>,
 }
@@ -167,6 +228,7 @@ impl Orchestrator {
             slots: InputSlots::default(),
             wanted: BTreeSet::new(),
             aliases: HashMap::new(),
+            profile_aliases: HashMap::new(),
             open: HashMap::new(),
             open_errors: HashMap::new(),
         }
@@ -190,8 +252,107 @@ impl Orchestrator {
                     self.reconcile(&present, true);
                     let _ = reply.send(self.report(&present));
                 }
+                DeviceMsg::SetProfile {
+                    card,
+                    profile,
+                    reply,
+                } => {
+                    let outcome = self.set_profile(&card, &profile);
+                    let _ = reply.send(outcome);
+                }
             }
         }
+    }
+
+    /// Switch a card's profile and rebuild everything that hung off it.
+    ///
+    /// Heals like a Refresh on purpose: the switch renames the card's
+    /// sources (`…analog-stereo` → `…pro-audio`), so stored patches only
+    /// survive by going back through name reconciliation.
+    fn set_profile(&mut self, card: &str, profile: &str) -> Result<Vec<DeviceReport>, String> {
+        let before = self.backend.input_devices();
+        let on_card = |devices: &[InputDeviceInfo]| -> Vec<String> {
+            devices
+                .iter()
+                .filter(|d| d.card.as_deref() == Some(card))
+                .map(|d| d.name.clone())
+                .collect()
+        };
+        let devices_before = on_card(&before);
+        // Which stored patch identities feed off this card right now —
+        // resolved, so a device already adopted under another name counts.
+        let patched_here: Vec<String> = self
+            .wanted
+            .iter()
+            .filter(|stored| stored.is_some())
+            .filter_map(|stored| {
+                let resolved = self.resolve(stored, &before)?.resolved?;
+                devices_before
+                    .contains(&resolved)
+                    .then(|| stored.clone().expect("filtered to named"))
+            })
+            .collect();
+
+        self.backend
+            .set_card_profile(card, profile)
+            .map_err(|e| e.to_string())?;
+        let present = self.settled(card, profile);
+
+        // Carry the patches across the rename, but only where there is
+        // exactly one input on this card at both ends. More than one and
+        // the pairing would be a guess — and this codebase would rather
+        // report a device absent than feed a strip the wrong microphone.
+        let devices_after = on_card(&present);
+        if let ([_], [after]) = (devices_before.as_slice(), devices_after.as_slice()) {
+            for stored in patched_here.into_iter().filter(|s| s != after) {
+                tracing::info!(%stored, renamed_to = %after, "profile switch carried a patch");
+                self.profile_aliases.insert(stored, after.clone());
+            }
+        }
+
+        // The card's old devices are definitively gone — we destroyed them.
+        // `report` otherwise treats "open but unenumerable" as proof of
+        // presence, which is right for a raw ALSA device that merely went
+        // busy and wrong for these: their streams are dead.
+        let vanished: Vec<Option<String>> = self
+            .open
+            .iter()
+            .filter(|(_, entry)| {
+                entry
+                    .resolved
+                    .as_ref()
+                    .is_some_and(|r| devices_before.contains(r) && !devices_after.contains(r))
+            })
+            .map(|(stored, _)| stored.clone())
+            .collect();
+        for stored in vanished {
+            self.close(&stored);
+        }
+        self.reconcile(&present, true);
+        Ok(self.report(&present))
+    }
+
+    /// Enumerate once the switch has actually landed.
+    ///
+    /// The server tears down and recreates a card's nodes asynchronously,
+    /// so enumerating straight after the call routinely returns the OLD
+    /// sources or none at all. Bounded: on timeout the caller just gets a
+    /// stale list it can Refresh, which beats blocking the thread forever.
+    fn settled(&self, card: &str, profile: &str) -> Vec<InputDeviceInfo> {
+        for _ in 0..PROFILE_SETTLE_ATTEMPTS {
+            let switched = self
+                .backend
+                .input_cards()
+                .iter()
+                .any(|c| c.name == card && c.active_profile == profile);
+            let present = self.backend.input_devices();
+            if switched && present.iter().any(|d| d.card.as_deref() == Some(card)) {
+                return present;
+            }
+            std::thread::sleep(PROFILE_SETTLE_STEP);
+        }
+        tracing::warn!(card, profile, "card profile did not settle in time");
+        self.backend.input_devices()
     }
 
     /// Open the wanted, close the unwanted; on `heal`, also tear down
@@ -201,6 +362,16 @@ impl Orchestrator {
         let before = self.slots.clone();
         let stored_names: Vec<String> = self.wanted.iter().filter_map(|w| w.clone()).collect();
         self.aliases = reconcile_names(&stored_names, present);
+        // A rename we performed ourselves outranks the heuristic, which
+        // cannot see through a profile switch. Entries whose target has
+        // gone are stale and get forgotten here.
+        self.profile_aliases
+            .retain(|_, current| present.iter().any(|d| &d.name == current));
+        for (stored, current) in &self.profile_aliases {
+            if !present.iter().any(|d| &d.name == stored) {
+                self.aliases.insert(stored.clone(), current.clone());
+            }
+        }
 
         if heal {
             let failed: Vec<Option<String>> = self
@@ -218,6 +389,25 @@ impl Orchestrator {
             }
             // A refresh forgets old failures: everything wanted retries.
             self.open_errors.clear();
+        }
+
+        // A device whose channel count changed under us — switching a card
+        // profile is the usual cause — is still feeding a slot of the OLD
+        // width. Close it so the open pass below rebuilds it at the new
+        // one; left alone, the patchbay would draw the new channel count
+        // with everything past the old width dead.
+        let resized: Vec<Option<String>> = self
+            .open
+            .iter()
+            .filter(|(stored, entry)| {
+                self.resolve(stored, present)
+                    .is_some_and(|found| found.channels != entry.channels)
+            })
+            .map(|(stored, _)| stored.clone())
+            .collect();
+        for stored in resized {
+            tracing::info!(device = ?stored, "input channel count changed; reopening");
+            self.close(&stored);
         }
 
         // Close whatever is no longer patched anywhere.
@@ -364,6 +554,14 @@ impl Orchestrator {
             .iter()
             .map(|(stored, current)| (current.as_str(), stored.as_str()))
             .collect();
+        // Cards are what a profile change acts on; a device joins to one by
+        // name. Platforms without profiles simply return an empty list.
+        let cards: HashMap<String, trib_audio::CardInfo> = self
+            .backend
+            .input_cards()
+            .into_iter()
+            .map(|c| (c.name.clone(), c))
+            .collect();
 
         let mut rows: Vec<DeviceReport> = present
             .iter()
@@ -388,6 +586,7 @@ impl Orchestrator {
                     (None, _) if patched && open_error.is_some() => DeviceStatus::Failed,
                     (None, _) => DeviceStatus::Available,
                 };
+                let card = device.card.as_ref().and_then(|name| cards.get(name));
                 DeviceReport {
                     name: device.name.clone(),
                     label: device.description.clone(),
@@ -396,6 +595,21 @@ impl Orchestrator {
                     status,
                     patched,
                     underruns: status_entry.map_or(0, |s| s.underruns),
+                    overruns: status_entry.map_or(0, |s| s.overruns),
+                    card: device.card.clone(),
+                    profile: card.map(|c| c.active_profile.clone()),
+                    profiles: card
+                        .map(|c| {
+                            c.profiles
+                                .iter()
+                                .map(|p| ProfileReport {
+                                    name: p.name.clone(),
+                                    description: p.description.clone(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    channel_map: device.channel_map.clone(),
                     error: match status {
                         DeviceStatus::Failed => open_error.map(str::to_owned),
                         _ => None,
@@ -432,6 +646,13 @@ impl Orchestrator {
                 },
                 patched: true,
                 underruns: status_entry.map_or(0, |s| s.underruns),
+                overruns: status_entry.map_or(0, |s| s.overruns),
+                // Held open but unenumerable, so there is nothing to join a
+                // card against — profiles stay unoffered until it reappears.
+                card: None,
+                profile: None,
+                profiles: Vec::new(),
+                channel_map: None,
                 error: None,
                 reconciled_from: stored.as_ref().filter(|s| *s != resolved).cloned(),
             });
@@ -453,6 +674,12 @@ impl Orchestrator {
                     status: DeviceStatus::Absent,
                     patched: true,
                     underruns: 0,
+                    overruns: 0,
+                    // Unplugged: nothing to join, nothing to offer.
+                    card: None,
+                    profile: None,
+                    profiles: Vec::new(),
+                    channel_map: None,
                     error: None,
                     reconciled_from: None,
                 });
@@ -486,6 +713,10 @@ mod tests {
     /// Backend double with a swappable enumeration — the "replug".
     struct TestBackend {
         devices: Mutex<Vec<InputDeviceInfo>>,
+        cards: Mutex<Vec<trib_audio::CardInfo>>,
+        /// What the card exposes once switched: profile → devices.
+        on_switch: Mutex<HashMap<String, Vec<InputDeviceInfo>>>,
+        switch_fails: Mutex<bool>,
     }
 
     impl AudioBackend for TestBackend {
@@ -494,6 +725,25 @@ mod tests {
         }
         fn input_devices(&self) -> Vec<InputDeviceInfo> {
             self.devices.lock().unwrap().clone()
+        }
+        fn input_cards(&self) -> Vec<trib_audio::CardInfo> {
+            self.cards.lock().unwrap().clone()
+        }
+        fn set_card_profile(&self, card: &str, profile: &str) -> Result<(), AudioError> {
+            if *self.switch_fails.lock().unwrap() {
+                return Err(AudioError::Device("scripted profile failure".into()));
+            }
+            // Stand in for the server: the card adopts the profile and its
+            // devices come back changed.
+            for entry in self.cards.lock().unwrap().iter_mut() {
+                if entry.name == card {
+                    entry.active_profile = profile.to_owned();
+                }
+            }
+            if let Some(after) = self.on_switch.lock().unwrap().get(profile) {
+                *self.devices.lock().unwrap() = after.clone();
+            }
+            Ok(())
         }
         fn start(
             &self,
@@ -538,6 +788,8 @@ mod tests {
             channels,
             active,
             pulse: false,
+            card: None,
+            channel_map: None,
         }
     }
 
@@ -551,6 +803,9 @@ mod tests {
     fn rig(devices: Vec<InputDeviceInfo>) -> Rig {
         let backend = Arc::new(TestBackend {
             devices: Mutex::new(devices),
+            cards: Mutex::default(),
+            on_switch: Mutex::default(),
+            switch_fails: Mutex::default(),
         });
         let stream = Arc::new(TestStream::default());
         let updates: Arc<Mutex<Vec<InputSlots>>> = Arc::default();
@@ -612,6 +867,155 @@ mod tests {
         let slots = rig.slot_updates.lock().unwrap().last().unwrap().clone();
         assert_eq!(slots.resolve(Some("dock"), 0), Some(2));
         assert_eq!(slots.resolve(None, 0), None);
+    }
+
+    /// A device that belongs to a card, so profiles can be offered for it.
+    fn carded(name: &str, channels: u16, card: &str) -> InputDeviceInfo {
+        InputDeviceInfo {
+            card: Some(card.into()),
+            ..dev(name, channels, false)
+        }
+    }
+
+    fn card(name: &str, active: &str, profiles: &[&str]) -> trib_audio::CardInfo {
+        trib_audio::CardInfo {
+            name: name.into(),
+            active_profile: active.into(),
+            profiles: profiles
+                .iter()
+                .map(|p| trib_audio::CardProfile {
+                    name: (*p).into(),
+                    description: (*p).into(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn switching_a_card_profile_rebuilds_its_devices_at_the_new_width() {
+        let mut rig = rig(vec![carded("umc.analog-stereo", 2, "card.umc")]);
+        *rig.devices.cards.lock().unwrap() = vec![card(
+            "card.umc",
+            "input:analog-stereo",
+            &["input:analog-stereo", "pro-audio"],
+        )];
+        // Switching renames the source as well as widening it — exactly
+        // what makes name reconciliation load-bearing here.
+        rig.devices.on_switch.lock().unwrap().insert(
+            "pro-audio".into(),
+            vec![carded("umc.pro-audio", 18, "card.umc")],
+        );
+        reconcile(&mut rig, &[Some("umc.analog-stereo")], false);
+        assert_eq!(
+            rig.calls.calls.lock().unwrap().as_slice(),
+            ["open Some(\"umc.analog-stereo\") ch2 @0"]
+        );
+
+        let report = rig
+            .orchestrator
+            .set_profile("card.umc", "pro-audio")
+            .expect("the switch succeeds");
+
+        let row = report
+            .iter()
+            .find(|r| r.name == "umc.pro-audio")
+            .expect("the renamed source is reported");
+        assert_eq!(row.channels, 18);
+        assert_eq!(row.profile.as_deref(), Some("pro-audio"));
+        assert_eq!(row.profiles.len(), 2, "both profiles stay offered");
+        assert_eq!(
+            row.reconciled_from.as_deref(),
+            Some("umc.analog-stereo"),
+            "the stored patch follows the rename rather than going absent"
+        );
+        assert_eq!(
+            rig.calls.calls.lock().unwrap().last().unwrap(),
+            "open Some(\"umc.pro-audio\") ch18 @0"
+        );
+    }
+
+    #[test]
+    fn a_multi_input_card_never_guesses_which_patch_survives_a_rename() {
+        let mut rig = rig(vec![
+            carded("hda.mic", 2, "card.hda"),
+            carded("hda.line", 2, "card.hda"),
+        ]);
+        *rig.devices.cards.lock().unwrap() = vec![card("card.hda", "HiFi", &["HiFi", "pro-audio"])];
+        rig.devices.on_switch.lock().unwrap().insert(
+            "pro-audio".into(),
+            vec![
+                carded("hda.pro.0", 2, "card.hda"),
+                carded("hda.pro.1", 2, "card.hda"),
+            ],
+        );
+        reconcile(&mut rig, &[Some("hda.mic")], false);
+
+        let report = rig
+            .orchestrator
+            .set_profile("card.hda", "pro-audio")
+            .expect("the switch succeeds");
+
+        assert!(
+            report.iter().all(|r| r.reconciled_from.is_none()),
+            "two inputs before and after: pairing them would be a guess, and \
+             guessing wrong feeds a strip the wrong microphone"
+        );
+        assert_eq!(
+            report
+                .iter()
+                .find(|r| r.name == "hda.mic")
+                .map(|r| r.status),
+            Some(DeviceStatus::Absent),
+            "the old patch is reported absent rather than silently rehomed"
+        );
+    }
+
+    #[test]
+    fn a_refused_profile_switch_reports_why_and_changes_nothing() {
+        let mut rig = rig(vec![carded("umc.analog-stereo", 2, "card.umc")]);
+        *rig.devices.cards.lock().unwrap() =
+            vec![card("card.umc", "input:analog-stereo", &["pro-audio"])];
+        *rig.devices.switch_fails.lock().unwrap() = true;
+        reconcile(&mut rig, &[Some("umc.analog-stereo")], false);
+        let before = rig.calls.calls.lock().unwrap().len();
+
+        let err = rig
+            .orchestrator
+            .set_profile("card.umc", "pro-audio")
+            .expect_err("a refused switch is an error, not a silent no-op");
+
+        assert!(err.contains("scripted profile failure"), "got: {err}");
+        assert_eq!(
+            rig.calls.calls.lock().unwrap().len(),
+            before,
+            "nothing was torn down on the way to failing"
+        );
+    }
+
+    #[test]
+    fn a_widened_device_reopens_at_its_new_channel_count() {
+        // The interface starts in a stereo card profile.
+        let mut rig = rig(vec![dev("umc", 2, false)]);
+        reconcile(&mut rig, &[Some("umc")], false);
+        assert_eq!(
+            rig.calls.calls.lock().unwrap().as_slice(),
+            ["open Some(\"umc\") ch2 @0"]
+        );
+
+        // The user switches it to pro-audio and it exposes eighteen.
+        *rig.devices.devices.lock().unwrap() = vec![dev("umc", 18, false)];
+        reconcile(&mut rig, &[Some("umc")], false);
+        assert_eq!(
+            rig.calls.calls.lock().unwrap()[1..],
+            ["close Some(\"umc\")", "open Some(\"umc\") ch18 @0"],
+            "the 2-wide stream and its slot must go before the wider one opens"
+        );
+        let slots = rig.slot_updates.lock().unwrap().last().unwrap().clone();
+        assert_eq!(
+            slots.resolve(Some("umc"), 17),
+            Some(17),
+            "the eighteenth channel carries audio rather than resolving to silence"
+        );
     }
 
     #[test]
@@ -727,6 +1131,9 @@ mod tests {
     fn without_a_running_backend_the_report_says_so() {
         let backend = Arc::new(TestBackend {
             devices: Mutex::new(vec![dev("usb", 2, true)]),
+            cards: Mutex::default(),
+            on_switch: Mutex::default(),
+            switch_fails: Mutex::default(),
         });
         let mut orchestrator = Orchestrator::new(backend.clone(), None, Box::new(|_| {}));
         orchestrator.wanted = [Some("usb".to_owned())].into_iter().collect();

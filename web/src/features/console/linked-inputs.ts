@@ -6,9 +6,6 @@
 import type { CapColor } from '../../design/Knob';
 import type { StripState } from '../../ws/messages';
 
-/** Fallback jack count when device enumeration is unavailable. */
-export const INPUT_CHANNELS = 8;
-
 /** Stable string identity for a jack. `device` null = system default. */
 export function jackKey(device: string | null, channel: number): string {
   return `${device ?? ''}#${channel}`;
