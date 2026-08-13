@@ -109,6 +109,7 @@ describe('InputPickerModal', () => {
           underruns: 0,
           overruns: 0,
           profiles: [],
+          muted: false,
           error: 'audio backend not running',
           reconciled_from: null,
         },
@@ -128,6 +129,45 @@ describe('InputPickerModal', () => {
     const alerts = screen.getAllByRole('alert');
     expect(alerts).toHaveLength(2);
     expect(alerts[0]).toHaveTextContent('audio backend not running');
+  });
+
+  it('a muted device says so, without calling itself failed', () => {
+    // The bug this exists for: a muted source reports open/patched with no
+    // error, so the patchbay looked identical to a healthy one while every
+    // meter behind it read silence.
+    useDevices.setState({
+      devices: [
+        {
+          name: 'alsa_input.usb-UMC1820.multichannel-input',
+          label: 'UMC1820 Multichannel',
+          channels: 10,
+          active: true,
+          status: 'open',
+          patched: true,
+          underruns: 0,
+          overruns: 0,
+          profiles: [],
+          muted: true,
+          error: null,
+          reconciled_from: null,
+        },
+      ],
+      loaded: true,
+    });
+    render(
+      <InputPickerModal
+        strip={snare}
+        strips={console_}
+        open
+        onClose={() => {}}
+        onPatch={() => {}}
+      />,
+    );
+    expect(screen.queryAllByRole('alert')).toHaveLength(0);
+    // Both the default box and the source's own box carry the reason.
+    expect(
+      screen.getAllByText(/Silent at the source: muted in the system mixer/),
+    ).toHaveLength(2);
   });
 
   it('patching hands back the device-qualified jack', async () => {

@@ -1,7 +1,11 @@
 /**
- * LED semantics: thresholds mirror trib-core's `meter.rs` calibration
- * (amber from -18, red from -6, clip at full scale).
+ * LED semantics. These tables ARE the calibration — the daemon reports dB
+ * and owns only the clip threshold; where the zones fall is presentation,
+ * and differs between the channel and master meters. The spec they answer
+ * to is `LedMeter` in design-system/tributary/MASTER.md.
  */
+import { FADER_MIN_DB, formatDb } from './db';
+
 export type LedColor = 'green' | 'amber' | 'red';
 
 export interface LedStop {
@@ -45,6 +49,23 @@ export function litSegments(peakDb: number, stops: readonly LedStop[]): number {
     else break;
   }
   return lit;
+}
+
+/** A real signal that lands under the bottom stop.
+ *
+ * Zero lit LEDs is otherwise ambiguous: nothing patched, a muted source,
+ * and a correctly patched input sitting 50 dB below the scale all look
+ * identical. They are very different problems, and only this tells them
+ * apart on the console itself. */
+export function belowScale(peakDb: number, stops: readonly LedStop[]): boolean {
+  return peakDb > FADER_MIN_DB && peakDb < stops[0].db;
+}
+
+/** The reading in words, for a tooltip and for `aria-valuetext` — the LEDs
+ * are quantized to the scale, so this is the only place the actual number
+ * survives. */
+export function formatPeak(peakDb: number): string {
+  return peakDb <= FADER_MIN_DB ? 'silent' : `${formatDb(peakDb)} dB`;
 }
 
 /** Clip latch duration. Detection is the daemon's (it saw every sample);

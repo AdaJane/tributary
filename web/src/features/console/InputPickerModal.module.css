@@ -96,6 +96,14 @@
   color: var(--led-red-on);
 }
 
+/* The device is healthy and silent on purpose — amber, not red: nothing
+ * has failed, but every jack below this line will meter nothing. */
+.deviceSilenced {
+  margin: 0 0 var(--s2);
+  font-size: var(--text-sm);
+  color: var(--led-amber-on);
+}
+
 /* Which profile the device's CARD is in — the setting that decides how
  * many jacks exist at all, so it sits directly above them. */
 .profile {

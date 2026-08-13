@@ -33,16 +33,56 @@ dist:
     cargo build --release -p tribd --features embed-ui
     @echo "==> target/release/tribd"
 
-# Remaster the Pi appliance image locally (rehearsal — no tag needed).
 # Needs sudo, ~4 GB free, and an aarch64 tribd; on an x86_64 box install
 # qemu-user-static (binfmt) and feed it a binary from a previous release.
 # Pass --no-compress to skip the slow xz while iterating.
 # AP_COUNTRY picks the Wi-Fi regulatory domain (`AP_COUNTRY=GB just
 # pi-image`); it is forwarded explicitly because sudo resets the
 # environment, and its default lives in build.sh.
+# Remaster the Pi appliance image locally (rehearsal — no tag needed).
 pi-image binary="target/release/tribd" *flags="":
     sudo --preserve-env=AP_COUNTRY,CACHE_DIR,IMAGE_URL_BASE \
         scripts/pi-image/build.sh {{binary}} target/tributary-dev-pi.img.xz {{flags}}
+
+# The Pi the dev recipes talk to. Override: `just pi=192.168.1.50 pi-deploy`.
+pi := "tributary.local"
+pi_user := "dev"
+ssh_key := env_var('HOME') / ".ssh/id_ed25519.pub"
+
+# Built to target/aarch64-unknown-linux-gnu/release/tribd. Runs in a
+# container because this host has no aarch64 target or linker.
+# Cross-build an aarch64 tribd (web console embedded) for the Pi.
+pi-tribd:
+    scripts/pi-image/cross-build.sh
+
+# The appliance plus an SSH login (your key, key-only), audio tooling and
+# the trib-dev helper. Ethernet is the SSH path — the Wi-Fi AP still owns
+# wlan0, exactly as in production. Emitted uncompressed: flashing a raw
+# .img beats waiting for xz while iterating.
+# Build a DEBUGGING Pi image with SSH. Never tag a release from it.
+pi-image-dev: pi-tribd
+    sudo --preserve-env=AP_COUNTRY,CACHE_DIR,DEV_SSH_KEY,DEV_USER \
+        env DEV_SSH_KEY={{ssh_key}} DEV_USER={{pi_user}} \
+        scripts/pi-image/build.sh \
+            target/aarch64-unknown-linux-gnu/release/tribd \
+            target/tributary-ssh-dev-pi.img.xz --no-compress
+    @echo "==> flash target/tributary-ssh-dev-pi.img, then: ssh {{pi_user}}@{{pi}}"
+
+# No reflash — seconds instead of a quarter of an hour. Needs a dev image.
+# Rebuild tribd and push it to a running dev Pi.
+pi-deploy: pi-tribd
+    scp target/aarch64-unknown-linux-gnu/release/tribd {{pi_user}}@{{pi}}:/tmp/tribd
+    ssh {{pi_user}}@{{pi}} 'sudo install -m 755 /tmp/tribd /usr/local/bin/tribd \
+        && rm -f /tmp/tribd && sudo trib-dev restart && sleep 1 && sudo trib-dev status --no-pager'
+
+# The first thing to look at when channels are wrong or missing.
+# Print the daemon's own input report, straight off the Pi.
+pi-devices:
+    @ssh {{pi_user}}@{{pi}} 'curl -fsS http://127.0.0.1/api/v1/devices' | python3 -m json.tool
+
+# Follow tribd's log on the Pi.
+pi-logs:
+    ssh {{pi_user}}@{{pi}} 'sudo trib-dev logs -f'
 
 # Local package builds — the same tools CI runs (which passes --no-build
 # and packages the release leg's own embed-ui binary).

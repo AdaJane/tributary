@@ -132,6 +132,8 @@ impl AudioBackend for CpalBackend {
                     pulse: true,
                     card: s.card,
                     channel_map: s.channel_map,
+                    muted: s.muted,
+                    volume_percent: s.volume_percent,
                 })
                 .collect();
         }
@@ -158,9 +160,13 @@ impl AudioBackend for CpalBackend {
                     description: None,
                     channels,
                     pulse: false,
-                    // Raw ALSA has no card-profile concept to offer.
+                    // Raw ALSA has no card-profile concept to offer, and no
+                    // server-side mute or volume: the mixer is the card's
+                    // own business here.
                     card: None,
                     channel_map: None,
+                    muted: false,
+                    volume_percent: None,
                 })
             })
             .collect()
@@ -474,6 +480,7 @@ fn open_input(
             req.device.as_deref(),
             channels,
             config.sample_rate,
+            req.channel_map.as_deref(),
             tx,
             shared.clone(),
         )?;

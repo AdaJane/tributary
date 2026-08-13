@@ -34,6 +34,11 @@ export interface PatchbaySection {
   /** Profiles worth offering — empty unless there is a real choice, in
    * which case `channels` above is a setting rather than a hardware limit. */
   profiles: DeviceReport['profiles'];
+  /** The source layer has this input muted. */
+  muted: boolean;
+  /** The quietest channel's volume as a percentage of unity, or null when
+   * the source layer never said (raw ALSA, absent devices). */
+  volumePercent: number | null;
 }
 
 const ROUTING_ALIASES = new Set(['default', 'sysdefault', 'pipewire', 'pulse', 'jack']);
@@ -42,6 +47,28 @@ const ROUTING_ALIASES = new Set(['default', 'sysdefault', 'pipewire', 'pulse', '
  * publishes no per-profile channel count, so this name is the only honest
  * hint we can give about which profile reveals the missing inputs. */
 export const PRO_AUDIO_PROFILE = 'pro-audio';
+
+/** Below this, an input is not "quiet" — it is off in all but name. A
+ * source at 5 % is 26 dB down: nothing the strip's gain is meant to
+ * rescue, and worth saying out loud. */
+const SILENCED_BELOW_PERCENT = 10;
+
+/** Why this input will read silent no matter what the console does, or
+ * null when nothing in the source layer is holding it down.
+ *
+ * This is the one fault the rest of the report cannot express: a muted or
+ * near-zero source enumerates, opens, streams and reports `status: open`
+ * with `error: null`, feeding silence to every meter behind it. */
+export function silencedReason(section: PatchbaySection): string | null {
+  if (section.muted) return 'muted in the system mixer';
+  const volume = section.volumePercent;
+  // Unknown is not zero: a backend that reports no volume must not be
+  // accused of silencing anything.
+  if (volume !== null && volume < SILENCED_BELOW_PERCENT) {
+    return `system input volume at ${volume}%`;
+  }
+  return null;
+}
 
 export type SourceKind = 'default' | 'mic' | 'webcam' | 'usb' | 'line';
 
@@ -111,6 +138,10 @@ export function groupPatchbay(
       // Section A follows whatever the system default is; the same device
       // also gets its own lettered box, and that is where it is configured.
       profiles: [],
+      // Mute DOES follow, unlike the profile: A is the box a default patch
+      // is drawn in, so the reason its jacks are silent belongs here too.
+      muted: active?.muted ?? false,
+      volumePercent: active?.volume_percent ?? null,
     },
   ];
   for (const device of named) {
@@ -130,6 +161,8 @@ export function groupPatchbay(
       // profile is among the options — a picker that cannot show the
       // current state would misreport it.
       profiles: switchable(device) ? device.profiles : [],
+      muted: device.muted,
+      volumePercent: device.volume_percent ?? null,
     });
   }
   return sections;

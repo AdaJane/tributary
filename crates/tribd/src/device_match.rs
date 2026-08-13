@@ -114,6 +114,8 @@ mod tests {
             pulse: false,
             card: None,
             channel_map: None,
+            muted: false,
+            volume_percent: None,
         }
     }
 

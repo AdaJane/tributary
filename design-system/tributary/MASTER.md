@@ -92,7 +92,8 @@ disabled** unless noted.
 ### LedMeter
 - Channel variant: 7 LEDs bottom-up at −40 −30 −20 −12 (green) · −6 −3
   (amber) · 0 (red). Master variant: 12 per side, green→−12, amber→−3, red
-  above. Thresholds live in `audio/leds.ts` (mirrors `trib-core` constants).
+  above. Thresholds live in `audio/leds.ts` — this spec is their source of
+  truth; the daemon owns only `CLIP_DB`.
 - LED = rounded square `--led-size`; off = `--led-*-off` + `--depth-inset`;
   on = `--led-*-on` + `--glow-*`. **Never transitioned.**
 - Clip: server detects (`clip` on the meter frame — it saw every sample);

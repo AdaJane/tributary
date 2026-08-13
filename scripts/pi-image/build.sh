@@ -20,6 +20,15 @@
 #   IMAGE_URL_BASE  release download prefix baked into the Imager JSON
 #                   (CI passes https://github.com/<repo>/releases/download/<tag>)
 #   CACHE_DIR       where the base .img.xz download is kept (default ~/.cache)
+#   DEV_SSH_KEY     path to a PUBLIC key — builds a DEV image instead: adds an
+#                   SSH login account, key-only sshd, audio debugging tools and
+#                   the trib-dev helper. Never set for a release build; the
+#                   appliance ships no login account by design.
+#   DEV_USER        the dev account's name (default: dev). Never UID 1000 —
+#                   that is `pi`, the rename target Imager customization needs.
+#   DEV_PASSWORD    optional console-login password for DEV_USER. sshd still
+#                   refuses password auth, so this only unlocks the physical
+#                   console — the fallback for when SSH itself is the fault.
 #
 # Runs natively on aarch64 (the release workflow's arm runner — no qemu);
 # on an x86_64 box install qemu-user-static and the chroot works
@@ -60,6 +69,14 @@ readonly OUT="${2:?usage: build.sh <aarch64-tribd> <out.img.xz> [--no-compress]}
 if [ "${3:-}" = "--no-compress" ]; then readonly COMPRESS=no; else readonly COMPRESS=yes; fi
 readonly IMAGE_URL_BASE="${IMAGE_URL_BASE:-http://localhost/UNPUBLISHED}"
 readonly CACHE_DIR="${CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/tributary-pi-base}"
+# Dev mode is opt-in and leaves no trace when unset: a release image must
+# never grow a login account because someone exported a stray variable.
+readonly DEV_SSH_KEY="${DEV_SSH_KEY:-}"
+readonly DEV_USER="${DEV_USER:-dev}"
+# Tools worth having when the question is "what does the audio stack
+# actually see" — alsa-utils for arecord -l, pipewire-bin for pw-top and
+# pw-dump. Dev images only; the appliance stays lean.
+readonly DEV_PACKAGES="openssh-server alsa-utils pipewire-bin"
 
 fail() { echo "build.sh: $*" >&2; exit 1; }
 
@@ -81,6 +98,14 @@ for tool in curl xz sfdisk losetup partx e2fsck resize2fs sha256sum file chroot;
 done
 file "$BINARY" | grep -q 'ELF 64-bit.*aarch64' || fail "$BINARY is not an aarch64 ELF"
 mkdir -p "$(dirname "$OUT")" # crash early, not after the 15-minute build
+if [ -n "$DEV_SSH_KEY" ]; then
+    [ -f "$DEV_SSH_KEY" ] || fail "DEV_SSH_KEY: no such file: $DEV_SSH_KEY"
+    # A private key here would bake a secret into a flashable image AND
+    # leave sshd rejecting every login. Both are worth refusing loudly.
+    grep -qE '^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-)' "$DEV_SSH_KEY" \
+        || fail "DEV_SSH_KEY is not an OpenSSH PUBLIC key: $DEV_SSH_KEY"
+    [ "$DEV_USER" != pi ] || fail "DEV_USER must not be pi (UID 1000 is Imager's rename target)"
+fi
 if [ "$(uname -m)" != aarch64 ]; then
     # binfmt with the F (fix-binary) flag makes the chroot transparent.
     grep -qs 'flags:.*F' /proc/sys/fs/binfmt_misc/qemu-aarch64 \
@@ -255,6 +280,57 @@ sed -i 's/^WirelessEnabled=.*/WirelessEnabled=true/' \
 echo "net.ipv4.ip_unprivileged_port_start=80" \
     > "$ROOT/etc/sysctl.d/80-tributary.conf"
 
+if [ -n "$DEV_SSH_KEY" ]; then
+    echo "==> DEV image: ssh login + debugging tools"
+    in_chroot "apt-get install -y -qq $DEV_PACKAGES && apt-get clean"
+    # A real login account, distinct from the nologin service user and from
+    # the locked `pi` at UID 1000. Ethernet is the SSH path: the AP profile
+    # still claims wlan0, exactly as on the appliance.
+    in_chroot "useradd --create-home --shell /bin/bash --user-group $DEV_USER \
+        && usermod -aG sudo,audio $DEV_USER"
+    # Optional console fallback. Off by default (key-only was the explicit
+    # choice), but when SSH is what breaks, a keyboard on the HDMI port is
+    # the difference between a diagnosis and a reflash.
+    if [ -n "${DEV_PASSWORD:-}" ]; then
+        in_chroot "echo '$DEV_USER:$DEV_PASSWORD' | chpasswd"
+    fi
+    # Key-only over the network regardless: no password auth is accepted by
+    # sshd, so a console password never widens the network surface.
+    install -d -m 700 "$ROOT/home/$DEV_USER/.ssh"
+    install -m 600 "$DEV_SSH_KEY" "$ROOT/home/$DEV_USER/.ssh/authorized_keys"
+    in_chroot "chown -R $DEV_USER:$DEV_USER /home/$DEV_USER/.ssh"
+    # Passwordless sudo, because every useful question on this image
+    # (journal, service session, pactl) needs it and there is no password.
+    echo "$DEV_USER ALL=(ALL) NOPASSWD:ALL" > "$ROOT/etc/sudoers.d/010_$DEV_USER-nopasswd"
+    chmod 440 "$ROOT/etc/sudoers.d/010_$DEV_USER-nopasswd"
+    cat > "$ROOT/etc/ssh/sshd_config.d/10-tributary-dev.conf" <<'EOF'
+# Dev image: keys only. The account carries no password, so password and
+# keyboard-interactive auth could only ever succeed by accident.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+EOF
+    # ssh.SERVICE, deliberately, not the socket. The base ships no host keys
+    # (raspios generates them on first boot) and BOTH generator units —
+    # regenerate_ssh_host_keys.service and sshd-keygen.service — declare
+    # `Before=ssh.service`. Neither is ordered before ssh.socket. Socket
+    # activation therefore races key generation: the first connection spawns
+    # an sshd with no host keys, it dies, and systemd stops the rate-limited
+    # socket for the rest of the boot — presenting as "connection reset",
+    # then "connection refused" forever after.
+    in_chroot "systemctl disable ssh.socket >/dev/null 2>&1 || true"
+    in_chroot "systemctl enable ssh.service"
+    # Generate the host keys HERE rather than trusting first boot. Both
+    # generators raspios ships (regenerate_ssh_host_keys, sshd-keygen) are
+    # gated on ConditionFirstBoot=yes, so if anything prevents them running
+    # on boot one, they never run again and sshd dies on every connection
+    # with no host key — unrecoverable without reflashing. A dev image is
+    # not a distributed artifact, so a baked key is the right trade; the
+    # release path asserts it has none.
+    in_chroot "ssh-keygen -A"
+    install -m 755 "$HERE/trib-dev" "$ROOT/usr/local/bin/trib-dev"
+fi
+
 echo "==> hygiene"
 in_chroot "rm -rf /var/lib/apt/lists/*"
 truncate -s 0 "$ROOT/etc/machine-id"
@@ -332,6 +408,50 @@ v grep -q '^net.ipv4.ip_unprivileged_port_start=80' "$ROOT/etc/sysctl.d/80-tribu
 # target Imager customization depends on).
 v grep -q '^pi:x:1000:1000:' "$ROOT/etc/passwd"
 v grep -q '^pi:!:' "$ROOT/etc/shadow"
+if [ -n "$DEV_SSH_KEY" ]; then
+    v grep -q "^$DEV_USER:" "$ROOT/etc/passwd"
+    v grep -q '^ssh-' "$ROOT/home/$DEV_USER/.ssh/authorized_keys"
+    [ "$(stat -c%a "$ROOT/home/$DEV_USER/.ssh")" = 700 ] \
+        || fail "verify: ~/.ssh mode — sshd refuses a group/world-readable key dir"
+    [ "$(stat -c%a "$ROOT/home/$DEV_USER/.ssh/authorized_keys")" = 600 ] \
+        || fail "verify: authorized_keys mode"
+    # An account with no password AND no working key would be a brick.
+    v grep -q '^PasswordAuthentication no' "$ROOT/etc/ssh/sshd_config.d/10-tributary-dev.conf"
+    v test -L "$ROOT/etc/systemd/system/multi-user.target.wants/ssh.service"
+    # The socket would race host-key generation on first boot; the service
+    # is ordered after it. Assert the racy one stayed off.
+    if [ -e "$ROOT/etc/systemd/system/sockets.target.wants/ssh.socket" ]; then
+        fail "verify: ssh.socket enabled — it races host-key generation"
+    fi
+    # Without a host key sshd resets every connection, and raspios' two
+    # generators are first-boot-only — so a missing key here is a brick.
+    compgen -G "$ROOT/etc/ssh/ssh_host_*_key" >/dev/null \
+        || fail "verify: no sshd host keys — every connection would be reset"
+    v grep -q "^$DEV_USER ALL=(ALL) NOPASSWD:ALL" "$ROOT/etc/sudoers.d/010_$DEV_USER-nopasswd"
+    v grep -qE "^sudo:.*[:,]$DEV_USER(,|\$)" "$ROOT/etc/group"
+    v test -x "$ROOT/usr/local/bin/trib-dev"
+    for pkg in openssh-server alsa-utils pipewire-bin; do
+        grep -A1 "^Package: $pkg$" "$ROOT/var/lib/dpkg/status" \
+            | grep -q '^Status: install ok installed' || fail "verify: $pkg not installed"
+    done
+else
+    # A release image must carry no login account at all. This is the
+    # assertion that stops a stray DEV_SSH_KEY leaking into a tagged build.
+    # `if`, not `[ … ] && fail`: as a statement that trips set -e on the
+    # normal (guard-false) path and aborts a perfectly good build.
+    if [ -e "$ROOT/etc/ssh/sshd_config.d/10-tributary-dev.conf" ]; then
+        fail "verify: dev sshd config in a non-dev image"
+    fi
+    if compgen -G "$ROOT/etc/sudoers.d/010_*-nopasswd" >/dev/null; then
+        fail "verify: passwordless sudo in a non-dev image"
+    fi
+    # Baked host keys are fine for a one-off dev image and wrong for a
+    # release: every card flashed from it would share an identity.
+    if compgen -G "$ROOT/etc/ssh/ssh_host_*_key" >/dev/null; then
+        fail "verify: sshd host keys baked into a release image"
+    fi
+    v test ! -e "$ROOT/usr/local/bin/trib-dev"
+fi
 [ "$(cat "$ROOT/etc/hostname")" = "$TRIB_HOSTNAME" ] || fail "verify: hostname"
 v grep -q "$TRIB_HOSTNAME" "$ROOT/etc/hosts"
 [ "$(sha256sum "$ROOT/boot/firmware/cmdline.txt" | cut -d' ' -f1)" = "$CMDLINE_SHA_BEFORE" ] \

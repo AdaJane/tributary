@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { DeviceReport } from '../../state/devices';
 import type { StripState } from '../../ws/messages';
-import { groupPatchbay, sourceKind } from './devices';
+import { groupPatchbay, silencedReason, sourceKind } from './devices';
 
 const dev = (
   name: string,
@@ -17,6 +17,7 @@ const dev = (
   overruns: 0,
   profiles: [],
   reconciled_from: null,
+  muted: false,
   ...overrides,
 });
 
@@ -182,5 +183,47 @@ describe('sourceKind', () => {
     expect(sourceKind('x', 'Meteor Lake-P Digital Microphone')).toBe('mic');
     expect(sourceKind('x', 'ThinkPad Thunderbolt 4 Dock USB Audio Mono')).toBe('usb');
     expect(sourceKind('x', 'Scarlett 18i20 3rd Gen')).toBe('line');
+  });
+});
+
+describe('silencedReason', () => {
+  const section = (overrides: Partial<DeviceReport>) =>
+    groupPatchbay([dev('usb', overrides)], []).find((s) => s.device === 'usb')!;
+
+  it('names a mute, which no other field in the report reveals', () => {
+    // A muted source opens, streams and reports no error; without this the
+    // console can only show a dead meter and no reason for it.
+    expect(silencedReason(section({ muted: true }))).toBe(
+      'muted in the system mixer',
+    );
+  });
+
+  it('names an attenuation no fader can rescue', () => {
+    expect(silencedReason(section({ volume_percent: 3 }))).toBe(
+      'system input volume at 3%',
+    );
+  });
+
+  it('says nothing about a healthy input', () => {
+    expect(silencedReason(section({ volume_percent: 100 }))).toBeNull();
+  });
+
+  it('leaves a merely quiet input alone', () => {
+    expect(silencedReason(section({ volume_percent: 60 }))).toBeNull();
+  });
+
+  it('does not read an unreported volume as silence', () => {
+    // Raw ALSA reports no volume at all. Unknown must not accuse.
+    expect(silencedReason(section({ volume_percent: null }))).toBeNull();
+    expect(silencedReason(section({}))).toBeNull();
+  });
+
+  it('carries mute through the default section too', () => {
+    const [defaultSection] = groupPatchbay(
+      [dev('usb', { active: true, muted: true })],
+      [],
+    );
+    expect(defaultSection.device).toBeNull();
+    expect(silencedReason(defaultSection)).toBe('muted in the system mixer');
   });
 });

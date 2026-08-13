@@ -72,10 +72,17 @@ fn backend() -> Arc<dyn AudioBackend> {
 }
 
 async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    // Every crate that can explain a silent input has to be named here.
+    // `EnvFilter` enables only the targets it lists, so a bare "tribd=info"
+    // dropped the whole audio layer on the floor: "no Pulse/PipeWire server
+    // answered", "input stream error" and the monitor-output warnings were
+    // all being written and none of them ever reached the journal. RUST_LOG
+    // still overrides this wholesale.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "tribd=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "tribd=info,trib_audio=info,trib_project=info,trib_engine=info".into()
+            }),
         )
         .init();
 

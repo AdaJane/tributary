@@ -69,9 +69,19 @@ pub struct DeviceReport {
     /// Profiles this device's card can be switched into. More than one
     /// means the channel count above is a choice, not a hardware limit.
     pub profiles: Vec<ProfileReport>,
-    /// What the channel indices mean on the hardware ("aux0,aux1,…").
-    /// Diagnostic only — capture always routes by index.
+    /// The source's channel positions ("aux0,aux1,…"). NOT decoration:
+    /// the capture opens in exactly these positions, because the server
+    /// routes by position name and will synthesise a surround map that
+    /// drops most of a pro-audio source's inputs otherwise.
     pub channel_map: Option<String>,
+    /// The source layer muted this input. It still opens, still streams,
+    /// and every meter fed from it reads silence — so a dead meter has an
+    /// explanation here that exists nowhere else in the report.
+    pub muted: bool,
+    /// The quietest channel's volume as a percentage of unity, when the
+    /// source layer says. None = unknown (raw ALSA, or an absent device),
+    /// which is deliberately distinct from 0.
+    pub volume_percent: Option<u32>,
     /// Why capture isn't running, when the failure happened at open time
     /// (post-open stream deaths land in the journal only).
     pub error: Option<String>,
@@ -194,6 +204,9 @@ struct Resolved {
     channels: u16,
     pulse: bool,
     label: Option<String>,
+    /// The source's own channel positions, carried into the open so the
+    /// capture asks for them by name. Routing, not decoration.
+    channel_map: Option<String>,
 }
 
 struct Orchestrator {
@@ -328,6 +341,20 @@ impl Orchestrator {
         for stored in vanished {
             self.close(&stored);
         }
+        // The default-following stream carries no resolved name — parec
+        // tracks the server default itself — so the `vanished` test above
+        // can never match it, and `reconcile`'s width check misses it too
+        // whenever the new profile happens to expose the same channel
+        // count. Meanwhile the node it was reading really was destroyed,
+        // and the server relocated the stream to whatever was default in
+        // the interim, with nothing to ever move it back. Rebuild it.
+        let default_was_on_this_card = before
+            .iter()
+            .find(|d| d.active)
+            .is_some_and(|d| devices_before.contains(&d.name));
+        if default_was_on_this_card {
+            self.close(&None);
+        }
         self.reconcile(&present, true);
         Ok(self.report(&present))
     }
@@ -452,6 +479,7 @@ impl Orchestrator {
                 channels: found.channels,
                 offset,
                 pulse: found.pulse,
+                channel_map: found.channel_map.clone(),
             }) {
                 Ok(()) => {
                     tracing::info!(
@@ -505,6 +533,7 @@ impl Orchestrator {
                     channels: default.channels,
                     pulse: default.pulse,
                     label: default.description.clone(),
+                    channel_map: default.channel_map.clone(),
                 })
             }
             Some(name) => {
@@ -518,6 +547,7 @@ impl Orchestrator {
                     channels: device.channels,
                     pulse: device.pulse,
                     label: device.description.clone(),
+                    channel_map: device.channel_map.clone(),
                     resolved: Some(resolved),
                 })
             }
@@ -610,6 +640,8 @@ impl Orchestrator {
                         })
                         .unwrap_or_default(),
                     channel_map: device.channel_map.clone(),
+                    muted: device.muted,
+                    volume_percent: device.volume_percent,
                     error: match status {
                         DeviceStatus::Failed => open_error.map(str::to_owned),
                         _ => None,
@@ -653,6 +685,11 @@ impl Orchestrator {
                 profile: None,
                 profiles: Vec::new(),
                 channel_map: None,
+                // Unenumerable this pass, so mute and volume are unknown
+                // rather than known-good — the last enumeration's answer
+                // would be a guess dressed as a fact.
+                muted: false,
+                volume_percent: None,
                 error: None,
                 reconciled_from: stored.as_ref().filter(|s| *s != resolved).cloned(),
             });
@@ -675,11 +712,14 @@ impl Orchestrator {
                     patched: true,
                     underruns: 0,
                     overruns: 0,
-                    // Unplugged: nothing to join, nothing to offer.
+                    // Unplugged: nothing to join, nothing to offer, and
+                    // nothing to say about a mute that isn't there.
                     card: None,
                     profile: None,
                     profiles: Vec::new(),
                     channel_map: None,
+                    muted: false,
+                    volume_percent: None,
                     error: None,
                     reconciled_from: None,
                 });
@@ -790,6 +830,8 @@ mod tests {
             pulse: false,
             card: None,
             channel_map: None,
+            muted: false,
+            volume_percent: None,
         }
     }
 
@@ -971,6 +1013,88 @@ mod tests {
     }
 
     #[test]
+    fn a_default_following_patch_is_rebuilt_across_a_profile_switch() {
+        // The default stream carries no resolved name — parec follows the
+        // server default itself — so the vanished check cannot see it, and
+        // the width check misses it too when the new profile exposes the
+        // same channel count. Its node was still destroyed underneath it.
+        let umc = InputDeviceInfo {
+            active: true,
+            ..carded("umc.multichannel", 10, "card.umc")
+        };
+        let mut rig = rig(vec![umc]);
+        *rig.devices.cards.lock().unwrap() = vec![card(
+            "card.umc",
+            "input:multichannel-input",
+            &["input:multichannel-input", "pro-audio"],
+        )];
+        rig.devices.on_switch.lock().unwrap().insert(
+            "pro-audio".into(),
+            // Same width on purpose: that is what defeats the width check.
+            vec![InputDeviceInfo {
+                active: true,
+                ..carded("umc.pro-input-0", 10, "card.umc")
+            }],
+        );
+        reconcile(&mut rig, &[None], false);
+        rig.calls.calls.lock().unwrap().clear();
+
+        rig.orchestrator
+            .set_profile("card.umc", "pro-audio")
+            .expect("the switch succeeds");
+
+        let calls = rig.calls.calls.lock().unwrap().clone();
+        assert!(
+            calls.contains(&"close None".to_owned()),
+            "the default stream must be torn down: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.starts_with("open None ch10")),
+            "…and opened again on the card's new node: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn a_profile_switch_elsewhere_leaves_the_default_stream_alone() {
+        // Rebuilding is disruptive — audio drops for a moment — so it must
+        // happen only when the default's own card was the one switched.
+        let mut rig = rig(vec![
+            InputDeviceInfo {
+                active: true,
+                ..dev("onboard", 2, true)
+            },
+            carded("umc.analog-stereo", 2, "card.umc"),
+        ]);
+        *rig.devices.cards.lock().unwrap() = vec![card(
+            "card.umc",
+            "input:analog-stereo",
+            &["input:analog-stereo", "pro-audio"],
+        )];
+        rig.devices.on_switch.lock().unwrap().insert(
+            "pro-audio".into(),
+            vec![
+                InputDeviceInfo {
+                    active: true,
+                    ..dev("onboard", 2, true)
+                },
+                carded("umc.pro-audio", 18, "card.umc"),
+            ],
+        );
+        reconcile(&mut rig, &[None], false);
+        rig.calls.calls.lock().unwrap().clear();
+
+        rig.orchestrator
+            .set_profile("card.umc", "pro-audio")
+            .expect("the switch succeeds");
+
+        let calls = rig.calls.calls.lock().unwrap().clone();
+        assert!(
+            !calls.contains(&"close None".to_owned()),
+            "the default lives on another card and never lost its node: {calls:?}"
+        );
+    }
+
+    #[test]
     fn a_refused_profile_switch_reports_why_and_changes_nothing() {
         let mut rig = rig(vec![carded("umc.analog-stereo", 2, "card.umc")]);
         *rig.devices.cards.lock().unwrap() =
@@ -1124,6 +1248,43 @@ mod tests {
         assert_eq!(
             flaky.error.as_deref(),
             Some("no usable device: scripted failure")
+        );
+    }
+
+    #[test]
+    fn a_muted_device_reports_muted_while_still_opening_cleanly() {
+        // The whole point: mute is invisible in every other field. An input
+        // silenced by the source layer opens, streams, reports no error and
+        // feeds silence to every meter — status alone cannot explain that.
+        let muted = InputDeviceInfo {
+            muted: true,
+            volume_percent: Some(0),
+            ..dev("default", 2, true)
+        };
+        let mut rig = rig(vec![muted]);
+        reconcile(&mut rig, &[None], false);
+        let report = rig
+            .orchestrator
+            .report(&rig.orchestrator.backend.input_devices());
+        let row = report.iter().find(|r| r.name == "default").unwrap();
+        assert_eq!(row.status, DeviceStatus::Open, "muted is not failed");
+        assert_eq!(row.error, None, "muting is not an error, it is a setting");
+        assert!(row.muted, "…so the report has to carry it separately");
+        assert_eq!(row.volume_percent, Some(0));
+    }
+
+    #[test]
+    fn an_unmuted_device_reports_its_volume_without_claiming_zero() {
+        let mut rig = rig(vec![dev("default", 2, true)]);
+        reconcile(&mut rig, &[None], false);
+        let report = rig
+            .orchestrator
+            .report(&rig.orchestrator.backend.input_devices());
+        let row = report.iter().find(|r| r.name == "default").unwrap();
+        assert!(!row.muted);
+        assert_eq!(
+            row.volume_percent, None,
+            "a backend that reports no volume must read as unknown, not silenced"
         );
     }
 

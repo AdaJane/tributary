@@ -1,0 +1,103 @@
+#!/bin/sh
+# Debugging helper for the dev image: run things inside the `tributary`
+# service user's session, which is where PipeWire and tribd actually live.
+#
+# This exists because the obvious commands lie. `pactl list sources` typed
+# at an SSH prompt talks to YOUR session's PipeWire (or none at all), not
+# the one tribd captures from — same tool, different server, different
+# answer. Every audio question has to be asked as the service user, with
+# XDG_RUNTIME_DIR pointing at its bus.
+set -eu
+
+TRIB_USER=tributary
+
+usage() {
+    cat <<'EOF'
+usage: trib-dev <command> [args...]
+
+  status          is tribd running, and since when
+  logs [-f]       tribd's journal (-f to follow)
+  restart         restart tribd
+  sources         the capture sources tribd can actually see
+  cards           sound cards and their profiles (the channel-count setting)
+  devices         what the daemon REPORTS over its own API
+  hw              what the HARDWARE claims, underneath PipeWire entirely
+  report          all of the above in one blob, for pasting into a bug report
+  run <cmd...>    any command inside the service session (pactl, pw-top, parec)
+
+Examples:
+  trib-dev report > /tmp/trib-report.txt
+  trib-dev hw
+  trib-dev run pw-top
+  trib-dev logs -f
+EOF
+}
+
+# Help must work anywhere, including a machine that is not the appliance —
+# resolving the service user first would make `--help` fail on the one box
+# where you most want to read it.
+case "${1:-}" in
+    ''|-h|--help|help) usage; exit 0 ;;
+esac
+
+uid="$(id -u "$TRIB_USER" 2>/dev/null)" || {
+    echo "trib-dev: no $TRIB_USER user — is this the appliance image?" >&2
+    exit 1
+}
+
+# The service session's bus. Without both of these, pactl silently reports
+# on the wrong server rather than failing.
+as_service() {
+    sudo -u "$TRIB_USER" \
+        XDG_RUNTIME_DIR="/run/user/$uid" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+        "$@"
+}
+
+cmd="${1:-}"
+if [ $# -gt 0 ]; then shift; fi
+
+# Ask ALSA directly what the hardware can do. This is the one view PipeWire
+# cannot colour: if the card advertises 18 channels here but the patchbay
+# shows 8, the missing inputs are a profile/routing problem, not hardware.
+hw_params() {
+    echo "== ALSA capture devices =="
+    arecord -l 2>&1 || true
+    for pcm in /proc/asound/card*/pcm*c; do
+        [ -d "$pcm" ] || continue
+        card="${pcm#/proc/asound/card}"; card="${card%%/*}"
+        dev="${pcm##*/pcm}"; dev="${dev%c}"
+        echo
+        echo "== hw:$card,$dev capabilities =="
+        # A device tribd already holds open reports "busy" — that is an
+        # answer too, not a failure.
+        arecord -D "hw:$card,$dev" --dump-hw-params -d 1 /dev/null 2>&1 \
+            | grep -E '^(CHANNELS|RATE|FORMAT|ACCESS)' \
+            || echo "  (busy or unreadable — stop tribd and retry: trib-dev run true)"
+    done
+}
+
+case "$cmd" in
+    status)   as_service systemctl --user status tribd ;;
+    restart)  as_service systemctl --user restart tribd ;;
+    logs)     sudo journalctl _UID="$uid" --user-unit tribd "$@" ;;
+    sources)  as_service pactl list sources ;;
+    cards)    as_service pactl list cards ;;
+    devices)  curl -fsS http://127.0.0.1/api/v1/devices ;;
+    hw)       hw_params ;;
+    report)
+        echo "### tributary version";     tribd --version 2>/dev/null || /usr/local/bin/tribd --version 2>&1 | head -1
+        echo; echo "### daemon device report"; curl -fsS http://127.0.0.1/api/v1/devices 2>&1
+        echo; echo "### hardware";         hw_params
+        echo; echo "### pactl cards";      as_service pactl list cards 2>&1
+        echo; echo "### pactl sources";    as_service pactl list sources 2>&1
+        echo; echo "### tribd log (last 100)"
+        sudo journalctl _UID="$uid" --user-unit tribd -n 100 --no-pager 2>&1
+        ;;
+    run)
+        [ $# -gt 0 ] || { echo "trib-dev: run needs a command" >&2; exit 2; }
+        as_service "$@"
+        ;;
+    ''|-h|--help|help) usage ;;
+    *) echo "trib-dev: unknown command '$cmd'" >&2; usage >&2; exit 2 ;;
+esac

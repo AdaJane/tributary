@@ -37,6 +37,15 @@
   box-shadow: var(--glow-red);
 }
 
+/* Signal present, below the bottom stop: the plastic glows faintly rather
+ * than lighting. Half-lit is the honest reading — something IS arriving,
+ * and a dark meter would say nothing is. Sits after the [data-on] rules so
+ * a real hit on the bottom LED still wins. No transition, like every other
+ * LED state. */
+.led[data-trace]:not([data-on]) {
+  background: color-mix(in srgb, var(--led-green-on) 28%, var(--led-green-off));
+}
+
 .clipClear {
   display: block;
 }

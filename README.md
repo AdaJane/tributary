@@ -147,6 +147,43 @@ Building needs Rust (the pinned toolchain in `rust-toolchain.toml` is picked
 up automatically), Node ≥ 20.19, and the ALSA headers:
 `sudo apt install libasound2-dev`.
 
+### Debugging on real Pi hardware
+
+The appliance image ships no login account, which makes it awkward to debug
+audio problems that only appear on the device. There is a **dev image** for
+that — the same appliance plus an SSH login, audio tooling and a helper:
+
+```sh
+just pi-image-dev          # dev image, your ~/.ssh/id_ed25519.pub baked in
+```
+
+Flash `target/tributary-ssh-dev-pi.img`, connect **ethernet** (the Wi-Fi AP
+still owns `wlan0`, exactly as in production), then:
+
+```sh
+just pi-deploy             # rebuild tribd and push it — no reflash, seconds
+just pi-devices            # the daemon's own input report, as JSON
+just pi-logs               # follow tribd's journal
+```
+
+All three take `pi=<host-or-ip>` (default `tributary.local`).
+
+On the Pi, `trib-dev` runs things **inside the service user's session**,
+which is the only place audio questions get truthful answers — `pactl` typed
+at a plain SSH prompt talks to a different PipeWire than the one tribd
+captures from:
+
+```sh
+trib-dev sources           # the capture sources tribd can actually see
+trib-dev cards             # cards and profiles — the channel-count setting
+trib-dev run pw-top        # or any other command in that session
+```
+
+Cross-compilation runs in a container (`scripts/pi-image/cross-build.sh`),
+so no aarch64 toolchain is needed on the workstation — only Docker. Never
+tag a release from a dev image: it carries a login account, and the release
+build asserts that it doesn't.
+
 ## Inputs
 
 Strips patch from **any input source on the system** — the patchbay lists

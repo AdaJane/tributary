@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "1.1.0"
+    "version": "1.1.1"
   },
   "paths": {
     "/api/v1/destinations": {
@@ -871,7 +871,8 @@
           "patched",
           "underruns",
           "overruns",
-          "profiles"
+          "profiles",
+          "muted"
         ],
         "properties": {
           "active": {
@@ -890,7 +891,7 @@
               "string",
               "null"
             ],
-            "description": "What the channel indices mean on the hardware (\"aux0,aux1,…\").\nDiagnostic only — capture always routes by index."
+            "description": "The source's channel positions (\"aux0,aux1,…\"). NOT decoration:\nthe capture opens in exactly these positions, because the server\nroutes by position name and will synthesise a surround map that\ndrops most of a pro-audio source's inputs otherwise."
           },
           "channels": {
             "type": "integer",
@@ -911,6 +912,10 @@
               "null"
             ],
             "description": "The friendly print the system sound menu shows, when the source\nlayer provides one."
+          },
+          "muted": {
+            "type": "boolean",
+            "description": "The source layer muted this input. It still opens, still streams,\nand every meter fed from it reads silence — so a dead meter has an\nexplanation here that exists nowhere else in the report."
           },
           "name": {
             "type": "string"
@@ -952,6 +957,15 @@
           "underruns": {
             "type": "integer",
             "format": "int64",
+            "minimum": 0
+          },
+          "volume_percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The quietest channel's volume as a percentage of unity, when the\nsource layer says. None = unknown (raw ALSA, or an absent device),\nwhich is deliberately distinct from 0.",
             "minimum": 0
           }
         }

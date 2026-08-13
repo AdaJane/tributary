@@ -25,6 +25,11 @@ pub struct OpenInput {
     pub offset: u16,
     /// Route through the Pulse capture path (see `InputDeviceInfo.pulse`).
     pub pulse: bool,
+    /// The source's own channel map, when known — passed to the capture so
+    /// the stream is opened in the SOURCE's positions rather than a
+    /// synthesised default. Load-bearing, not decorative: see
+    /// `pulse::parec_args`.
+    pub channel_map: Option<String>,
 }
 
 /// Control-side snapshot of one open input stream.
@@ -70,10 +75,18 @@ pub struct InputDeviceInfo {
     /// The card this device belongs to, when the platform has cards.
     /// Profiles are selected on the card, never on the device.
     pub card: Option<String>,
-    /// The device's own channel map ("aux0,aux1,…"), when known. Capture
-    /// routes by index, so this only records what the indices mean on the
-    /// hardware — it is never used to route.
+    /// The device's own channel map ("aux0,aux1,…"), when known. Fed
+    /// straight into the capture: the Pulse layer routes by position name,
+    /// so opening in the source's own positions is what makes stream
+    /// channel `i` carry source channel `i`.
     pub channel_map: Option<String>,
+    /// The source layer's mute flag. A muted device opens, streams and
+    /// delivers silence with no error anywhere, so it has to be reported
+    /// or the console cannot explain a dead meter.
+    pub muted: bool,
+    /// The quietest channel's volume as a percentage of unity, when the
+    /// source layer says. None = unknown, which is not the same as 0.
+    pub volume_percent: Option<u32>,
 }
 
 /// A sound card and the profiles it can be switched between.

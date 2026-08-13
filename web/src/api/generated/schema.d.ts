@@ -457,8 +457,10 @@ export interface components {
             /** @description The card this device belongs to. A profile change names the CARD. */
             card?: string | null;
             /**
-             * @description What the channel indices mean on the hardware ("aux0,aux1,…").
-             *     Diagnostic only — capture always routes by index.
+             * @description The source's channel positions ("aux0,aux1,…"). NOT decoration:
+             *     the capture opens in exactly these positions, because the server
+             *     routes by position name and will synthesise a surround map that
+             *     drops most of a pro-audio source's inputs otherwise.
              */
             channel_map?: string | null;
             /**
@@ -478,6 +480,12 @@ export interface components {
              *     layer provides one.
              */
             label?: string | null;
+            /**
+             * @description The source layer muted this input. It still opens, still streams,
+             *     and every meter fed from it reads silence — so a dead meter has an
+             *     explanation here that exists nowhere else in the report.
+             */
+            muted: boolean;
             name: string;
             /**
              * Format: int64
@@ -501,6 +509,13 @@ export interface components {
             status: components["schemas"]["DeviceStatus"];
             /** Format: int64 */
             underruns: number;
+            /**
+             * Format: int32
+             * @description The quietest channel's volume as a percentage of unity, when the
+             *     source layer says. None = unknown (raw ALSA, or an absent device),
+             *     which is deliberately distinct from 0.
+             */
+            volume_percent?: number | null;
         };
         /** @enum {string} */
         DeviceStatus: "open" | "available" | "failed" | "absent";

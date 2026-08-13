@@ -27,10 +27,19 @@ pub struct PulseSource {
     /// The card this source belongs to ("alsa_card.usb-…"), when the server
     /// says. Profiles are selected on the CARD, never on the source.
     pub card: Option<String>,
-    /// The source's own channel map ("aux0,aux1,…"). Capture routes by
-    /// INDEX, so this is only a diagnostic: it records what those indices
-    /// mean on the hardware.
+    /// The source's own channel map ("aux0,aux1,…"). Load-bearing: the
+    /// capture opens in these exact positions, because the server routes
+    /// by position NAME and its synthesised default map drops most of a
+    /// pro-audio source's channels. See `parec_args`.
     pub channel_map: Option<String>,
+    /// The server's mute flag. Nothing else in the capture path can see
+    /// it: a muted source enumerates, opens, streams, and delivers
+    /// silence, reporting no error at any step.
+    pub muted: bool,
+    /// The QUIETEST channel's volume as a percentage of unity — the
+    /// quietest and not the average, because one attenuated channel is the
+    /// one that will surprise you. None = the server did not say.
+    pub volume_percent: Option<u32>,
 }
 
 /// A sound card and the profiles it can be switched between.
@@ -127,6 +136,13 @@ fn parse_source(source: &serde_json::Value, default_name: &str) -> Option<PulseS
             .get("channel_map")
             .and_then(|m| m.as_str())
             .map(str::to_owned),
+        // Absent is not muted: the raw-ALSA shape carries neither key, and
+        // guessing "muted" there would condemn every healthy device.
+        muted: source
+            .get("mute")
+            .and_then(|m| m.as_bool())
+            .unwrap_or(false),
+        volume_percent: parse_volume(source.get("volume")),
     })
 }
 
@@ -135,6 +151,23 @@ fn parse_channels(spec: &str) -> Option<u16> {
     spec.split_whitespace()
         .find_map(|token| token.strip_suffix("ch"))
         .and_then(|n| n.parse().ok())
+}
+
+/// PulseAudio's unity volume: `value` 65536 is 100 %, 0 dB.
+const PA_VOLUME_NORM: u64 = 65_536;
+
+/// The quietest channel of a `pactl` volume map, as a percentage of unity.
+///
+/// Shape: `{"aux0": {"value": 65536, …}, "aux1": {…}}`. An empty or
+/// unparseable map is None rather than 0 — "the server didn't say" and
+/// "the server said silence" are different answers.
+fn parse_volume(volume: Option<&serde_json::Value>) -> Option<u32> {
+    volume?
+        .as_object()?
+        .values()
+        .filter_map(|channel| channel.get("value")?.as_u64())
+        .map(|value| (value * 100 / PA_VOLUME_NORM) as u32)
+        .min()
 }
 
 /// The system's sound cards, or None when no Pulse server answers.
@@ -231,15 +264,29 @@ const READ_BUF_BYTES: usize = 4096;
 /// The `parec` command line for one capture.
 ///
 /// Contract: stream channel `i` carries source channel `i` for every
-/// `i < channels`. That is only true because of `--no-remap` — the default
-/// is to route by channel *position name*, which makes the server
-/// synthesise its own map for `channels` (an 8-channel request yields
-/// `front-left, front-left-of-center, front-center, front-right, …`) and
-/// match the source into it by name. A pro-audio source is mapped
-/// `aux0…auxN-1` and barely intersects that, so inputs arrive scattered or
-/// silent. `--no-remix` stops the unmatched positions being invented from
-/// their neighbours.
-fn parec_args(source: Option<&str>, channels: u16, sample_rate: u32) -> Vec<String> {
+/// `i < channels`. The server routes by channel *position name*: absent a
+/// map it synthesises one for `channels` (a 10-channel request yields
+/// `front-left, front-left-of-center, front-center, front-right,
+/// front-right-of-center, rear-center, aux0, aux1, aux2, aux3`) and matches
+/// the source into it by name. A pro-audio source is mapped `aux0…auxN-1`
+/// and barely intersects that, so inputs arrive scattered or silent.
+///
+/// `--channel-map` is what actually holds the contract up: asking for the
+/// SOURCE's own positions makes the match an identity. `--no-remap` was
+/// relied on for this and is NOT enough — **pipewire-pulse ignores it**.
+/// Measured on a UMC1820 (10ch, `aux0…aux9`): with `--no-remap` alone the
+/// stream still negotiated the synthesised positional map, six channels
+/// arrived as digital zero and the microphone on input 1 was dropped
+/// entirely — hardware meters lit, every console meter dead. With the map
+/// passed explicitly the same input read -4.7 dBFS. Both flags stay:
+/// `--no-remap` is correct on real PulseAudio, and `--no-remix` stops
+/// unmatched positions being invented from their neighbours.
+fn parec_args(
+    source: Option<&str>,
+    channels: u16,
+    sample_rate: u32,
+    channel_map: Option<&str>,
+) -> Vec<String> {
     [
         "--raw".to_owned(),
         "--format=float32le".to_owned(),
@@ -253,6 +300,14 @@ fn parec_args(source: Option<&str>, channels: u16, sample_rate: u32) -> Vec<Stri
     .into_iter()
     // No --device at all: parec then tracks the server default live.
     .chain(source.map(|s| format!("--device={s}")))
+    // Only when the server told us the map, and only when it describes the
+    // width we are opening — a stale or mismatched map would route worse
+    // than the synthesised one.
+    .chain(
+        channel_map
+            .filter(|map| map.split(',').count() == usize::from(channels))
+            .map(|map| format!("--channel-map={map}")),
+    )
     .collect()
 }
 
@@ -269,6 +324,7 @@ impl ParecCapture {
         source: Option<&str>,
         channels: u16,
         sample_rate: u32,
+        channel_map: Option<&str>,
         mut tx: Producer<f32>,
         shared: Arc<InputShared>,
     ) -> Result<ParecCapture, AudioError> {
@@ -278,7 +334,7 @@ impl ParecCapture {
             return Err(AudioError::Device("capture needs a channel".into()));
         }
         let mut child = Command::new("parec")
-            .args(parec_args(source, channels, sample_rate))
+            .args(parec_args(source, channels, sample_rate, channel_map))
             .stdout(Stdio::piped())
             // parec is silent on success with --raw; on failure its stderr
             // is the only diagnostic, so let it reach the daemon's log.
@@ -410,6 +466,43 @@ mod tests {
     }
 
     #[test]
+    fn a_muted_or_attenuated_source_says_so() {
+        // The failure this exists for: a muted source enumerates, opens and
+        // streams exactly like a healthy one, so nothing downstream can
+        // tell the console why every meter reads silence.
+        let json = r#"[
+          {"name":"muted","description":"Muted","sample_specification":"s16le 2ch 48000Hz",
+           "mute":true,
+           "volume":{"front-left":{"value":65536},"front-right":{"value":65536}}},
+          {"name":"lopsided","description":"One channel down","sample_specification":"s16le 2ch 48000Hz",
+           "mute":false,
+           "volume":{"front-left":{"value":65536},"front-right":{"value":32768}}}
+        ]"#;
+        let sources = parse_sources(json, "").unwrap();
+        assert!(sources[0].muted);
+        assert_eq!(sources[0].volume_percent, Some(100));
+        assert!(!sources[1].muted);
+        assert_eq!(
+            sources[1].volume_percent,
+            Some(50),
+            "the quietest channel, not the average: an input is only as \
+             audible as its quietest channel"
+        );
+    }
+
+    #[test]
+    fn a_source_that_reports_no_volume_is_not_assumed_muted() {
+        // The raw-ALSA fixture carries neither key.
+        let sources = parse_sources(FIXTURE, "").unwrap();
+        assert!(!sources[0].muted);
+        assert_eq!(
+            sources[0].volume_percent, None,
+            "unknown is not zero — a device that never reported a volume \
+             must not read as silenced"
+        );
+    }
+
+    #[test]
     fn a_source_with_an_unusable_spec_is_dropped_not_defaulted() {
         let json = r#"[
           {"name":"good","description":"Good","sample_specification":"s16le 2ch 48000Hz"},
@@ -444,8 +537,42 @@ mod tests {
     }
 
     #[test]
+    fn capture_opens_in_the_sources_own_channel_positions() {
+        // The bug this exists for, measured on a UMC1820: `--no-remap` is
+        // IGNORED by pipewire-pulse, so the stream negotiated the server's
+        // synthesised 10-channel surround map, six channels arrived as
+        // digital zero and input 1 vanished. Naming the source's own
+        // positions makes the server's by-name match an identity.
+        let map = "aux0,aux1,aux2,aux3,aux4,aux5,aux6,aux7,aux8,aux9";
+        let args = parec_args(Some("umc.pro-input-0"), 10, 48_000, Some(map));
+        assert!(
+            args.contains(&format!("--channel-map={map}")),
+            "without this the server invents front-left/front-left-of-center/…              and drops every position the source does not share: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_channel_map_that_does_not_match_the_width_is_refused() {
+        // A stale map would route worse than the synthesised one, so the
+        // width is the gate: mismatch means fall back rather than guess.
+        let args = parec_args(Some("dev"), 10, 48_000, Some("aux0,aux1"));
+        assert!(!args.iter().any(|a| a.starts_with("--channel-map=")));
+        let args = parec_args(Some("dev"), 2, 48_000, Some("front-left,front-right"));
+        assert!(args.contains(&"--channel-map=front-left,front-right".to_owned()));
+    }
+
+    #[test]
+    fn an_unknown_channel_map_is_simply_omitted() {
+        // Raw-ALSA and pre-map enumerations carry none; the flags below
+        // remain the best available guarantee there.
+        let args = parec_args(Some("dev"), 4, 48_000, None);
+        assert!(!args.iter().any(|a| a.starts_with("--channel-map=")));
+        assert!(args.iter().any(|a| a == "--no-remap"));
+    }
+
+    #[test]
     fn capture_routes_channels_by_index_not_by_position_name() {
-        let args = parec_args(Some("alsa_input.usb-umc1820.pro-audio"), 18, 48_000);
+        let args = parec_args(Some("alsa_input.usb-umc1820.pro-audio"), 18, 48_000, None);
         assert!(
             args.iter().any(|a| a == "--no-remap"),
             "without --no-remap the server routes by position name: it \
@@ -464,7 +591,7 @@ mod tests {
 
     #[test]
     fn the_default_source_is_followed_by_omitting_device() {
-        let args = parec_args(None, 2, 44_100);
+        let args = parec_args(None, 2, 44_100, None);
         assert!(
             !args.iter().any(|a| a.starts_with("--device=")),
             "parec with no --device tracks the server default live"

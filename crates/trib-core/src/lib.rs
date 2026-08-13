@@ -25,7 +25,7 @@ pub use graph::{
     CycleError, Edge, EdgeKind, NodeId, NodeKind, SignalGraph, derive_graph, topo_order,
 };
 pub use id::{BusId, FxId, StripId, TakeId};
-pub use meter::{CLIP_DB, LED_AMBER_DB, LED_RED_DB, LedZone, MeterKey, led_zone};
+pub use meter::{CLIP_DB, MeterKey};
 pub use mix::{MasterState, MixerState};
 pub use strip::{InputAssign, RouteTarget, SendState, SendTap, StripState};
 

@@ -26,6 +26,10 @@ interface MetersStore {
     now: number,
   ) => void;
   clearClip: (key: string) => void;
+  /** Drop every reading. Meters are a live signal, not a document: with
+   * nothing feeding them the honest display is silence, not the last
+   * value that happened to arrive before the socket died. */
+  clear: () => void;
 }
 
 export const useMeters = create<MetersStore>((set) => ({
@@ -48,6 +52,7 @@ export const useMeters = create<MetersStore>((set) => ({
       if (!prev) return s;
       return { byKey: { ...s.byKey, [key]: { ...prev, clipHeldUntil: 0 } } };
     }),
+  clear: () => set((s) => (Object.keys(s.byKey).length === 0 ? s : { byKey: {} })),
 }));
 
 export function readingClip(reading: MeterReading, now: number): boolean {
