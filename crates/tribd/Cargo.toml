@@ -16,7 +16,7 @@ default = ["hardware"]
 # themselves stay unconditional (rustysynth is pure Rust), so a
 # --no-default-features build still renders them — it just has no external
 # MIDI in, and tests drive the event ring directly.
-hardware = ["trib-audio/cpal-backend", "dep:midir"]
+hardware = ["trib-audio/cpal-backend", "trib-audio/alsa-backend", "dep:midir"]
 # Bakes web/dist into the binary so one file serves console + API. Opt-in:
 # plain builds never require the web build to exist. Used by `just dist`
 # and the release workflow.

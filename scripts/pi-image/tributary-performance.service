@@ -1,0 +1,18 @@
+# Pin the CPU governor before anything starts making audio.
+#
+# Before= the user session, so the governor is already `performance` when
+# tribd's lingering user manager brings the daemon up — otherwise the first
+# take races the ramp.
+[Unit]
+Description=Tributary: CPU governor for real-time audio
+Before=systemd-user-sessions.service
+DefaultDependencies=no
+After=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/tributary/cpu-governor.sh
+
+[Install]
+WantedBy=multi-user.target

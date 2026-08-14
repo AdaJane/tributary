@@ -79,6 +79,14 @@ export function paramKey(delta: StateDelta): string {
       return `inst:${delta.instrument.id}`;
     case 'instrument_strips_added':
       return `inst-strips:${delta.id}`;
+    // Output patches are REST too, for the same reason: the room is a
+    // two-click picker, not a drag. Keyed by the JACK, because the jack is
+    // the identity — one jack holds one feed.
+    case 'output_patched':
+      return `out:${delta.patch.device ?? ''}#${delta.patch.channel}`;
+    case 'output_unpatched':
+    case 'output_tap':
+      return `out:${delta.jack.device ?? ''}#${delta.jack.channel}`;
   }
 }
 

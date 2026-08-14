@@ -27,7 +27,7 @@
 }
 
 .addStrip:hover {
-  background: var(--gray-5);
+  background: var(--surface-control-hi);
 }
 
 .waiting {

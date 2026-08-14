@@ -1,0 +1,42 @@
+.field {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0;
+}
+
+.label {
+  font-family: var(--font-label);
+  font-size: var(--text-sm);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/* An inset well, per the spec — the two hand-rolled copies this replaces
+   disagreed, and one of them was a RAISED control where the spec asks for
+   a recessed one. */
+.select {
+  min-width: 0;
+  flex: 1;
+  height: var(--select-h);
+  padding: var(--s0) var(--s1);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-1);
+  background: var(--surface-inset);
+  box-shadow: var(--depth-inset);
+  font-family: var(--font-label);
+  font-size: var(--text-sm);
+  color: var(--text-value);
+}
+
+.select:disabled {
+  color: var(--text-dim);
+}
+
+.hint {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  white-space: nowrap;
+}

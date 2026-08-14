@@ -11,6 +11,7 @@ description = "Audio device IO for Tributary: cpal/ALSA backend and PulseAudio c
 # Real device IO. Off by default until the host has ALSA headers
 # (libasound2-dev); everything else builds and tests without them.
 cpal-backend = ["dep:cpal"]
+alsa-backend = ["dep:alsa", "dep:rustix", "dep:thread-priority"]
 
 [dependencies]
 serde_json.workspace = true
@@ -19,6 +20,9 @@ thiserror.workspace = true
 tracing.workspace = true
 rtrb.workspace = true
 cpal = { workspace = true, optional = true }
+alsa = { workspace = true, optional = true }
+rustix = { workspace = true, optional = true }
+thread-priority = { workspace = true, optional = true }
 
 [dev-dependencies]
 assert_no_alloc.workspace = true

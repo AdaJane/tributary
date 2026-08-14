@@ -51,7 +51,7 @@ ships preset-disabled per RPM convention:
 ### Raspberry Pi (the appliance)
 
 Flash `tributary-<version>-pi.img.xz` to an SD card — it's stock Raspberry
-Pi OS Lite (arm64: Pi 3/4/5/Zero 2 W) with Tributary and PipeWire
+Pi OS Lite (arm64: Pi 4 / 400 / CM4 / Pi 5) with Tributary and PipeWire
 preinstalled. First boot expands the card and needs no setup wizard and no
 prompts:
 
@@ -199,11 +199,40 @@ retries anything that failed (plug in, hit Refresh). Patches identify
 sources by OS name; on restart, a renamed device (`… #2`-style replug
 drift) is adopted automatically when the match is unambiguous — otherwise
 the patch shows `not connected` rather than guessing at the wrong
-microphone. The output device remains the system default. The engine is
-clocked by its own timer thread, never by the output device: a stalling
-or vanishing output (Bluetooth renegotiation, route changes) costs
-monitor audio only — metering and recording continue — and the monitor
-stream rebuilds itself on the current default once one is healthy.
+microphone. The engine is clocked by its own timer thread, never by the
+output device: a stalling or vanishing output (Bluetooth renegotiation,
+route changes) costs monitor audio only — metering and recording continue
+— and the monitor stream rebuilds itself on the current default once one
+is healthy.
+
+## Outputs
+
+Any channel on the desk — a strip, a bus, or the final mix — can be wired
+straight to a physical output as **pass-through**, without going through
+the master first. The **OUT** button on a channel strip (and on the master)
+opens the output patch bay.
+
+The room is organised by OUTPUT, not by source, because that is the way the
+cardinality runs: one output channel carries one signal, while one source
+can feed several. Patching an output that is already in use replaces what
+was there, and the jack prints its current holder before you click. It is
+also what makes the master and the buses reachable at all — they appear in
+the source list rather than needing channel strips they do not have.
+
+Each patch taps its source **pre-fader** by default: post-gain, post-EQ,
+and before the mute and fader — the same point the tape and the meters
+take. A front-of-house fader move then cannot change what a monitor
+engineer is hearing. The per-patch **Pre/Post** switch moves it, and unlike
+patching itself it stays live while the tape is rolling.
+
+Two things a direct out is deliberately immune to: pressing **PFL** does
+not reach it (soloing a kick to check it must not send the kick to the PA),
+and neither does playing back a take. Both of those replace the *monitor*
+feed, which is a different thing from a feed to the room.
+
+Patching is refused while recording, with the reason shown. Re-pointing a
+jack costs a graph recompile, and a recompile clears FX tails into the
+take — so the refusal protects the recording, not the implementation.
 
 ## Instruments
 
@@ -236,7 +265,7 @@ uses `/var/lib/tributary/soundfonts`), and any mounted drive is scanned one
 level deep, so dropping files on a USB stick is enough. The console can also
 upload one directly. Note the memory cost: all sample data stays resident, so
 `soundfonts.max_bytes` (64 MB by default) is a RAM budget, not a disk one — a
-148 MB General MIDI set is an OOM kill on a Pi Zero 2 W rather than a slow
+148 MB General MIDI set is an OOM kill on a 2 GB Pi 4 rather than a slow
 load. None is bundled; Tributary ships no soundfont of its own.
 
 **MIDI** comes in over the ALSA sequencer, so any USB keyboard the system
@@ -254,11 +283,20 @@ damaged, because "the audio is not what the room heard" and "you have the
 audio but not the notes" are different problems. Lanes carrying one show a
 `MIDI` chip in the Tracks view.
 
-**Latency, honestly.** Playing an instrument live goes through the engine
-block and the monitor's output prefill: roughly 50–70 ms end to end. That is
-fine for pads and workable for parts, and too slow for fast keyboard work.
-The prefill is what keeps a stalling output device from freezing metering
-and recording, so it is not lowered by default.
+**Latency, honestly.** On the shared audio layer — any desktop install —
+playing an instrument live goes through the engine block and the monitor's
+output prefill: roughly 50–70 ms end to end. That is fine for pads and
+workable for parts, and too slow for fast keyboard work. The prefill is
+what keeps a stalling output device from freezing metering and recording,
+so it is not lowered by default.
+
+The appliance runs the **exclusive** layer instead: one ALSA card opened
+duplex and clock-linked, the engine clocked by the card, and no server in
+the path. That removes the prefill, the resampling and the drift between
+capture and playback — but the number it lands on depends on the interface
+and has not been measured on hardware yet, so this README does not quote
+one. `GET /api/v1/outputs` reports the worst engine block per second and
+the xrun count; those are the numbers to judge it by.
 
 ## Layout
 

@@ -14,6 +14,7 @@ import { Fader } from './Fader';
 import { Knob } from './Knob';
 import { LedMeter } from './LedMeter';
 import { PushButton } from './PushButton';
+import { SelectField } from './SelectField';
 import { TapeLabel } from './TapeLabel';
 
 export function Bench() {
@@ -94,6 +95,36 @@ export function Bench() {
           <PushButton label="Arm" variant="arm" pressed={arm} onToggle={setArm} blinking={recording} />
           <PushButton label="Rec" variant="plain" pressed={recording} onToggle={setRecording} />
           <PushButton label="Off" variant="mute" pressed={false} onToggle={() => {}} disabled />
+        </div>
+      </section>
+
+      <section className={styles.group}>
+        <h2 className={styles.title}>SelectField</h2>
+        <div className={styles.rowNarrow}>
+          <SelectField
+            label="Source"
+            value="master#0"
+            options={[
+              { value: '', label: '— none —' },
+              { value: 'master#0', label: 'Master L' },
+              { value: 'master#1', label: 'Master R' },
+            ]}
+            onChange={() => {}}
+            hint="8 out"
+          />
+          <SelectField
+            label="Port"
+            value="Scarlett MIDI"
+            options={[{ value: 'nanoKEY2', label: 'nanoKEY2' }]}
+            onChange={() => {}}
+          />
+          <SelectField
+            label="Locked"
+            value="master#0"
+            options={[{ value: 'master#0', label: 'Master L' }]}
+            onChange={() => {}}
+            disabled
+          />
         </div>
       </section>
 

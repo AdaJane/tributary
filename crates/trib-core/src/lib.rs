@@ -10,6 +10,7 @@ mod id;
 mod instrument;
 mod meter;
 mod mix;
+mod output;
 mod strip;
 
 pub use bus::{BusKind, BusState};
@@ -32,6 +33,7 @@ pub use instrument::{
 };
 pub use meter::{CLIP_DB, MeterKey};
 pub use mix::{MasterState, MixerState};
+pub use output::{MAX_OUTPUT_PATCHES, OutputJack, OutputPatch, OutputSource};
 pub use strip::{InputAssign, RouteTarget, SendState, SendTap, StripState};
 
 /// A wire/enum value that no variant matches.

@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 
 import { $api } from '../../api/client';
 import { loadDevices, useDevices } from '../../state/devices';
+import { loadOutputs } from '../../state/outputs';
 import { useMixer } from '../../state/mixer';
 import type { StripState } from '../../ws/messages';
 import styles from './ConsoleView.module.css';
@@ -27,6 +28,9 @@ export function ConsoleView() {
   // patchbay's open/Refresh replaces it.
   useEffect(() => {
     void loadDevices();
+    // The same for outputs, so every OUT button can print its patch
+    // before anyone opens the room.
+    void loadOutputs();
   }, []);
 
   if (!loaded) {

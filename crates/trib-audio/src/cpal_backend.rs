@@ -20,14 +20,17 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::RingBuffer;
-use trib_engine::{GraphEngine, MAX_INPUT_CHANNELS};
+use trib_engine::{GraphEngine, MAX_INPUT_CHANNELS, MAX_OUTPUT_CHANNELS, MONITOR_OUT};
 
 use crate::assembler::{
     ASSEMBLER_RING_CAPACITY, AssemblerCmd, Attached, InputAssembler, InputShared, push_frames,
 };
 use crate::backend::{
     AudioBackend, AudioError, CardInfo, CardProfile, InputDeviceInfo, InputStreamStatus, OpenInput,
-    StreamConfig, StreamHandle,
+    OpenOutput, OutputDeviceInfo, OutputStreamStatus, StreamConfig, StreamHandle,
+};
+use crate::disassembler::{
+    AttachedOutput, DISASSEMBLER_RING_CAPACITY, DisassemblerCmd, OutputDisassembler, OutputShared,
 };
 use crate::stall::{StallWatch, Transition};
 
@@ -50,6 +53,14 @@ enum StreamCmd {
         device: Option<String>,
         reply: Sender<Result<(), AudioError>>,
     },
+    OpenOutput {
+        req: OpenOutput,
+        reply: Sender<Result<(), AudioError>>,
+    },
+    CloseOutput {
+        device: Option<String>,
+        reply: Sender<Result<(), AudioError>>,
+    },
     Shutdown,
 }
 
@@ -57,9 +68,13 @@ enum StreamCmd {
 /// handle (reads). Keyed by device identity.
 type StatusMap = Arc<Mutex<HashMap<Option<String>, (u16, u16, Arc<InputShared>)>>>;
 
+/// The output side's equivalent, keyed the same way.
+type OutStatusMap = Arc<Mutex<HashMap<Option<String>, (u16, u16, Arc<OutputShared>)>>>;
+
 struct CpalStream {
     cmd_tx: Sender<StreamCmd>,
     status: StatusMap,
+    out_status: OutStatusMap,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -98,6 +113,48 @@ impl StreamHandle for CpalStream {
                 failed: shared.failed.load(Ordering::Relaxed),
                 underruns: shared.underruns.load(Ordering::Relaxed),
                 overruns: shared.overruns.load(Ordering::Relaxed),
+            })
+            .collect()
+    }
+
+    fn open_output(&self, req: OpenOutput) -> Result<(), AudioError> {
+        let (reply, response) = channel();
+        self.cmd_tx
+            .send(StreamCmd::OpenOutput { req, reply })
+            .map_err(|_| AudioError::Stream("audio thread gone".into()))?;
+        response
+            .recv()
+            .map_err(|_| AudioError::Stream("audio thread gone".into()))?
+    }
+
+    fn close_output(&self, device: Option<&str>) -> Result<(), AudioError> {
+        let (reply, response) = channel();
+        self.cmd_tx
+            .send(StreamCmd::CloseOutput {
+                device: device.map(str::to_owned),
+                reply,
+            })
+            .map_err(|_| AudioError::Stream("audio thread gone".into()))?;
+        response
+            .recv()
+            .map_err(|_| AudioError::Stream("audio thread gone".into()))?
+    }
+
+    fn output_status(&self) -> Vec<OutputStreamStatus> {
+        let status = self.out_status.lock().expect("output status map lock");
+        status
+            .iter()
+            .map(|(device, (offset, channels, shared))| OutputStreamStatus {
+                device: device.clone(),
+                offset: *offset,
+                channels: *channels,
+                failed: shared.failed.load(Ordering::Relaxed),
+                underruns: shared.underruns.load(Ordering::Relaxed),
+                overruns: shared.overruns.load(Ordering::Relaxed),
+                // Only the real-time backend opens a `hw:` PCM, so only it
+                // can see an xrun or time its own render loop.
+                xruns: 0,
+                worst_block_us: 0,
             })
             .collect()
     }
@@ -172,6 +229,52 @@ impl AudioBackend for CpalBackend {
             .collect()
     }
 
+    fn supports_outputs(&self) -> bool {
+        true
+    }
+
+    /// Output devices as ALSA names them.
+    ///
+    /// Deliberately NOT the Pulse sink list the input side uses. A sink
+    /// name (`alsa_output.usb-…`) is not something cpal can open, and
+    /// showing a name we cannot act on would be a worse lie than showing a
+    /// plainer one: the name printed here is exactly the name
+    /// `open_output` will pass to cpal. Alias devices ("default",
+    /// "pipewire") fold together in the console the same way they do on
+    /// the input board.
+    ///
+    /// `monitor_channels` is 0 for every one of them: this backend puts
+    /// the control-room feed on its OWN cpal stream, so no device has to
+    /// give up channels for it. The real-time backend, which shares one
+    /// card between the monitor and everything else, answers 2.
+    fn output_devices(&self) -> Vec<OutputDeviceInfo> {
+        let host = cpal::default_host();
+        let default_name = host.default_output_device().and_then(|d| d.name().ok());
+        let Ok(devices) = host.output_devices() else {
+            return Vec::new();
+        };
+        devices
+            .filter_map(|device| {
+                let name = device.name().ok()?;
+                // A device that will not state an output config cannot be
+                // opened, so offering it would be offering a dead jack.
+                let channels = device.default_output_config().ok()?.channels();
+                Some(OutputDeviceInfo {
+                    active: default_name.as_deref() == Some(name.as_str()),
+                    name,
+                    description: None,
+                    channels,
+                    pulse: false,
+                    card: None,
+                    channel_map: None,
+                    muted: false,
+                    volume_percent: None,
+                    monitor_channels: 0,
+                })
+            })
+            .collect()
+    }
+
     fn input_cards(&self) -> Vec<CardInfo> {
         crate::pulse::enumerate_cards()
             .unwrap_or_default()
@@ -204,17 +307,29 @@ impl AudioBackend for CpalBackend {
         let (cmd_tx, cmd_rx) = channel::<StreamCmd>();
         let status: StatusMap = Arc::default();
         let status_thread = status.clone();
+        let out_status: OutStatusMap = Arc::default();
+        let out_status_thread = out_status.clone();
         let (setup_tx, setup_rx) = channel::<Result<(), AudioError>>();
 
         let thread = std::thread::Builder::new()
             .name("trib-cpal-audio".into())
-            .spawn(move || stream_thread(config, engine, cmd_rx, status_thread, setup_tx))
+            .spawn(move || {
+                stream_thread(
+                    config,
+                    engine,
+                    cmd_rx,
+                    status_thread,
+                    out_status_thread,
+                    setup_tx,
+                )
+            })
             .map_err(|e| AudioError::Stream(e.to_string()))?;
 
         match setup_rx.recv() {
             Ok(Ok(())) => Ok(Box::new(CpalStream {
                 cmd_tx,
                 status,
+                out_status,
                 thread: Some(thread),
             })),
             Ok(Err(e)) => {
@@ -237,6 +352,11 @@ struct OpenedInput {
     offset: u16,
 }
 
+struct OpenedOutput {
+    _stream: cpal::Stream,
+    offset: u16,
+}
+
 enum InputSource {
     Cpal(#[allow(dead_code)] cpal::Stream),
     Pulse(#[allow(dead_code)] crate::pulse::ParecCapture),
@@ -254,11 +374,19 @@ fn stream_thread(
     engine: GraphEngine,
     cmd_rx: Receiver<StreamCmd>,
     status: StatusMap,
+    out_status: OutStatusMap,
     setup_tx: Sender<Result<(), AudioError>>,
 ) {
     let (asm_cmd_tx, asm_cmd_rx) = RingBuffer::new(ASSEMBLER_RING_CAPACITY);
     let (asm_retire_tx, mut asm_retire_rx) = RingBuffer::new(ASSEMBLER_RING_CAPACITY);
     let assembler = InputAssembler::new(asm_cmd_rx, asm_retire_tx);
+
+    // The output half, built the same way and for the same reasons. It
+    // starts with nothing attached — patched outputs open on demand — and
+    // costs one empty slot-table walk per block until then.
+    let (dis_cmd_tx, dis_cmd_rx) = RingBuffer::new(DISASSEMBLER_RING_CAPACITY);
+    let (dis_retire_tx, mut dis_retire_rx) = RingBuffer::new(DISASSEMBLER_RING_CAPACITY);
+    let disassembler = OutputDisassembler::new(dis_cmd_rx, dis_retire_tx);
 
     let (out_tx, out_rx) = RingBuffer::<f32>::new(OUTPUT_RING_FRAMES * 2);
     // Mutex so a wedged stream can be dropped and rebuilt around the same
@@ -273,7 +401,7 @@ fn stream_thread(
         let stop = engine_stop.clone();
         std::thread::Builder::new()
             .name("trib-engine-clock".into())
-            .spawn(move || engine_clock(config, engine, assembler, out_tx, stop))
+            .spawn(move || engine_clock(config, engine, assembler, disassembler, out_tx, stop))
     };
     let engine_thread = match engine_thread {
         Ok(handle) => handle,
@@ -300,7 +428,9 @@ fn stream_thread(
     };
 
     let mut inputs: HashMap<Option<String>, OpenedInput> = HashMap::new();
+    let mut outputs: HashMap<Option<String>, OpenedOutput> = HashMap::new();
     let mut asm_cmd_tx = asm_cmd_tx;
+    let mut dis_cmd_tx = dis_cmd_tx;
     let mut watch = StallWatch::new(Instant::now());
     let mut stalled_since: Option<Instant> = None;
     loop {
@@ -369,15 +499,40 @@ fn stream_thread(
                 };
                 let _ = reply.send(result);
             }
+            Ok(StreamCmd::OpenOutput { req, reply }) => {
+                let result = open_output(&config, &req, &mut dis_cmd_tx, &out_status, &mut outputs);
+                let _ = reply.send(result);
+            }
+            Ok(StreamCmd::CloseOutput { device, reply }) => {
+                let result = if let Some(opened) = outputs.remove(&device) {
+                    // Drop the stream FIRST, exactly as on the input side:
+                    // the ring consumer dies with its callback, so the
+                    // retired producer is the last owner.
+                    let offset = opened.offset;
+                    drop(opened);
+                    out_status
+                        .lock()
+                        .expect("output status map lock")
+                        .remove(&device);
+                    dis_cmd_tx
+                        .push(DisassemblerCmd::Detach { offset })
+                        .map_err(|_| AudioError::Stream("disassembler ring full".into()))
+                } else {
+                    Ok(()) // already closed: idempotent
+                };
+                let _ = reply.send(result);
+            }
             Ok(StreamCmd::Shutdown) => break,
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
         // Retired consumers drop here — control side, never the callback.
         while asm_retire_rx.pop().is_ok() {}
+        while dis_retire_rx.pop().is_ok() {}
     }
     drop(output_stream);
     drop(inputs);
+    drop(outputs);
     engine_stop.store(true, Ordering::Relaxed);
     let _ = engine_thread.join();
     // The assembler (now dropped with the engine thread) retired any
@@ -429,13 +584,14 @@ fn engine_clock(
     config: StreamConfig,
     mut engine: GraphEngine,
     mut assembler: InputAssembler,
+    mut disassembler: OutputDisassembler,
     mut out_tx: rtrb::Producer<f32>,
     stop: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let frames = config.block_size;
     let block = Duration::from_secs_f64(frames as f64 / config.sample_rate as f64);
     let mut input = vec![0.0f32; frames * MAX_INPUT_CHANNELS];
-    let mut output = vec![0.0f32; frames * 2];
+    let mut output = trib_engine::output_buffer(frames);
     for _ in 0..OUTPUT_PREFILL_FRAMES * 2 {
         let _ = out_tx.push(0.0);
     }
@@ -443,9 +599,18 @@ fn engine_clock(
     while !stop.load(Ordering::Relaxed) {
         assembler.drain_commands();
         assembler.fill(&mut input, frames);
+        disassembler.drain_commands();
         engine.process(&input, MAX_INPUT_CHANNELS, &mut output);
-        for &sample in &output {
-            let _ = out_tx.push(sample);
+        // Patched outputs take their own slices of the plane. Done before
+        // the monitor drain below so a slow monitor sink cannot delay a
+        // direct out.
+        disassembler.scatter(&output, frames);
+        // The monitor sink takes the reserved pair only. The rest of the
+        // plane belongs to direct outs, which leave through their own
+        // devices and must never be folded into the control-room feed.
+        for frame in output.chunks_exact(MAX_OUTPUT_CHANNELS) {
+            let _ = out_tx.push(frame[MONITOR_OUT[0] as usize]);
+            let _ = out_tx.push(frame[MONITOR_OUT[1] as usize]);
         }
         let now = Instant::now();
         if next > now {
@@ -456,6 +621,106 @@ fn engine_clock(
         }
         next += block;
     }
+}
+
+/// Start draining a slice of the engine plane to one output device.
+///
+/// Unlike the input side, this does NOT get a Pulse variant. Inputs go
+/// through `parec` because `libpulse-dev` is absent and `set_env` is unsafe
+/// under edition 2024; outputs have no such constraint, so cpal opens them
+/// directly. That also means the mapping is ALSA-positional by index,
+/// which sidesteps the whole `--no-remap` class of bug the capture path had
+/// to learn about the hard way — the server never gets to re-order these.
+fn open_output(
+    config: &StreamConfig,
+    req: &OpenOutput,
+    dis_cmd_tx: &mut rtrb::Producer<DisassemblerCmd>,
+    status: &OutStatusMap,
+    outputs: &mut HashMap<Option<String>, OpenedOutput>,
+) -> Result<(), AudioError> {
+    if outputs.contains_key(&req.device) {
+        return Ok(()); // already open: idempotent
+    }
+    let channels = req.channels;
+    let shared = Arc::new(OutputShared::default());
+    let host = cpal::default_host();
+    let device = match &req.device {
+        None => host
+            .default_output_device()
+            .ok_or_else(|| AudioError::Device("no default output device".into()))?,
+        Some(name) => host
+            .output_devices()
+            .map_err(|e| AudioError::Device(e.to_string()))?
+            .find(|d| d.name().is_ok_and(|n| &n == name))
+            .ok_or_else(|| AudioError::Device(format!("no output device named {name:?}")))?,
+    };
+
+    let try_build =
+        |buffer_size: cpal::BufferSize| -> Result<(cpal::Stream, rtrb::Producer<f32>), AudioError> {
+            let (tx, mut rx) = RingBuffer::<f32>::new(
+                config.block_size * usize::from(channels) * INPUT_RING_BLOCKS,
+            );
+            let error_shared = shared.clone();
+            let cb_shared = shared.clone();
+            let stream = device
+                .build_output_stream(
+                    &cpal::StreamConfig {
+                        channels,
+                        sample_rate: cpal::SampleRate(config.sample_rate),
+                        buffer_size,
+                    },
+                    move |data: &mut [f32], _| {
+                        let mut starved = 0u64;
+                        for sample in data.iter_mut() {
+                            *sample = match rx.pop() {
+                                Ok(value) => value,
+                                Err(_) => {
+                                    starved += 1;
+                                    0.0
+                                }
+                            };
+                        }
+                        if starved > 0 {
+                            cb_shared.underruns.fetch_add(starved, Ordering::Relaxed);
+                        }
+                    },
+                    move |e| {
+                        tracing::error!(%e, "output stream error");
+                        error_shared.failed.store(true, Ordering::Relaxed);
+                    },
+                    None,
+                )
+                .map_err(|e| AudioError::Stream(format!("output: {e}")))?;
+            Ok((stream, tx))
+        };
+    // Raw ALSA devices often refuse a fixed buffer size; the engine
+    // sub-blocks anyway, so Default is a fine second try.
+    let (stream, producer) = try_build(cpal::BufferSize::Fixed(config.block_size as u32))
+        .or_else(|_| try_build(cpal::BufferSize::Default))?;
+    stream
+        .play()
+        .map_err(|e| AudioError::Stream(format!("output play: {e}")))?;
+
+    dis_cmd_tx
+        .push(DisassemblerCmd::Attach(Box::new(AttachedOutput {
+            producer,
+            offset: req.offset,
+            channels,
+            shared: shared.clone(),
+        })))
+        .map_err(|_| AudioError::Stream("disassembler ring full".into()))?;
+    status
+        .lock()
+        .expect("output status map lock")
+        .insert(req.device.clone(), (req.offset, channels, shared));
+    outputs.insert(
+        req.device.clone(),
+        OpenedOutput {
+            _stream: stream,
+            offset: req.offset,
+        },
+    );
+    Ok(())
 }
 
 fn open_input(

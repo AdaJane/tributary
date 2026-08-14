@@ -1,6 +1,7 @@
 pub mod destinations;
 pub mod devices;
 pub mod instruments;
+pub mod outputs;
 pub mod recording;
 pub mod sessions;
 pub mod soundfonts;
@@ -45,6 +46,11 @@ pub struct AppState {
     /// grant can each be missing independently, so only invoking it proves
     /// all three — and the answer cannot change while the daemon runs.
     pub can_format: bool,
+    /// Whether the audio backend can drive patchable outputs at all.
+    /// Probed once at boot for the same reason `can_format` is: it cannot
+    /// change while the daemon runs, and answering 501 is more honest than
+    /// accepting a patch nothing will ever play.
+    pub supports_outputs: bool,
     /// Monitor-stream fan-out: `/ws/monitor` sockets subscribe here.
     pub monitor_tx: tokio::sync::broadcast::Sender<axum::body::Bytes>,
     /// The device orchestrator — the only path to the audio backend.
@@ -156,6 +162,9 @@ fn api_router() -> OpenApiRouter<AppState> {
         .routes(routes!(devices::list_devices))
         .routes(routes!(devices::refresh_devices))
         .routes(routes!(devices::set_card_profile))
+        .routes(routes!(outputs::list_outputs))
+        .routes(routes!(outputs::refresh_outputs))
+        .routes(routes!(outputs::patch_output))
         .routes(routes!(
             instruments::list_instruments,
             instruments::create_instrument

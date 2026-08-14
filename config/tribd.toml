@@ -11,11 +11,32 @@
 # cors_origins = []
 
 [audio]
-# Inputs open per-device on demand (patch a strip to open one); the output
-# is the system default device and provides the clock. No resampling —
-# devices open at the engine rate (PipeWire adapts; raw ALSA may refuse).
+# Inputs open per-device on demand (patch a strip to open one). No
+# resampling — devices open at the engine rate (PipeWire adapts; raw ALSA
+# may refuse).
 # sample_rate = 48000
 # block_size = 256
+#
+# Which device layer owns the audio hardware:
+#   "shared"    — PipeWire/PulseAudio alongside everything else on the
+#                 machine. The monitor goes to the system default sink and
+#                 the engine is clocked by its OWN timer thread, so a
+#                 stalling or vanishing output costs monitor audio only,
+#                 never metering or a take. The desktop posture, and the
+#                 default.
+#   "exclusive" — one ALSA `hw:` card, capture and playback linked on a
+#                 single clock, and the engine clocked by the card. Lower
+#                 latency and no drift between the two directions; nothing
+#                 else on the box can make a sound. The appliance posture.
+#
+# There is no "auto". Guessing wrong in the shared direction leaves an
+# appliance quietly running at several times the latency with nobody able
+# to tell; guessing wrong the other way takes a desktop user's soundcard.
+# layer = "shared"
+#
+# The card the exclusive layer takes, e.g. "hw:1". Unset = the first card
+# that opens duplex at the engine rate.
+# device = ""
 
 [projects]
 # root = "projects"
@@ -29,5 +50,5 @@
 #
 # Ceiling on an uploaded soundfont. This is a MEMORY budget wearing a disk
 # hat: the synthesiser holds all sample data resident, so a 148 MB General
-# MIDI set is an OOM kill on a Pi Zero 2 W rather than a slow load.
+# MIDI set is an OOM kill on a 2 GB Pi 4 rather than a slow load.
 # max_bytes = 67108864

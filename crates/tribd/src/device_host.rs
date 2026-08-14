@@ -14,8 +14,10 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use serde::Serialize;
 use tokio::sync::oneshot;
-use trib_audio::{AudioBackend, InputDeviceInfo, OpenInput, StreamHandle};
-use trib_engine::InputSlots;
+use trib_audio::{
+    AudioBackend, InputDeviceInfo, OpenInput, OpenOutput, OutputDeviceInfo, StreamHandle,
+};
+use trib_engine::{InputSlots, OutputSlots};
 use utoipa::ToSchema;
 
 use crate::device_match::reconcile_names;
@@ -93,6 +95,17 @@ pub struct DeviceReport {
 pub enum DeviceMsg {
     /// The set of device identities strips reference (None = default).
     WantedChanged(BTreeSet<Option<String>>),
+    /// The set of output device identities the patch bay references.
+    WantedOutputsChanged(BTreeSet<Option<String>>),
+    /// Fresh output enumeration + state join. No side effects.
+    ListOutputs {
+        reply: oneshot::Sender<Vec<OutputDeviceReport>>,
+    },
+    /// Output list + full reconcile: open the wanted, close the unwanted,
+    /// retry the failed.
+    RefreshOutputs {
+        reply: oneshot::Sender<Vec<OutputDeviceReport>>,
+    },
     /// Fresh enumeration + state join. No side effects.
     List {
         reply: oneshot::Sender<Vec<DeviceReport>>,
@@ -112,6 +125,50 @@ pub enum DeviceMsg {
     },
 }
 
+/// Channels of a device the patch bay may aim at.
+///
+/// A device that carries the monitor gives up its first channels to it —
+/// the real-time backend shares one card between the control-room feed and
+/// everything else. Subtracted here rather than in the backend so the
+/// console can still print the device's true width beside it.
+fn patchable_channels(info: &OutputDeviceInfo) -> u16 {
+    info.channels.saturating_sub(info.monitor_channels)
+}
+
+/// One row of the output patch bay device document. The mirror of
+/// [`DeviceReport`], carrying the same honest-failure fields for the same
+/// reasons — read the other way round.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct OutputDeviceReport {
+    pub name: String,
+    pub label: Option<String>,
+    /// What the device exposes RIGHT NOW. 0 = unknown (absent, never
+    /// enumerated this boot).
+    pub channels: u16,
+    /// How many of `channels` the monitor has taken and the patch bay may
+    /// not offer.
+    pub monitor_channels: u16,
+    /// The OS default output.
+    pub active: bool,
+    pub status: DeviceStatus,
+    /// Some patch references it.
+    pub patched: bool,
+    pub underruns: u64,
+    pub overruns: u64,
+    /// ALSA xruns recovered on this device. Always 0 off the real-time
+    /// backend, which is the only one that opens a `hw:` PCM.
+    pub xruns: u64,
+    /// Worst engine block this second, in microseconds. 0 where the
+    /// backend does not measure it.
+    pub worst_block_us: u32,
+    /// The sink layer muted this output. It still opens, still streams,
+    /// and the room hears nothing — and an output has no meter to show it,
+    /// so this field is the only place a dead PA is explainable.
+    pub muted: bool,
+    pub volume_percent: Option<u32>,
+    pub error: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct DeviceHandle {
     tx: Sender<DeviceMsg>,
@@ -127,6 +184,26 @@ impl DeviceHandle {
     /// Sync and non-blocking (unbounded channel) — safe from async context.
     pub fn wanted_changed(&self, wanted: BTreeSet<Option<String>>) {
         let _ = self.tx.send(DeviceMsg::WantedChanged(wanted));
+    }
+
+    pub fn wanted_outputs_changed(&self, wanted: BTreeSet<Option<String>>) {
+        let _ = self.tx.send(DeviceMsg::WantedOutputsChanged(wanted));
+    }
+
+    pub async fn list_outputs(&self) -> Vec<OutputDeviceReport> {
+        let (reply, response) = oneshot::channel();
+        if self.tx.send(DeviceMsg::ListOutputs { reply }).is_err() {
+            return Vec::new();
+        }
+        response.await.unwrap_or_default()
+    }
+
+    pub async fn refresh_outputs(&self) -> Vec<OutputDeviceReport> {
+        let (reply, response) = oneshot::channel();
+        if self.tx.send(DeviceMsg::RefreshOutputs { reply }).is_err() {
+            return Vec::new();
+        }
+        response.await.unwrap_or_default()
     }
 
     pub async fn list(&self) -> Vec<DeviceReport> {
@@ -174,10 +251,12 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("trib-devices".into())
         .spawn(move || {
+            let outputs_control = control.clone();
             Orchestrator::new(
                 backend,
                 stream,
                 Box::new(move |slots| control.input_slots_changed_blocking(slots)),
+                Box::new(move |slots| outputs_control.output_slots_changed_blocking(slots)),
             )
             .run(rx);
         })
@@ -226,6 +305,25 @@ struct Orchestrator {
     profile_aliases: HashMap<String, String>,
     open: HashMap<Option<String>, OpenEntry>,
     open_errors: HashMap<Option<String>, String>,
+    /// The output half. Deliberately in the same struct on the same
+    /// thread: everything here blocks (enumeration, opening hardware), the
+    /// stream handle below is ONE object shared by both directions, and a
+    /// card's profile decides its input and output widths together — so
+    /// splitting the two halves across threads would make one profile
+    /// switch a cross-thread transaction.
+    out_slots: OutputSlots,
+    out_slots_changed: Box<dyn Fn(OutputSlots) + Send>,
+    wanted_outputs: BTreeSet<Option<String>>,
+    open_outputs: HashMap<Option<String>, OutOpenEntry>,
+    output_errors: HashMap<Option<String>, String>,
+}
+
+/// What the orchestrator knows about one open output.
+struct OutOpenEntry {
+    /// The present device name this was opened against, when it differs
+    /// from the stored one (`None` follows the system default).
+    resolved: Option<String>,
+    channels: u16,
 }
 
 impl Orchestrator {
@@ -233,6 +331,7 @@ impl Orchestrator {
         backend: Arc<dyn AudioBackend>,
         stream: Option<Box<dyn StreamHandle>>,
         slots_changed: Box<dyn Fn(InputSlots) + Send>,
+        out_slots_changed: Box<dyn Fn(OutputSlots) + Send>,
     ) -> Self {
         Orchestrator {
             backend,
@@ -244,7 +343,224 @@ impl Orchestrator {
             profile_aliases: HashMap::new(),
             open: HashMap::new(),
             open_errors: HashMap::new(),
+            out_slots: OutputSlots::with_monitor(),
+            out_slots_changed,
+            wanted_outputs: BTreeSet::new(),
+            open_outputs: HashMap::new(),
+            output_errors: HashMap::new(),
         }
+    }
+
+    /// Which present device a stored output name refers to. `None` follows
+    /// the system default, exactly as it does on the way in.
+    fn resolve_output<'a>(
+        &self,
+        stored: &Option<String>,
+        present: &'a [OutputDeviceInfo],
+    ) -> Option<&'a OutputDeviceInfo> {
+        match stored {
+            None => present.iter().find(|d| d.active),
+            Some(name) => present.iter().find(|d| &d.name == name),
+        }
+    }
+
+    /// Open what the patch bay wants, close what it no longer does.
+    ///
+    /// `heal` additionally retries devices whose stream died — the
+    /// Refresh gesture, and the whole recovery story for an output that
+    /// was unplugged and put back.
+    fn reconcile_outputs(&mut self, present: &[OutputDeviceInfo], heal: bool) {
+        let before = self.out_slots.clone();
+        if heal {
+            let failed: Vec<Option<String>> = self
+                .stream
+                .as_ref()
+                .map(|s| s.output_status())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|s| s.failed)
+                .map(|s| s.device)
+                .collect();
+            for device in failed {
+                self.close_output(&device);
+            }
+            self.output_errors.clear();
+        }
+
+        // Close anything unwanted, gone, or resized. A width change has to
+        // go through close-then-open: the slot allocator refuses to resize
+        // under a live stream, and rightly so.
+        for device in self.open_outputs.keys().cloned().collect::<Vec<_>>() {
+            let width = self
+                .resolve_output(&device, present)
+                .map(patchable_channels);
+            let held = self.open_outputs[&device].channels;
+            if !self.wanted_outputs.contains(&device) || width != Some(held) {
+                self.close_output(&device);
+            }
+        }
+
+        for device in self.wanted_outputs.clone() {
+            if self.open_outputs.contains_key(&device) {
+                continue;
+            }
+            let Some(info) = self.resolve_output(&device, present) else {
+                continue; // absent: the report says so, and Refresh retries
+            };
+            let channels = patchable_channels(info);
+            if channels == 0 {
+                self.output_errors.insert(
+                    device.clone(),
+                    "this device exposes no patchable output channels".to_owned(),
+                );
+                continue;
+            }
+            let resolved = (device.is_some() || info.active).then(|| info.name.clone());
+            let pulse = info.pulse;
+            let channel_map = info.channel_map.clone();
+            let offset = match self.out_slots.allocate(device.as_deref(), channels) {
+                Ok(offset) => offset,
+                Err(e) => {
+                    self.output_errors
+                        .insert(device.clone(), format!("output plane full: {e:?}"));
+                    continue;
+                }
+            };
+            let req = OpenOutput {
+                // `None` stays `None` so the backend tracks the system
+                // default live rather than pinning the name it had today.
+                device: device.clone(),
+                channels,
+                offset,
+                pulse,
+                channel_map,
+            };
+            match self.stream.as_ref().map(|s| s.open_output(req)) {
+                Some(Ok(())) => {
+                    self.open_outputs
+                        .insert(device.clone(), OutOpenEntry { resolved, channels });
+                    self.output_errors.remove(&device);
+                }
+                Some(Err(e)) => {
+                    self.out_slots.release(device.as_deref());
+                    self.output_errors.insert(device.clone(), e.to_string());
+                }
+                None => {
+                    self.out_slots.release(device.as_deref());
+                    self.output_errors
+                        .insert(device.clone(), "audio backend not running".to_owned());
+                }
+            }
+        }
+
+        if self.out_slots != before {
+            (self.out_slots_changed)(self.out_slots.clone());
+        }
+    }
+
+    fn close_output(&mut self, stored: &Option<String>) {
+        if let Some(entry) = self.open_outputs.remove(stored) {
+            if let Some(stream) = &self.stream {
+                let _ = stream.close_output(entry.resolved.as_deref().or(stored.as_deref()));
+            }
+            self.out_slots.release(stored.as_deref());
+        }
+    }
+
+    /// One row per output device, joined with what we know about it.
+    fn output_report(&self, present: &[OutputDeviceInfo]) -> Vec<OutputDeviceReport> {
+        let status = self
+            .stream
+            .as_ref()
+            .map(|s| s.output_status())
+            .unwrap_or_default();
+        let mut rows: Vec<OutputDeviceReport> = present
+            .iter()
+            .map(|info| {
+                let stored = if info.active {
+                    None
+                } else {
+                    Some(info.name.clone())
+                };
+                let key = self
+                    .open_outputs
+                    .keys()
+                    .find(|k| match k {
+                        None => info.active,
+                        Some(name) => name == &info.name,
+                    })
+                    .cloned();
+                let live = key
+                    .as_ref()
+                    .and_then(|k| status.iter().find(|s| s.device.as_deref() == k.as_deref()))
+                    .or_else(|| {
+                        status
+                            .iter()
+                            .find(|s| s.device.as_deref() == Some(info.name.as_str()))
+                    });
+                let wanted = self.wanted_outputs.contains(&stored)
+                    || self.wanted_outputs.contains(&Some(info.name.clone()));
+                let error = self
+                    .output_errors
+                    .get(&stored)
+                    .or_else(|| self.output_errors.get(&Some(info.name.clone())))
+                    .cloned();
+                OutputDeviceReport {
+                    label: info.description.clone(),
+                    name: info.name.clone(),
+                    channels: info.channels,
+                    monitor_channels: info.monitor_channels,
+                    active: info.active,
+                    status: if error.is_some() {
+                        DeviceStatus::Failed
+                    } else if key.is_some() {
+                        DeviceStatus::Open
+                    } else {
+                        DeviceStatus::Available
+                    },
+                    patched: wanted,
+                    underruns: live.map_or(0, |s| s.underruns),
+                    overruns: live.map_or(0, |s| s.overruns),
+                    xruns: live.map_or(0, |s| s.xruns),
+                    worst_block_us: live.map_or(0, |s| s.worst_block_us),
+                    muted: info.muted,
+                    volume_percent: info.volume_percent,
+                    error,
+                }
+            })
+            .collect();
+
+        // Devices a patch names that nothing enumerated. Drawn rather than
+        // dropped, for the reason the input board already learned: a strip
+        // that goes nowhere has to be explainable from the patch bay.
+        for stored in &self.wanted_outputs {
+            let known = rows.iter().any(|r| match stored {
+                None => r.active,
+                Some(name) => &r.name == name,
+            });
+            if known {
+                continue;
+            }
+            rows.push(OutputDeviceReport {
+                name: stored
+                    .clone()
+                    .unwrap_or_else(|| "System default output".to_owned()),
+                label: None,
+                channels: 0,
+                monitor_channels: 0,
+                active: stored.is_none(),
+                status: DeviceStatus::Absent,
+                patched: true,
+                underruns: 0,
+                overruns: 0,
+                xruns: 0,
+                worst_block_us: 0,
+                muted: false,
+                volume_percent: None,
+                error: self.output_errors.get(stored).cloned(),
+            });
+        }
+        rows
     }
     fn run(mut self, rx: Receiver<DeviceMsg>) {
         // The channel closing is the shutdown signal: the thread exits and
@@ -272,6 +588,20 @@ impl Orchestrator {
                 } => {
                     let outcome = self.set_profile(&card, &profile);
                     let _ = reply.send(outcome);
+                }
+                DeviceMsg::WantedOutputsChanged(wanted) => {
+                    self.wanted_outputs = wanted;
+                    let present = self.backend.output_devices();
+                    self.reconcile_outputs(&present, false);
+                }
+                DeviceMsg::ListOutputs { reply } => {
+                    let present = self.backend.output_devices();
+                    let _ = reply.send(self.output_report(&present));
+                }
+                DeviceMsg::RefreshOutputs { reply } => {
+                    let present = self.backend.output_devices();
+                    self.reconcile_outputs(&present, true);
+                    let _ = reply.send(self.output_report(&present));
                 }
             }
         }
@@ -871,6 +1201,7 @@ mod tests {
                 backend.clone(),
                 Some(Box::new(Shared(stream.clone()))),
                 Box::new(move |slots| updates_sink.lock().unwrap().push(slots)),
+                Box::new(|_| {}),
             ),
             calls: stream,
             slot_updates: updates,
@@ -1296,7 +1627,8 @@ mod tests {
             on_switch: Mutex::default(),
             switch_fails: Mutex::default(),
         });
-        let mut orchestrator = Orchestrator::new(backend.clone(), None, Box::new(|_| {}));
+        let mut orchestrator =
+            Orchestrator::new(backend.clone(), None, Box::new(|_| {}), Box::new(|_| {}));
         orchestrator.wanted = [Some("usb".to_owned())].into_iter().collect();
         let present = backend.input_devices();
         orchestrator.reconcile(&present, true);

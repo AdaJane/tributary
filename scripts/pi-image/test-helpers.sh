@@ -204,6 +204,89 @@ check "sudoers/empty-dir" ok "$(sud "$TMP/sud-empty")"
 check "sudoers/missing-dir-is-not-ok" \
     "$TMP/sud-absent: not a directory" "$(sud "$TMP/sud-absent")"
 
+# --------------------------------------------------------- cpu-governor.sh
+
+gov() { sh "$HERE/cpu-governor.sh" "$@"; }
+
+mkdir -p "$TMP/cpufreq/policy0" "$TMP/cpufreq/policy4"
+touch "$TMP/cpufreq/policy0/scaling_governor" "$TMP/cpufreq/policy4/scaling_governor"
+check "governor/both-policies" \
+    "$TMP/cpufreq/policy0/scaling_governor
+$TMP/cpufreq/policy4/scaling_governor" \
+    "$(gov --print-policies "$TMP/cpufreq")"
+
+# A SoC with no cpufreq at all must not fail the boot of a box that has no
+# login account: empty, exit 0.
+check "governor/no-cpufreq" "" "$(gov --print-policies "$TMP/cpufreq-absent")"
+check "governor/name" performance "$(gov --print-governor)"
+
+# --------------------------------------------------------- modparams.sh
+
+mod() { sh "$HERE/modparams.sh" "$@"; }
+
+# A stand-in module: `strings` finds the same `parm=` entries modinfo reads.
+printf 'parm=nrpacks:Max. number of packets per URB (int)\nparm=lowlatency:.\n' \
+    > "$TMP/fake-module.ko"
+printf 'options snd_usb_audio nrpacks=1\n' > "$TMP/modconf-good"
+check "modparams/real-parameter" ok "$(mod --check "$TMP/fake-module.ko" "$TMP/modconf-good")"
+
+printf 'options snd_usb_audio nrpaks=1\n' > "$TMP/modconf-typo"
+check "modparams/typo-caught" \
+    "fake-module.ko: no such parameter: nrpaks" \
+    "$(mod --check "$TMP/fake-module.ko" "$TMP/modconf-typo")"
+
+: > "$TMP/modconf-empty"
+check "modparams/empty-conf" ok "$(mod --check "$TMP/fake-module.ko" "$TMP/modconf-empty")"
+
+# A module that could not be read proves NOTHING, so it must not answer ok
+# — the exact failure mode the sudoers filename allowlist had.
+# Nothing set is nothing to get wrong — but only when the conf is genuinely
+# absent, never when the MODULE could not be read.
+check "modparams/absent-conf-is-ok" ok "$(mod --check "$TMP/fake-module.ko" "$TMP/no-such-conf")"
+
+check "modparams/missing-module-is-not-ok" \
+    "nope.ko: module not found, cannot verify parameters" \
+    "$(mod --check "$TMP/nope.ko" "$TMP/modconf-good")"
+
+# --------------------------------------------------------- pam-limits.sh
+
+pam() { sh "$HERE/pam-limits.sh" --print-limits-check "$1"; }
+
+mkdir -p "$TMP/pam-usr/usr/lib/pam.d"
+printf 'session required pam_limits.so\n' > "$TMP/pam-usr/usr/lib/pam.d/systemd-user"
+check "pam/found-in-usr-lib" ok "$(pam "$TMP/pam-usr")"
+
+mkdir -p "$TMP/pam-etc/etc/pam.d"
+printf 'session required pam_limits.so\n' > "$TMP/pam-etc/etc/pam.d/systemd-user"
+check "pam/found-in-etc" ok "$(pam "$TMP/pam-etc")"
+
+# Debian factors these through @include; following one level is the
+# difference between a real check and a grep that happens to pass.
+mkdir -p "$TMP/pam-inc/etc/pam.d"
+printf '@include common-session\n' > "$TMP/pam-inc/etc/pam.d/systemd-user"
+printf 'session required pam_limits.so\n' > "$TMP/pam-inc/etc/pam.d/common-session"
+check "pam/found-via-include" ok "$(pam "$TMP/pam-inc")"
+
+mkdir -p "$TMP/pam-none/etc/pam.d"
+printf 'session required pam_unix.so\n' > "$TMP/pam-none/etc/pam.d/systemd-user"
+check "pam/no-pam-limits-caught" "systemd-user: no pam_limits" "$(pam "$TMP/pam-none")"
+
+# And a rootfs with no systemd-user at all is a failure, not a pass.
+mkdir -p "$TMP/pam-empty"
+check "pam/missing-file-is-not-ok" "systemd-user: not found" "$(pam "$TMP/pam-empty")"
+
+# ------------------------------------------------ pipewire rate agreement
+
+# `allowed-rates` and `SAMPLE_RATES` are the same fact in two files. If the
+# graph is pinned at 48k while the console offers 96k, pipewire-pulse
+# inserts a resampler silently — degrading the capture this box exists to
+# make. A repo-local check, needing no image.
+RATES_RS="$(sed -n 's/.*SAMPLE_RATES: \[u32; [0-9]*\] = \[\(.*\)\];/\1/p' \
+    "$HERE/../../crates/tribd/src/settings.rs" | tr -d ' _' | tr ',' '\n' | sort -n | tr '\n' ' ')"
+RATES_CONF="$(sed -n 's/.*allowed-rates[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' \
+    "$HERE/build.sh" | tr -s ' ' '\n' | grep -E '^[0-9]+$' | sort -n | tr '\n' ' ')"
+check "pipewire/rates-agree" "$RATES_RS" "$RATES_CONF"
+
 # ------------------------------------------------------------------ summary
 
 printf '%s passed, %s failed\n' "$pass" "$fail"

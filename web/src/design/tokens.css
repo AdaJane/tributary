@@ -97,6 +97,10 @@
   --surface-strip: var(--gray-2);
   --surface-section: var(--gray-3);
   --surface-control: var(--gray-4);
+  /* A control under the pointer. Its own role because five stylesheets
+     were reaching past the semantic layer for `--gray-5` — a border
+     primitive doing a surface's job. */
+  --surface-control-hi: var(--gray-5);
   --surface-inset: #131518; /* fader slot, meter well */
   --border-panel: var(--gray-5);
   --border-divider: var(--gray-6);

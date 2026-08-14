@@ -7,6 +7,7 @@ use crate::fx::FxParams;
 use crate::id::{BusId, FxId, InstrumentId, StripId};
 use crate::instrument::{InstrumentSplit, InstrumentState};
 use crate::mix::MixerState;
+use crate::output::{MAX_OUTPUT_PATCHES, OutputJack, OutputPatch, OutputSource};
 use crate::strip::{InputAssign, RouteTarget, SendState, SendTap, StripState};
 
 /// Longest accepted strip/bus name — it has to fit on the tape.
@@ -170,6 +171,78 @@ pub enum MixCommand {
     AddInstrumentStrips {
         id: InstrumentId,
     },
+    /// Patch one output channel — an upsert keyed on the JACK, because the
+    /// jack is the identity. A jack holds at most one patch, so re-patching
+    /// replaces what was there rather than stacking a second feed onto it;
+    /// one SOURCE may feed many jacks, the exact mirror of one jack feeding
+    /// many strips on the way in.
+    SetOutputPatch {
+        patch: OutputPatch,
+    },
+    /// Unpatch one output channel, named by the jack.
+    ClearOutputPatch {
+        jack: OutputJack,
+    },
+    /// Move a patch's tap and nothing else.
+    ///
+    /// Its own command so a console that PUTs its whole form does not stop
+    /// the tape to flip a switch — the same split `patch_commands` already
+    /// makes between an instrument's voice and its performance.
+    SetOutputTap {
+        jack: OutputJack,
+        tap: SendTap,
+    },
+}
+
+impl MixCommand {
+    /// Whether the tape refuses this command while it is rolling.
+    ///
+    /// Not the same question as [`ReconcileNeed`], though one field used to
+    /// answer both. The engine needs a recompile whenever the graph's shape
+    /// changes. The TAPE cares about two things: whether the change moves
+    /// what a record tap is bound to (the strips and their order), and
+    /// whether applying it costs a graph swap — because a swap reseeds every
+    /// smoother and clears every filter and FX tail, and the master record
+    /// tap is POST-FX, so that transient lands in the take.
+    ///
+    /// So an output patch is refused mid-take even though it is downstream
+    /// of every tap and cannot change one recorded sample: it is the
+    /// recompile that would be audible, not the patch. Its pre/post switch
+    /// is not refused — that is a flag on an already-compiled tap, exactly
+    /// like an aux send's, and it is the one gesture a monitor engineer
+    /// genuinely needs live.
+    pub fn stops_the_tape(&self) -> bool {
+        match self {
+            MixCommand::AddStrip { .. }
+            | MixCommand::RemoveStrip { .. }
+            | MixCommand::SetInput { .. }
+            | MixCommand::SetRoute { .. }
+            | MixCommand::AddBus { .. }
+            | MixCommand::RemoveBus { .. }
+            | MixCommand::AddInstrument { .. }
+            | MixCommand::RemoveInstrument { .. }
+            | MixCommand::SetInstrumentVoice { .. }
+            | MixCommand::SetInstrumentSplits { .. }
+            | MixCommand::AddInstrumentStrips { .. }
+            | MixCommand::SetOutputPatch { .. }
+            | MixCommand::ClearOutputPatch { .. } => true,
+            MixCommand::SetFader { .. }
+            | MixCommand::SetGain { .. }
+            | MixCommand::SetEqBand { .. }
+            | MixCommand::SetEqEnabled { .. }
+            | MixCommand::SetPan { .. }
+            | MixCommand::SetMute { .. }
+            | MixCommand::SetPfl { .. }
+            | MixCommand::Rename { .. }
+            | MixCommand::SetSend { .. }
+            | MixCommand::SetFxParams { .. }
+            | MixCommand::SetFxReturn { .. }
+            | MixCommand::SetRecordArm { .. }
+            | MixCommand::SetRecordArmAll { .. }
+            | MixCommand::SetInstrumentPerformance { .. }
+            | MixCommand::SetOutputTap { .. } => false,
+        }
+    }
 }
 
 /// What a successful `apply` changed — the WS `state_changed` payload.
@@ -223,6 +296,11 @@ pub enum StateDelta {
     },
     StripRemoved {
         id: StripId,
+        /// The jacks that went quiet with it. A structural change, so a
+        /// snapshot follows — but the console wants to say what it just
+        /// did, and "removing Ch 3 also unpatched OUT 5" is that sentence.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unpatched_outputs: Vec<OutputJack>,
     },
     Send {
         strip: StripId,
@@ -247,6 +325,8 @@ pub enum StateDelta {
     },
     BusRemoved {
         id: BusId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unpatched_outputs: Vec<OutputJack>,
     },
     RecordArm {
         target: FaderTarget,
@@ -276,6 +356,19 @@ pub enum StateDelta {
     InstrumentStripsAdded {
         id: InstrumentId,
         added: Vec<StripState>,
+    },
+    /// The whole patch, not the fields that moved: a client keys outputs by
+    /// jack, and a half-patch would leave it drawing a jack whose source it
+    /// cannot name.
+    OutputPatched {
+        patch: OutputPatch,
+    },
+    OutputUnpatched {
+        jack: OutputJack,
+    },
+    OutputTap {
+        jack: OutputJack,
+        tap: SendTap,
     },
 }
 
@@ -460,7 +553,14 @@ pub fn apply(state: &MixerState, command: MixCommand) -> Result<Applied, MixErro
             if next.strips.len() == before {
                 return Err(MixError::UnknownTarget(id.to_string()));
             }
-            (StateDelta::StripRemoved { id }, Topology)
+            let unpatched_outputs = unpatch_source(&mut next, OutputSource::Strip { id });
+            (
+                StateDelta::StripRemoved {
+                    id,
+                    unpatched_outputs,
+                },
+                Topology,
+            )
         }
         MixCommand::SetSend {
             strip,
@@ -561,7 +661,18 @@ pub fn apply(state: &MixerState, command: MixCommand) -> Result<Applied, MixErro
                 }
                 strip.sends.retain(|s| s.dest != id);
             }
-            (StateDelta::BusRemoved { id }, Topology)
+            // An output patch heals rather than refusing, unlike the FX
+            // guard above: an FX unit is a document object with nowhere
+            // else to live, and an output patch is a wire — unplugging it
+            // is exactly what removing the bus means.
+            let unpatched_outputs = unpatch_source(&mut next, OutputSource::Bus { id });
+            (
+                StateDelta::BusRemoved {
+                    id,
+                    unpatched_outputs,
+                },
+                Topology,
+            )
         }
         MixCommand::SetRecordArm { target, armed } => {
             match target {
@@ -721,8 +832,82 @@ pub fn apply(state: &MixerState, command: MixCommand) -> Result<Applied, MixErro
             }
             (StateDelta::InstrumentStripsAdded { id, added }, Topology)
         }
+        MixCommand::SetOutputPatch { patch } => {
+            let width = next
+                .source_channels(&patch.source)
+                .ok_or_else(|| MixError::UnknownTarget(source_name(&patch.source)))?;
+            if patch.source_channel >= width {
+                return Err(MixError::OutOfRange {
+                    field: "source_channel",
+                    value: f32::from(patch.source_channel),
+                });
+            }
+            let jack = patch.jack();
+            let replacing = next.outputs.iter().position(|o| o.is(&jack));
+            match replacing {
+                // One jack, one feed: patching over an occupied output
+                // replaces it. Summing two sources onto one channel would
+                // make this a mixer rather than a patch bay.
+                Some(at) => next.outputs[at] = patch.clone(),
+                None => {
+                    if next.outputs.len() >= MAX_OUTPUT_PATCHES {
+                        return Err(MixError::Unsupported("the output patch bay is full"));
+                    }
+                    next.outputs.push(patch.clone());
+                }
+            }
+            (StateDelta::OutputPatched { patch }, Topology)
+        }
+        MixCommand::ClearOutputPatch { jack } => {
+            let before = next.outputs.len();
+            next.outputs.retain(|o| !o.is(&jack));
+            if next.outputs.len() == before {
+                return Err(MixError::UnknownTarget(jack_name(&jack)));
+            }
+            (StateDelta::OutputUnpatched { jack }, Topology)
+        }
+        MixCommand::SetOutputTap { jack, tap } => {
+            let patch = next
+                .outputs
+                .iter_mut()
+                .find(|o| o.is(&jack))
+                .ok_or_else(|| MixError::UnknownTarget(jack_name(&jack)))?;
+            patch.tap = tap;
+            (StateDelta::OutputTap { jack, tap }, ParamOnly)
+        }
     };
     Ok((next, delta, need))
+}
+
+/// Drop every output patch fed by `source`, returning the jacks that went
+/// quiet. The output-side sibling of the route and send healing that
+/// `RemoveBus` already does.
+fn unpatch_source(state: &mut MixerState, source: OutputSource) -> Vec<OutputJack> {
+    let gone: Vec<OutputJack> = state
+        .outputs
+        .iter()
+        .filter(|patch| patch.source == source)
+        .map(OutputPatch::jack)
+        .collect();
+    state.outputs.retain(|patch| patch.source != source);
+    gone
+}
+
+/// How an unknown source reads in an error. `Display` on the id already
+/// prints `strip#3`, so this only has to name the master.
+fn source_name(source: &OutputSource) -> String {
+    match source {
+        OutputSource::Strip { id } => id.to_string(),
+        OutputSource::Bus { id } => id.to_string(),
+        OutputSource::Master => "master".to_owned(),
+    }
+}
+
+fn jack_name(jack: &OutputJack) -> String {
+    match &jack.device {
+        Some(device) => format!("{device} out {}", jack.channel + 1),
+        None => format!("out {}", jack.channel + 1),
+    }
 }
 
 fn instrument_mut(
@@ -764,6 +949,294 @@ mod tests {
 
     fn ok(command: MixCommand) -> Applied {
         apply(&state(), command).unwrap()
+    }
+
+    fn jack(channel: u16) -> OutputJack {
+        OutputJack {
+            device: Some("interface".into()),
+            channel,
+        }
+    }
+
+    fn out_patch(source: OutputSource, source_channel: u16, channel: u16) -> OutputPatch {
+        OutputPatch::new(source, source_channel, jack(channel))
+    }
+
+    #[test]
+    fn patching_an_output_replaces_whatever_was_on_that_jack() {
+        let mut state = state();
+        state
+            .strips
+            .push(StripState::new(StripId(1), "Ch 2".into()));
+        let (state, ..) = apply(
+            &state,
+            MixCommand::SetOutputPatch {
+                patch: out_patch(OutputSource::Strip { id: StripId(0) }, 0, 3),
+            },
+        )
+        .unwrap();
+        let (state, ..) = apply(
+            &state,
+            MixCommand::SetOutputPatch {
+                patch: out_patch(OutputSource::Strip { id: StripId(1) }, 0, 3),
+            },
+        )
+        .unwrap();
+        assert_eq!(state.outputs.len(), 1, "one jack holds at most one feed");
+        assert_eq!(
+            state.output(&jack(3)).unwrap().source,
+            OutputSource::Strip { id: StripId(1) }
+        );
+    }
+
+    #[test]
+    fn one_source_may_feed_several_output_channels() {
+        // The mirror invariant. An upsert keyed on the SOURCE instead of
+        // the JACK would silently destroy this.
+        let source = OutputSource::Strip { id: StripId(0) };
+        let (state, ..) = apply(
+            &state(),
+            MixCommand::SetOutputPatch {
+                patch: out_patch(source, 0, 3),
+            },
+        )
+        .unwrap();
+        let (state, ..) = apply(
+            &state,
+            MixCommand::SetOutputPatch {
+                patch: out_patch(source, 0, 4),
+            },
+        )
+        .unwrap();
+        assert_eq!(state.outputs.len(), 2);
+    }
+
+    #[test]
+    fn an_output_patched_past_its_sources_channels_is_refused() {
+        let mut state = state();
+        state
+            .buses
+            .push(BusState::new(BusId(0), BusKind::Aux, "Wedge".into()));
+        // An aux bus is mono; channel 1 is not a thing it has.
+        assert!(matches!(
+            apply(
+                &state,
+                MixCommand::SetOutputPatch {
+                    patch: out_patch(OutputSource::Bus { id: BusId(0) }, 1, 3),
+                },
+            ),
+            Err(MixError::OutOfRange {
+                field: "source_channel",
+                ..
+            })
+        ));
+        assert!(matches!(
+            apply(
+                &state,
+                MixCommand::SetOutputPatch {
+                    patch: out_patch(OutputSource::Strip { id: StripId(9) }, 0, 3),
+                },
+            ),
+            Err(MixError::UnknownTarget(_))
+        ));
+    }
+
+    #[test]
+    fn removing_a_strip_unpatches_the_outputs_it_fed_and_says_which() {
+        let (state, ..) = apply(
+            &state(),
+            MixCommand::SetOutputPatch {
+                patch: out_patch(OutputSource::Strip { id: StripId(0) }, 0, 5),
+            },
+        )
+        .unwrap();
+        let (next, delta, _) = apply(&state, MixCommand::RemoveStrip { id: StripId(0) }).unwrap();
+        assert!(next.outputs.is_empty(), "the patch went with the strip");
+        assert_eq!(
+            delta,
+            StateDelta::StripRemoved {
+                id: StripId(0),
+                unpatched_outputs: vec![jack(5)],
+            },
+            "the console needs to be able to say what else just went quiet"
+        );
+    }
+
+    #[test]
+    fn removing_a_bus_unpatches_its_outputs_rather_than_refusing() {
+        // Deliberately unlike the FX guard: an FX unit is a document object
+        // with nowhere else to live, an output patch is a wire.
+        let mut state = state();
+        state
+            .buses
+            .push(BusState::new(BusId(0), BusKind::Group, "Band".into()));
+        let (state, ..) = apply(
+            &state,
+            MixCommand::SetOutputPatch {
+                patch: out_patch(OutputSource::Bus { id: BusId(0) }, 1, 6),
+            },
+        )
+        .unwrap();
+        let (next, delta, _) = apply(&state, MixCommand::RemoveBus { id: BusId(0) }).unwrap();
+        assert!(next.outputs.is_empty());
+        assert_eq!(
+            delta,
+            StateDelta::BusRemoved {
+                id: BusId(0),
+                unpatched_outputs: vec![jack(6)],
+            }
+        );
+    }
+
+    #[test]
+    fn re_tapping_an_output_is_a_parameter_move_and_re_wiring_is_not() {
+        let patch = out_patch(OutputSource::Master, 0, 1);
+        let (state, _, need) = apply(&state(), MixCommand::SetOutputPatch { patch }).unwrap();
+        assert_eq!(need, ReconcileNeed::Topology);
+
+        let (state, delta, need) = apply(
+            &state,
+            MixCommand::SetOutputTap {
+                jack: jack(1),
+                tap: SendTap::PostFader,
+            },
+        )
+        .unwrap();
+        assert_eq!(need, ReconcileNeed::ParamOnly);
+        assert_eq!(
+            delta,
+            StateDelta::OutputTap {
+                jack: jack(1),
+                tap: SendTap::PostFader
+            }
+        );
+        assert_eq!(state.output(&jack(1)).unwrap().tap, SendTap::PostFader);
+    }
+
+    #[test]
+    fn only_the_output_tap_recompiles_nothing_while_every_other_topology_change_stops_the_tape() {
+        // The drift guard. `ReconcileNeed` answers "does the engine need a
+        // recompile"; `stops_the_tape` answers "does the tape refuse this".
+        // They agree everywhere today, and the day they stop agreeing it
+        // must be because somebody decided so — not because a new variant
+        // was added and nobody looked.
+        let mut state = state();
+        state
+            .buses
+            .push(BusState::new(BusId(0), BusKind::Aux, "Wedge".into()));
+        state
+            .instruments
+            .push(InstrumentState::new(InstrumentId(0), "Rhodes".into()));
+        state.outputs.push(out_patch(OutputSource::Master, 0, 1));
+
+        for command in every_command_shape() {
+            let Ok((_, _, need)) = apply(&state, command.clone()) else {
+                continue;
+            };
+            assert_eq!(
+                command.stops_the_tape(),
+                need == ReconcileNeed::Topology,
+                "{command:?}: the two questions disagree, and nothing says why"
+            );
+        }
+    }
+
+    /// One of every `MixCommand` variant, valid against the fixture above.
+    /// Adding a variant without adding it here leaves the drift guard
+    /// silently weaker, so the match below is exhaustive on purpose.
+    fn every_command_shape() -> Vec<MixCommand> {
+        let strip = StripId(0);
+        let bus = BusId(0);
+        let id = InstrumentId(0);
+        let target = FaderTarget::Strip { id: strip };
+        vec![
+            MixCommand::SetFader {
+                target,
+                level_db: -6.0,
+            },
+            MixCommand::SetGain {
+                strip,
+                gain_db: 3.0,
+            },
+            MixCommand::SetEqBand {
+                strip,
+                band: EqBandKind::Peak,
+                freq_hz: 1000.0,
+                gain_db: 0.0,
+                q: 1.0,
+            },
+            MixCommand::SetEqEnabled {
+                strip,
+                enabled: true,
+            },
+            MixCommand::SetPan { strip, pan: 0.5 },
+            MixCommand::SetMute { target, mute: true },
+            MixCommand::SetPfl { target, on: true },
+            MixCommand::SetInput { strip, input: None },
+            MixCommand::Rename {
+                target,
+                name: "Kick".into(),
+            },
+            MixCommand::AddStrip { name: None },
+            MixCommand::RemoveStrip { id: strip },
+            MixCommand::SetSend {
+                strip,
+                dest: bus,
+                level_db: -6.0,
+                tap: SendTap::PreFader,
+            },
+            MixCommand::SetRoute {
+                strip,
+                to: RouteTarget::Master,
+            },
+            MixCommand::SetFxParams {
+                fx: FxId(0),
+                params: FxParams::default_reverb(),
+            },
+            MixCommand::SetFxReturn {
+                fx: FxId(0),
+                level_db: -6.0,
+            },
+            MixCommand::AddBus {
+                kind: BusKind::Aux,
+                name: None,
+            },
+            MixCommand::RemoveBus { id: bus },
+            MixCommand::SetRecordArm {
+                target,
+                armed: true,
+            },
+            MixCommand::SetRecordArmAll { armed: true },
+            MixCommand::AddInstrument { name: None },
+            MixCommand::RemoveInstrument { id },
+            MixCommand::SetInstrumentVoice {
+                id,
+                soundfont: None,
+                polyphony: 64,
+                effects: true,
+            },
+            MixCommand::SetInstrumentPerformance {
+                id,
+                name: "Rhodes".into(),
+                bank: 0,
+                program: 4,
+                port: None,
+                midi_channel: None,
+            },
+            MixCommand::SetInstrumentSplits {
+                id,
+                splits: Vec::new(),
+            },
+            MixCommand::AddInstrumentStrips { id },
+            MixCommand::SetOutputPatch {
+                patch: out_patch(OutputSource::Master, 1, 7),
+            },
+            MixCommand::ClearOutputPatch { jack: jack(1) },
+            MixCommand::SetOutputTap {
+                jack: jack(1),
+                tap: SendTap::PostFader,
+            },
+        ]
     }
 
     #[test]

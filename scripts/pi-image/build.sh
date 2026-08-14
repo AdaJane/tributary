@@ -40,6 +40,12 @@ set -euo pipefail
 # lines (sha256 from the published .img.xz.sha256 sidecar), then rehearse
 # with `just pi-image` before tagging a release.
 readonly BASE_URL="https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2026-06-19/2026-06-18-raspios-trixie-arm64-lite.img.xz"
+# Boards the flasher offers this image. Pi 4 is the floor because the
+# real-time path lives or dies on USB jitter, and a Pi 4 puts its xHCI on
+# its own PCIe lane where a Pi 3 or Zero 2 W shares one USB2 hub with
+# ethernet. (The Zero 2 W was never in this list; the README used to claim
+# it anyway.)
+readonly IMAGER_DEVICES='["pi4-64bit", "pi5-64bit"]'
 readonly BASE_SHA256="acff736ca7945e3b305f07cda4abdb870910e12634991da69783611756e381b3"
 
 # The appliance identity and audio stack. dbus-user-session is named
@@ -325,6 +331,117 @@ sed -i 's/^WirelessEnabled=.*/WirelessEnabled=true/' \
 echo "net.ipv4.ip_unprivileged_port_start=80" \
     > "$ROOT/etc/sysctl.d/80-tributary.conf"
 
+echo "==> real-time audio tuning"
+# NONE of this makes the box faster on its own. It removes the three things
+# that stop a correctly-written audio thread from meeting a 5 ms deadline:
+# no permission to ask for real-time scheduling, a CPU that idles at 600 MHz
+# until it notices, and a USB stack batching 8 ms of audio into one URB.
+#
+# The daemon still has to ASK. `tribd` probes these limits once at boot and
+# reports what it actually got — see `realtime::posture`.
+
+# 1. Permission. Granted to the SERVICE USER, not to @audio: `audio`
+#    membership is how this image grants raw ALSA device access, and
+#    putting a second, unrelated promise on the same name means neither can
+#    be reasoned about. The numbers match pipewire-bin's own drop-in, which
+#    is a defensible thing to point at.
+cat > "$ROOT/etc/security/limits.d/95-tributary-audio.conf" <<EOF
+# Real-time audio for tribd. Without rtprio, sched_setscheduler(SCHED_FIFO)
+# returns EPERM and the daemon runs SCHED_OTHER — which it says out loud
+# rather than pretending otherwise.
+$TRIB_USER  -  rtprio   95
+$TRIB_USER  -  nice     -19
+$TRIB_USER  -  memlock  4194304
+EOF
+chmod 644 "$ROOT/etc/security/limits.d/95-tributary-audio.conf"
+
+# 2. The priority LADDER, and the trap it exists for. tribd is a systemd
+#    USER unit under this account and PipeWire runs as the SAME user in the
+#    SAME session — so the rtprio limit above is necessarily granted to
+#    PipeWire too, whose data thread defaults to rt.prio 88. Left alone it
+#    would preempt the audio thread at 10 and undo the whole exercise.
+#    Lowering PipeWire is the right half to move: on this box it is fenced
+#    off the real-time card and is not in the signal path at all.
+mkdir -p "$ROOT/etc/pipewire/pipewire.conf.d"
+cat > "$ROOT/etc/pipewire/pipewire.conf.d/99-tributary.conf" <<'EOF'
+# Ladder: USB IRQ threads (~50) > tribd engine (10) > PipeWire (5).
+context.properties = {
+    default.clock.rate          = 48000
+    # Every rate the console offers. If the graph is pinned at 48k while
+    # the engine is configured to 96k, pipewire-pulse inserts a resampler
+    # SILENTLY — degrading the capture this box exists to make.
+    default.clock.allowed-rates = [ 44100 48000 96000 ]
+    default.clock.quantum       = 256
+    default.clock.min-quantum   = 128
+    default.clock.max-quantum   = 1024
+}
+context.modules = [
+    { name = libpipewire-module-rt
+      args = {
+          nice.level = -11
+          rt.prio = 5
+      }
+      flags = [ ifexists nofail ] }
+]
+EOF
+chmod 644 "$ROOT/etc/pipewire/pipewire.conf.d/99-tributary.conf"
+
+# 3. The CPU governor. Raspberry Pi OS defaults to `ondemand`, which
+#    samples every 10-20 ms; a 256-frame period at 48 kHz is 5.33 ms, so a
+#    burst that starts at 600 MHz misses periods while the governor ramps.
+#    A few hundred mW is the right trade for a box whose only job is not to
+#    click. A script rather than tmpfiles.d because the policy count varies
+#    by SoC and a glob write silently no-ops when the path shape changes.
+install -m 755 "$HERE/cpu-governor.sh" "$ROOT/usr/local/lib/tributary/cpu-governor.sh"
+install -m 644 "$HERE/tributary-performance.service" \
+    "$ROOT/etc/systemd/system/tributary-performance.service"
+mkdir -p "$ROOT/etc/systemd/system/multi-user.target.wants"
+ln -sf ../tributary-performance.service \
+    "$ROOT/etc/systemd/system/multi-user.target.wants/tributary-performance.service"
+
+# 4. USB audio: NOTHING to set, and that is a finding rather than an
+#    omission. The tuning everyone reaches for is
+#    `options snd_usb_audio nrpacks=1`, and `nrpacks` DOES NOT EXIST on this
+#    kernel — verified twice: it is absent from
+#    /sys/module/snd_usb_audio/parameters on a modern host, and the
+#    modparams check below rejected it against the module this image
+#    actually ships. Its replacement, `lowlatency`, is already Y by default.
+#    Shipping the line anyway would have been pure cargo cult that the
+#    kernel silently ignores.
+#
+#    `implicit_fb` and `quirk_flags` are per-device, and guessing one breaks
+#    hardware nobody here can test. So: measure the xrun rate on the box
+#    first (the daemon reports it), and only then reach for a knob.
+#
+#    The check stays wired regardless, so the moment anyone DOES add
+#    /etc/modprobe.d/tributary-usb-audio.conf it is guarded from birth.
+
+# 5. USB autosuspend off for audio interfaces. `usbcore` is built into the
+#    Pi kernel, so modprobe.d cannot reach `usbcore.autosuspend` — a udev
+#    rule is the only build-time knob. Its own file rather than an addition
+#    to 99-tributary-usb.rules: that one is about block devices and mounting,
+#    and a second unrelated promise inside it widens its blast radius.
+cat > "$ROOT/etc/udev/rules.d/98-tributary-usb-audio.rules" <<'EOF'
+# An interface that autosuspends between takes glitches on the first buffer
+# after it resumes. 0101 is the USB audio class.
+ACTION=="add", SUBSYSTEM=="usb", ENV{ID_USB_INTERFACES}=="*:0101??:*", \
+  ATTR{power/control}="on"
+EOF
+chmod 644 "$ROOT/etc/udev/rules.d/98-tributary-usb-audio.rules"
+
+# 6. Swap stays enabled — this box has no login account and a hard OOM is
+#    worse than a slow page. Leaning away from it is free and reversible.
+echo "vm.swappiness=10" >> "$ROOT/etc/sysctl.d/80-tributary.conf"
+#
+# Deliberate NON-changes, recorded so nobody "improves" them later:
+#   * kernel.sched_rt_runtime_us stays at 950000. It is the throttle that
+#     stops a runaway RT thread wedging a box you cannot ssh into.
+#   * No isolcpus and no threadirqs: both are kernel command line, and
+#     cmdline.txt is sha-pinned here to protect the first-boot resize token.
+#     threadirqs is also unproven for USB audio at a >=5 ms period — measure
+#     the xrun rate first, and only then spend that risk.
+#   * No PREEMPT_RT kernel: this image stays on the pinned stock base.
+
 echo "==> USB automount"
 # Raspberry Pi OS Lite ships no automounter. udisks2 is in the base image
 # and runs, but it only mounts when a client calls Filesystem.Mount and a
@@ -470,6 +587,43 @@ v grep -q '^net.ipv4.ip_unprivileged_port_start=80' "$ROOT/etc/sysctl.d/80-tribu
 # USB automount. Without the rule a stick never reaches the mount table and
 # the console's destination list stays blind to it — silently, which is the
 # failure this whole path exists to prevent.
+# --- real-time tuning
+LIMITS="$ROOT/etc/security/limits.d/95-tributary-audio.conf"
+v test -f "$LIMITS"
+v grep -qE "^${TRIB_USER}[[:space:]]+-[[:space:]]+rtprio[[:space:]]+95\$" "$LIMITS"
+v grep -qE "^${TRIB_USER}[[:space:]]+-[[:space:]]+memlock" "$LIMITS"
+# The MECHANISM, not the file. limits.d only reaches a lingering user
+# manager if pam_limits is in systemd-user's stack; a base bump that dropped
+# it would make every line above silently inert and nothing else here would
+# notice.
+PAM_VERDICT="$(sh "$HERE/pam-limits.sh" --print-limits-check "$ROOT")"
+[ "$PAM_VERDICT" = ok ] \
+    || fail "verify: rtprio limits would not reach the service session — $PAM_VERDICT"
+
+# The priority ladder. tribd asks for 10 and PipeWire defaults to 88 under
+# the SAME user in the SAME session — without this drop-in the rtprio grant
+# above hands PipeWire the power to preempt the audio thread.
+PW_CONF="$ROOT/etc/pipewire/pipewire.conf.d/99-tributary.conf"
+v test -f "$PW_CONF"
+v grep -qE '^[[:space:]]*rt\.prio[[:space:]]*=[[:space:]]*5$' "$PW_CONF"
+v grep -q 'allowed-rates' "$PW_CONF"
+
+v test -x "$ROOT/usr/local/lib/tributary/cpu-governor.sh"
+v test -f "$ROOT/etc/systemd/system/tributary-performance.service"
+v test -L "$ROOT/etc/systemd/system/multi-user.target.wants/tributary-performance.service"
+
+# The kernel ignores a mistyped module parameter in SILENCE, so assert that
+# every parameter we set is one the shipped module actually accepts.
+SND_USB_KO="$(compgen -G "$ROOT/lib/modules/*/kernel/sound/usb/snd-usb-audio.ko*" | head -1 || true)"
+MODPARAM_VERDICT="$(sh "$HERE/modparams.sh" --check "${SND_USB_KO:-/nonexistent}" \
+    "$ROOT/etc/modprobe.d/tributary-usb-audio.conf")"
+[ "$MODPARAM_VERDICT" = ok ] || fail "verify: $MODPARAM_VERDICT"
+
+v grep -q 'ATTR{power/control}="on"' "$ROOT/etc/udev/rules.d/98-tributary-usb-audio.rules"
+v grep -q '^vm.swappiness=10$' "$ROOT/etc/sysctl.d/80-tributary.conf"
+# The appliance takes its card outright; the shared layer would leave it at
+# the desktop's latency with nobody able to tell.
+v grep -q '^layer = "exclusive"$' "$ROOT/home/$TRIB_USER/config/tribd.toml"
 USB_RULE="$ROOT/etc/udev/rules.d/99-tributary-usb.rules"
 v test -f "$USB_RULE"
 v test -x "$ROOT/usr/local/lib/tributary/usb-mount.sh"
@@ -616,7 +770,7 @@ cat > "${OUT%.img.xz}-imager.json" <<EOF
       "image_download_sha256": "$DOWNLOAD_SHA256",
       "extract_size": $EXTRACT_SIZE,
       "extract_sha256": "$EXTRACT_SHA256",
-      "devices": ["pi3-64bit", "pi4-64bit", "pi5-64bit"],
+      "devices": $IMAGER_DEVICES,
       "init_format": "cloudinit-rpi"
     }
   ]

@@ -6,6 +6,14 @@ import type { MixerState, StateDelta } from '../ws/messages';
 
 /** A delta for a target this mirror doesn't know is stale news racing a
  * snapshot — dropped, and the snapshot that follows wins. */
+function sameJack(
+  patch: { device?: string | null; channel: number },
+  device: string | null,
+  channel: number,
+): boolean {
+  return (patch.device ?? null) === device && patch.channel === channel;
+}
+
 export function mergeDelta(state: MixerState, delta: StateDelta): MixerState {
   const strip = (id: number, patch: (s: MixerState['strips'][number]) => void): MixerState => {
     const strips = state.strips.map((s) => {
@@ -175,6 +183,30 @@ export function mergeDelta(state: MixerState, delta: StateDelta): MixerState {
       return {
         ...state,
         strips: state.strips.map((s) => ({ ...s, record_arm: delta.armed })),
+      };
+    // Keyed by the JACK on all three: one jack holds one feed, so a patch
+    // replaces rather than joins.
+    case 'output_patched': {
+      const others = (state.outputs ?? []).filter(
+        (o) => !sameJack(o, delta.patch.device ?? null, delta.patch.channel),
+      );
+      return { ...state, outputs: [...others, delta.patch] };
+    }
+    case 'output_unpatched':
+      return {
+        ...state,
+        outputs: (state.outputs ?? []).filter(
+          (o) => !sameJack(o, delta.jack.device ?? null, delta.jack.channel),
+        ),
+      };
+    case 'output_tap':
+      return {
+        ...state,
+        outputs: (state.outputs ?? []).map((o) =>
+          sameJack(o, delta.jack.device ?? null, delta.jack.channel)
+            ? { ...o, tap: delta.tap }
+            : o,
+        ),
       };
   }
   return state;

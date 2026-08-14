@@ -252,6 +252,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/outputs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The output patch bay document: every output device the OS reports,
+         *     joined with what the daemon has open and what the console has patched.
+         */
+        get: operations["list_outputs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/outputs/patch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Patch, unpatch, or re-tap one output channel. */
+        put: operations["patch_output"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/outputs/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * The Refresh button: re-enumerate, retry every wanted-but-unopened or
+         *     failed output, and return the fresh document.
+         */
+        post: operations["refresh_outputs"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions": {
         parameters: {
             query?: never;
@@ -1347,6 +1404,19 @@ export interface components {
             id: components["schemas"]["InstrumentId"];
             /** @enum {string} */
             op: "add_instrument_strips";
+        } | {
+            /** @enum {string} */
+            op: "set_output_patch";
+            patch: components["schemas"]["OutputPatch"];
+        } | {
+            jack: components["schemas"]["OutputJack"];
+            /** @enum {string} */
+            op: "clear_output_patch";
+        } | {
+            jack: components["schemas"]["OutputJack"];
+            /** @enum {string} */
+            op: "set_output_tap";
+            tap: components["schemas"]["SendTap"];
         };
         /**
          * @description The whole console document: the single authoritative mix state the daemon
@@ -1363,6 +1433,12 @@ export interface components {
              */
             instruments?: components["schemas"]["InstrumentState"][];
             master: components["schemas"]["MasterState"];
+            /**
+             * @description The output patch bay. Same reason for the position as `instruments`
+             *     above, and `default` for the same reason: a manifest written before
+             *     outputs existed carries no key at all.
+             */
+            outputs?: components["schemas"]["OutputPatch"][];
             strips: components["schemas"]["StripState"][];
         };
         MonitorBody: {
@@ -1385,6 +1461,73 @@ export interface components {
         NewStrip: {
             name?: string | null;
         };
+        /**
+         * @description One row of the output patch bay device document. The mirror of
+         *     [`DeviceReport`], carrying the same honest-failure fields for the same
+         *     reasons — read the other way round.
+         */
+        OutputDeviceReport: {
+            /** @description The OS default output. */
+            active: boolean;
+            /**
+             * Format: int32
+             * @description What the device exposes RIGHT NOW. 0 = unknown (absent, never
+             *     enumerated this boot).
+             */
+            channels: number;
+            error?: string | null;
+            label?: string | null;
+            /**
+             * Format: int32
+             * @description How many of `channels` the monitor has taken and the patch bay may
+             *     not offer.
+             */
+            monitor_channels: number;
+            /**
+             * @description The sink layer muted this output. It still opens, still streams,
+             *     and the room hears nothing — and an output has no meter to show it,
+             *     so this field is the only place a dead PA is explainable.
+             */
+            muted: boolean;
+            name: string;
+            /** Format: int64 */
+            overruns: number;
+            /** @description Some patch references it. */
+            patched: boolean;
+            status: components["schemas"]["DeviceStatus"];
+            /** Format: int64 */
+            underruns: number;
+            /** Format: int32 */
+            volume_percent?: number | null;
+            /**
+             * Format: int32
+             * @description Worst engine block this second, in microseconds. 0 where the
+             *     backend does not measure it.
+             */
+            worst_block_us: number;
+            /**
+             * Format: int64
+             * @description ALSA xruns recovered on this device. Always 0 off the real-time
+             *     backend, which is the only one that opens a `hw:` PCM.
+             */
+            xruns: number;
+        };
+        /**
+         * @description A physical output channel — the identity of a patch.
+         *
+         *     One jack, at most one patch: the mirror of one strip, at most one
+         *     input. An output carries one signal, and summing two sources onto it
+         *     would make this a mixer rather than a patch bay.
+         */
+        OutputJack: {
+            /** Format: int32 */
+            channel: number;
+            /**
+             * @description `None` = the system default output — the meaning
+             *     `InputAssign::Device { device: None }` already has on the way in.
+             */
+            device?: string | null;
+        };
         /** @description How an instrument reaches the desk. */
         OutputLayout: {
             /** @enum {string} */
@@ -1396,6 +1539,112 @@ export interface components {
             /** @enum {string} */
             kind: "custom";
             splits: components["schemas"]["InstrumentSplit"][];
+        };
+        /** @description One direct out: a point in the console wired to a jack. */
+        OutputPatch: {
+            /** Format: int32 */
+            channel: number;
+            /** @description See [`OutputJack::device`]. */
+            device?: string | null;
+            /**
+             * @description Declared last so the emitted TOML reads scalars-then-table, the
+             *     shape every other record in the manifest already has.
+             */
+            source: components["schemas"]["OutputSource"];
+            /**
+             * Format: int32
+             * @description Channel within the source: 0 for a strip or an aux bus, 0 or 1 for
+             *     a group bus or the master.
+             */
+            source_channel: number;
+            /**
+             * @description Where the signal is tapped.
+             *
+             *     Pre-fader by default, which in this engine means post-gain,
+             *     post-EQ, **pre-mute and pre-fader** — the same point the meter and
+             *     record taps use. A direct out is for the monitor engineer, and a
+             *     front-of-house fader move must not change what they get.
+             */
+            tap: components["schemas"]["SendTap"];
+        };
+        /** @description One patch, joined with what the daemon knows about where it goes. */
+        OutputPatchReport: {
+            /** Format: int32 */
+            channel: number;
+            device?: string | null;
+            /**
+             * @description The daemon's own sentence, in the console's voice. `None` when
+             *     there is nothing to explain.
+             */
+            reason?: string | null;
+            status: components["schemas"]["OutputPatchStatus"];
+        };
+        /**
+         * @description A change to one output channel.
+         *
+         *     A tagged envelope rather than a nullable field, because the identity
+         *     here is TWO values: a body naming a patch and saying `null` in the same
+         *     breath would be representable, and would have to be refused at runtime.
+         */
+        OutputPatchRequest: {
+            /** @enum {string} */
+            op: "patch";
+            patch: components["schemas"]["OutputPatch"];
+        } | {
+            jack: components["schemas"]["OutputJack"];
+            /** @enum {string} */
+            op: "unpatch";
+        } | {
+            jack: components["schemas"]["OutputJack"];
+            /** @enum {string} */
+            op: "tap";
+            tap: components["schemas"]["SendTap"];
+        };
+        /**
+         * @description Why one patch is or is not carrying signal.
+         * @enum {string}
+         */
+        OutputPatchStatus: "live" | "ready" | "missing" | "failed";
+        /**
+         * @description What feeds an output channel.
+         *
+         *     The same three cases as [`crate::FaderTarget`] and [`crate::MeterKey`],
+         *     and a third type on purpose: those name what a level command moves and
+         *     what a peak describes. This names what leaves the box. They agree
+         *     today; nothing makes them agree tomorrow — and calling this one
+         *     "fader target" would put the word fader into the wire shape of a tap
+         *     that is deliberately pre-fader.
+         */
+        OutputSource: {
+            id: components["schemas"]["StripId"];
+            /** @enum {string} */
+            kind: "strip";
+        } | {
+            id: components["schemas"]["BusId"];
+            /** @enum {string} */
+            kind: "bus";
+        } | {
+            /** @enum {string} */
+            kind: "master";
+        };
+        /**
+         * @description The whole output patch bay in one read — the document half and the
+         *     machine half together.
+         *
+         *     One document for the reason `InstrumentsDto` is one document: pulling
+         *     an interface changes a patch's status, and split reads would let the
+         *     console render a pair that never existed together.
+         */
+        OutputsDto: {
+            devices: components["schemas"]["OutputDeviceReport"][];
+            patches: components["schemas"]["OutputPatch"][];
+            /** @description Index-aligned with `patches`. */
+            reports: components["schemas"]["OutputPatchReport"][];
+            /**
+             * @description Whether this backend can drive patchable outputs at all. False
+             *     makes every mutation a 501 rather than a silent no-op.
+             */
+            supported: boolean;
         };
         /** @description One profile a device's card can be switched into. */
         ProfileReport: {
@@ -1664,6 +1913,12 @@ export interface components {
             id: components["schemas"]["StripId"];
             /** @enum {string} */
             kind: "strip_removed";
+            /**
+             * @description The jacks that went quiet with it. A structural change, so a
+             *     snapshot follows — but the console wants to say what it just
+             *     did, and "removing Ch 3 also unpatched OUT 5" is that sentence.
+             */
+            unpatched_outputs?: components["schemas"]["OutputJack"][];
         } | {
             dest: components["schemas"]["BusId"];
             /** @enum {string} */
@@ -1696,6 +1951,7 @@ export interface components {
             id: components["schemas"]["BusId"];
             /** @enum {string} */
             kind: "bus_removed";
+            unpatched_outputs?: components["schemas"]["OutputJack"][];
         } | {
             armed: boolean;
             /** @enum {string} */
@@ -1723,6 +1979,19 @@ export interface components {
             id: components["schemas"]["InstrumentId"];
             /** @enum {string} */
             kind: "instrument_strips_added";
+        } | {
+            /** @enum {string} */
+            kind: "output_patched";
+            patch: components["schemas"]["OutputPatch"];
+        } | {
+            jack: components["schemas"]["OutputJack"];
+            /** @enum {string} */
+            kind: "output_unpatched";
+        } | {
+            jack: components["schemas"]["OutputJack"];
+            /** @enum {string} */
+            kind: "output_tap";
+            tap: components["schemas"]["SendTap"];
         };
         /**
          * Format: int32
@@ -2349,6 +2618,98 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    list_outputs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Output devices joined with patch state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OutputsDto"];
+                };
+            };
+        };
+    };
+    patch_output: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OutputPatchRequest"];
+            };
+        };
+        responses: {
+            /** @description The patch bay after the change */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OutputsDto"];
+                };
+            };
+            /** @description No such source, or no patch on that jack */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused while recording */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Out of range */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description This backend has no patchable outputs */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    refresh_outputs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Outputs re-enumerated and reconciled */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OutputsDto"];
+                };
             };
         };
     };

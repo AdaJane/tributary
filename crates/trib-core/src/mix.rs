@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use crate::bus::BusState;
+use crate::bus::{BusKind, BusState};
 use crate::fx::FxState;
 use crate::id::{BusId, InstrumentId, StripId};
 use crate::instrument::InstrumentState;
+use crate::output::{OutputJack, OutputPatch, OutputSource};
 use crate::strip::StripState;
 
 /// The master output section: one stereo fader and its own record arm.
@@ -37,6 +38,11 @@ pub struct MixerState {
     /// every manifest unwritable.
     #[serde(default)]
     pub instruments: Vec<InstrumentState>,
+    /// The output patch bay. Same reason for the position as `instruments`
+    /// above, and `default` for the same reason: a manifest written before
+    /// outputs existed carries no key at all.
+    #[serde(default)]
+    pub outputs: Vec<OutputPatch>,
     pub master: MasterState,
 }
 
@@ -51,6 +57,29 @@ impl MixerState {
 
     pub fn instrument(&self, id: InstrumentId) -> Option<&InstrumentState> {
         self.instruments.iter().find(|i| i.id == id)
+    }
+
+    /// The patch on a jack, if any. A jack holds at most one.
+    pub fn output(&self, jack: &OutputJack) -> Option<&OutputPatch> {
+        self.outputs.iter().find(|o| o.is(jack))
+    }
+
+    /// How many channels a source offers, or `None` if it is not in the
+    /// document. This is the wall that stops `source_channel: 1` on a mono
+    /// aux resolving into whatever sits next to it.
+    pub fn source_channels(&self, source: &OutputSource) -> Option<u16> {
+        match source {
+            // A strip is mono: pan places it in the mix, and a direct out
+            // is taken before that.
+            OutputSource::Strip { id } => self.strip(*id).map(|_| 1),
+            OutputSource::Bus { id } => self.bus(*id).map(|bus| match bus.kind {
+                // A group is a panned stereo pair; an aux collects mono
+                // sends, so only its left side ever carries anything.
+                BusKind::Group => 2,
+                BusKind::Aux => 1,
+            }),
+            OutputSource::Master => Some(2),
+        }
     }
 
     /// The next unused strip id. Ids are never reused within a project so a
@@ -95,6 +124,14 @@ mod tests {
                 return_level_db: -6.0,
             }],
             instruments: vec![InstrumentState::new(InstrumentId(0), "Rhodes".into())],
+            outputs: vec![OutputPatch::new(
+                OutputSource::Master,
+                0,
+                OutputJack {
+                    device: Some("Scarlett".into()),
+                    channel: 2,
+                },
+            )],
             master: MasterState::default(),
         }
     }
@@ -119,6 +156,16 @@ mod tests {
     }
 
     #[test]
+    fn a_document_written_before_outputs_still_loads() {
+        let mut state = fixture();
+        state.outputs.clear();
+        let mut json = serde_json::to_value(&state).unwrap();
+        json.as_object_mut().unwrap().remove("outputs");
+        let back: MixerState = serde_json::from_value(json).unwrap();
+        assert_eq!(back, state);
+    }
+
+    #[test]
     fn a_document_round_trips_through_toml_with_its_instruments() {
         // toml refuses a value after a table, so `instruments` sitting
         // between the other arrays and `master` is load-bearing ordering,
@@ -126,6 +173,48 @@ mod tests {
         let state = fixture();
         let back: MixerState = toml::from_str(&toml::to_string(&state).unwrap()).unwrap();
         assert_eq!(back, state);
+    }
+
+    #[test]
+    fn an_empty_document_round_trips_through_toml_too() {
+        // The branch nothing has ever exercised: an EMPTY `Vec` serializes
+        // as an inline `outputs = []` where a non-empty one becomes
+        // `[[outputs]]`. The inline form is a *value*, and a value after a
+        // table is exactly what toml refuses — so the empty case can break
+        // on its own, and the full fixture above would never notice.
+        let state = MixerState::default();
+        let text = toml::to_string(&state).unwrap();
+        let back: MixerState = toml::from_str(&text).unwrap();
+        assert_eq!(back, state);
+    }
+
+    #[test]
+    fn source_channels_knows_how_wide_every_source_is() {
+        let mut state = fixture();
+        state.buses = vec![
+            BusState::new(BusId(0), BusKind::Group, "Band".into()),
+            BusState::new(BusId(1), BusKind::Aux, "Wedge".into()),
+        ];
+        assert_eq!(state.source_channels(&OutputSource::Master), Some(2));
+        assert_eq!(
+            state.source_channels(&OutputSource::Strip { id: StripId(0) }),
+            Some(1),
+            "a strip is mono: pan places it in the mix, not on the jack"
+        );
+        assert_eq!(
+            state.source_channels(&OutputSource::Bus { id: BusId(0) }),
+            Some(2)
+        );
+        assert_eq!(
+            state.source_channels(&OutputSource::Bus { id: BusId(1) }),
+            Some(1),
+            "an aux collects mono sends, so only its left side carries"
+        );
+        assert_eq!(
+            state.source_channels(&OutputSource::Strip { id: StripId(9) }),
+            None,
+            "a source that is not in the document has no width at all"
+        );
     }
 
     #[test]

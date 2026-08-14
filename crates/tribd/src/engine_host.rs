@@ -186,6 +186,17 @@ pub enum ControlMsg {
     InputSlotsChanged {
         slots: trib_engine::InputSlots,
     },
+    /// From the device orchestrator: output devices opened/closed, so
+    /// direct-out patches resolve differently now.
+    ///
+    /// Unlike a slot map this is safe to install mid-take — an output
+    /// patch is downstream of every record tap. It still recompiles, and a
+    /// recompile clears FX tails into the take, so it waits like its
+    /// sibling does. The difference is only that the wait is caution
+    /// rather than correctness.
+    OutputSlotsChanged {
+        slots: trib_engine::OutputSlots,
+    },
     /// From the instrument host: a rack has finished loading. Handed
     /// straight to the engine — unlike a slot map it needs no recompile,
     /// because instrument patches resolve by position and the positions
@@ -426,6 +437,12 @@ impl ControlHandle {
         let _ = self
             .tx
             .blocking_send(ControlMsg::InputSlotsChanged { slots });
+    }
+
+    pub fn output_slots_changed_blocking(&self, slots: trib_engine::OutputSlots) {
+        let _ = self
+            .tx
+            .blocking_send(ControlMsg::OutputSlotsChanged { slots });
     }
 
     /// Called from the instrument host thread once a rack has loaded.
@@ -764,6 +781,18 @@ fn wanted_devices(state: &MixerState) -> std::collections::BTreeSet<Option<Strin
         .collect()
 }
 
+/// The output device identities the console references — what the
+/// orchestrator must keep open. `None` = the system default output.
+///
+/// The exact mirror of [`wanted_devices`], including the part that is easy
+/// to get wrong: a device nothing patches is NOT wanted. The monitor pair
+/// does not appear here because it is not a patch — the backend puts it
+/// where it belongs without being asked, so listing the default output
+/// unconditionally would hold a second stream open on it for ever.
+fn wanted_outputs(state: &MixerState) -> std::collections::BTreeSet<Option<String>> {
+    state.outputs.iter().map(|o| o.device.clone()).collect()
+}
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -802,14 +831,20 @@ async fn control_loop(
     // Patches resolve against what the device orchestrator has actually
     // opened — empty until its first slot map arrives.
     let mut input_slots = trib_engine::InputSlots::default();
+    // The output plane, likewise. It starts holding only the monitor pair
+    // — that one is not a patch and exists before any document does.
+    let mut output_slots = trib_engine::OutputSlots::with_monitor();
+    let mut pending_output_slots: Option<trib_engine::OutputSlots> = None;
     // Slot changes landing mid-take wait: record taps are bound to the
     // running graph, so the swap happens at RecordStop.
     let mut pending_slots: Option<trib_engine::InputSlots> = None;
     // Tell the orchestrator what the loaded project wants, and again on
     // every change.
     let mut last_wanted = wanted_devices(&state);
+    let mut last_wanted_outputs = wanted_outputs(&state);
     if let Some(devices) = &devices {
         devices.wanted_changed(last_wanted.clone());
+        devices.wanted_outputs_changed(last_wanted_outputs.clone());
     }
     // Same for the rack: the loaded session may already carry instruments,
     // and they must be loading before anyone presses a key.
@@ -832,7 +867,9 @@ async fn control_loop(
                 config: &config,
                 meter_keys: &meter_keys,
                 input_slots: &input_slots,
+                output_slots: &output_slots,
                 last_wanted: &mut last_wanted,
+                last_wanted_outputs: &mut last_wanted_outputs,
                 devices: &devices,
                 last_instruments: &mut last_instruments,
                 instruments: &instruments,
@@ -850,86 +887,105 @@ async fn control_loop(
                 command,
                 ack,
                 reply,
-            } => match apply(&state, command) {
-                Ok((next, delta, need)) => {
-                    // The console layout is frozen while tape rolls: track
-                    // taps are bound to the running graph's strip order.
-                    if need == ReconcileNeed::Topology && ctl.recording() {
-                        let _ = reply.send(Err(MixError::Unsupported(
-                            "stop recording before changing the console layout",
-                        )));
-                        continue;
-                    }
-                    state = next;
-                    let wanted = wanted_devices(&state);
-                    if wanted != last_wanted {
-                        last_wanted = wanted.clone();
-                        if let Some(devices) = &devices {
-                            devices.wanted_changed(wanted);
+            } => {
+                // Asked BEFORE the reducer consumes the command, and asked
+                // of the command rather than of `ReconcileNeed`: "does the
+                // engine need a recompile" and "does the tape refuse this"
+                // are two questions that happen to agree today. An output
+                // patch is the case that shows they are different — it
+                // cannot change one recorded sample, and is still refused,
+                // because the recompile it costs would reseed every
+                // smoother and clear every FX tail into the take.
+                let frozen = command.stops_the_tape();
+                match apply(&state, command) {
+                    Ok((next, delta, need)) => {
+                        if frozen && ctl.recording() {
+                            let _ = reply.send(Err(MixError::Unsupported(
+                                "stop recording before changing the console layout",
+                            )));
+                            continue;
                         }
-                    }
-                    // The rack is rebuilt from the document itself rather
-                    // than from a diff: what the host must load is exactly
-                    // what the console says, and comparing whole documents
-                    // is cheaper than deciding which field mattered.
-                    if state.instruments != last_instruments {
-                        last_instruments = state.instruments.clone();
-                        if let Some(instruments) = &instruments {
-                            instruments.instruments_changed(last_instruments.clone());
-                        }
-                    }
-                    match need {
-                        ReconcileNeed::ParamOnly => {
-                            for engine_cmd in param_commands(&params, &delta, config.sample_rate) {
-                                push(&mut cmd_tx, engine_cmd);
+                        state = next;
+                        let wanted = wanted_devices(&state);
+                        if wanted != last_wanted {
+                            last_wanted = wanted.clone();
+                            if let Some(devices) = &devices {
+                                devices.wanted_changed(wanted);
                             }
-                            hub.publish(
-                                Channel::Mixer,
-                                &ServerMessage::StateChanged {
-                                    delta: delta.clone(),
-                                    ack,
-                                },
-                            );
                         }
-                        // Structural change: recompile, swap, and resync
-                        // every client with the whole document.
-                        ReconcileNeed::Topology => {
-                            let compiled = compile(
-                                &state,
-                                config.sample_rate,
-                                config.block_size,
-                                &input_slots,
-                            );
-                            params = compiled.params;
-                            let _ = meter_keys.send(compiled.meter_keys);
-                            push(
-                                &mut cmd_tx,
-                                EngineCommand::SwapGraph {
-                                    graph: compiled.graph,
-                                },
-                            );
-                            hub.publish(
-                                Channel::Mixer,
-                                &ServerMessage::MixerSnapshot {
-                                    state: state.clone(),
-                                },
-                            );
+                        let wanted_out = wanted_outputs(&state);
+                        if wanted_out != last_wanted_outputs {
+                            last_wanted_outputs = wanted_out.clone();
+                            if let Some(devices) = &devices {
+                                devices.wanted_outputs_changed(wanted_out);
+                            }
                         }
+                        // The rack is rebuilt from the document itself rather
+                        // than from a diff: what the host must load is exactly
+                        // what the console says, and comparing whole documents
+                        // is cheaper than deciding which field mattered.
+                        if state.instruments != last_instruments {
+                            last_instruments = state.instruments.clone();
+                            if let Some(instruments) = &instruments {
+                                instruments.instruments_changed(last_instruments.clone());
+                            }
+                        }
+                        match need {
+                            ReconcileNeed::ParamOnly => {
+                                for engine_cmd in
+                                    param_commands(&params, &delta, config.sample_rate)
+                                {
+                                    push(&mut cmd_tx, engine_cmd);
+                                }
+                                hub.publish(
+                                    Channel::Mixer,
+                                    &ServerMessage::StateChanged {
+                                        delta: delta.clone(),
+                                        ack,
+                                    },
+                                );
+                            }
+                            // Structural change: recompile, swap, and resync
+                            // every client with the whole document.
+                            ReconcileNeed::Topology => {
+                                let compiled = compile(
+                                    &state,
+                                    config.sample_rate,
+                                    config.block_size,
+                                    &input_slots,
+                                    &output_slots,
+                                );
+                                params = compiled.params;
+                                let _ = meter_keys.send(compiled.meter_keys);
+                                push(
+                                    &mut cmd_tx,
+                                    EngineCommand::SwapGraph {
+                                        graph: compiled.graph,
+                                    },
+                                );
+                                hub.publish(
+                                    Channel::Mixer,
+                                    &ServerMessage::MixerSnapshot {
+                                        state: state.clone(),
+                                    },
+                                );
+                            }
+                        }
+                        // Debounced autosave: only the newest generation lands.
+                        save_generation += 1;
+                        let generation = save_generation;
+                        let tx = self_tx.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(AUTOSAVE_DEBOUNCE).await;
+                            let _ = tx.send(ControlMsg::Autosave { generation }).await;
+                        });
+                        let _ = reply.send(Ok(delta));
                     }
-                    // Debounced autosave: only the newest generation lands.
-                    save_generation += 1;
-                    let generation = save_generation;
-                    let tx = self_tx.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(AUTOSAVE_DEBOUNCE).await;
-                        let _ = tx.send(ControlMsg::Autosave { generation }).await;
-                    });
-                    let _ = reply.send(Ok(delta));
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
                 }
-                Err(e) => {
-                    let _ = reply.send(Err(e));
-                }
-            },
+            }
             ControlMsg::Snapshot { reply } => {
                 let _ = reply.send(state.clone());
             }
@@ -968,11 +1024,21 @@ async fn control_loop(
                         let _ = tokio::task::spawn_blocking(move || rec.writer.join()).await;
                         let _ = tx.send(ControlMsg::TakeFinalized).await;
                     });
-                    // Device changes that arrived mid-take land now.
+                    // Device changes that arrived mid-take land now — both
+                    // directions, in one recompile rather than two.
+                    if let Some(slots) = pending_output_slots.take() {
+                        output_slots = slots;
+                        pending_slots.get_or_insert_with(|| input_slots.clone());
+                    }
                     if let Some(slots) = pending_slots.take() {
                         input_slots = slots;
-                        let compiled =
-                            compile(&state, config.sample_rate, config.block_size, &input_slots);
+                        let compiled = compile(
+                            &state,
+                            config.sample_rate,
+                            config.block_size,
+                            &input_slots,
+                            &output_slots,
+                        );
                         params = compiled.params;
                         let _ = meter_keys.send(compiled.meter_keys);
                         push(
@@ -1128,8 +1194,13 @@ async fn control_loop(
                     pending_slots = Some(slots);
                 } else {
                     input_slots = slots;
-                    let compiled =
-                        compile(&state, config.sample_rate, config.block_size, &input_slots);
+                    let compiled = compile(
+                        &state,
+                        config.sample_rate,
+                        config.block_size,
+                        &input_slots,
+                        &output_slots,
+                    );
                     params = compiled.params;
                     let _ = meter_keys.send(compiled.meter_keys);
                     push(
@@ -1140,6 +1211,28 @@ async fn control_loop(
                     );
                     // No MixerSnapshot: the document didn't change, only
                     // where its patches physically land.
+                }
+            }
+            ControlMsg::OutputSlotsChanged { slots } => {
+                if ctl.recording() {
+                    pending_output_slots = Some(slots);
+                } else {
+                    output_slots = slots;
+                    let compiled = compile(
+                        &state,
+                        config.sample_rate,
+                        config.block_size,
+                        &input_slots,
+                        &output_slots,
+                    );
+                    params = compiled.params;
+                    let _ = meter_keys.send(compiled.meter_keys);
+                    push(
+                        &mut cmd_tx,
+                        EngineCommand::SwapGraph {
+                            graph: compiled.graph,
+                        },
+                    );
                 }
             }
             ControlMsg::InstrumentRackChanged { rack } => {
@@ -1432,7 +1525,9 @@ async fn control_loop(
                                 config: &config,
                                 meter_keys: &meter_keys,
                                 input_slots: &input_slots,
+                                output_slots: &output_slots,
                                 last_wanted: &mut last_wanted,
+                                last_wanted_outputs: &mut last_wanted_outputs,
                                 devices: &devices,
                                 last_instruments: &mut last_instruments,
                                 instruments: &instruments,
@@ -1516,7 +1611,9 @@ struct SwapCtx<'a> {
     config: &'a EngineConfig,
     meter_keys: &'a watch::Sender<Vec<MeterKey>>,
     input_slots: &'a trib_engine::InputSlots,
+    output_slots: &'a trib_engine::OutputSlots,
     last_wanted: &'a mut std::collections::BTreeSet<Option<String>>,
+    last_wanted_outputs: &'a mut std::collections::BTreeSet<Option<String>>,
     devices: &'a Option<crate::device_host::DeviceHandle>,
     last_instruments: &'a mut Vec<trib_core::InstrumentState>,
     instruments: &'a Option<crate::instrument_host::InstrumentHandle>,
@@ -1561,6 +1658,13 @@ fn adopt_project(cx: SwapCtx<'_>, new_project: Project, manifest: ProjectManifes
                 devices.wanted_changed(wanted);
             }
         }
+        let wanted_out = wanted_outputs(cx.state);
+        if wanted_out != *cx.last_wanted_outputs {
+            *cx.last_wanted_outputs = wanted_out.clone();
+            if let Some(devices) = cx.devices {
+                devices.wanted_outputs_changed(wanted_out);
+            }
+        }
         // The incoming session brings its own rack. Told unconditionally
         // rather than on a diff: an empty document must still reach the
         // host, or the previous session's instruments keep sounding.
@@ -1573,6 +1677,7 @@ fn adopt_project(cx: SwapCtx<'_>, new_project: Project, manifest: ProjectManifes
             cx.config.sample_rate,
             cx.config.block_size,
             cx.input_slots,
+            cx.output_slots,
         );
         *cx.params = compiled.params;
         let _ = cx.meter_keys.send(compiled.meter_keys);
@@ -2185,9 +2290,25 @@ fn param_commands(params: &ParamMap, delta: &StateDelta, sample_rate: u32) -> Ve
         | StateDelta::BusRemoved { .. }
         | StateDelta::InstrumentAdded { .. }
         | StateDelta::InstrumentRemoved { .. }
-        | StateDelta::InstrumentStripsAdded { .. } => {
+        | StateDelta::InstrumentStripsAdded { .. }
+        // Patching and unpatching change the graph's shape and arrive via
+        // a recompile; only the tap moves on its own.
+        | StateDelta::OutputPatched { .. }
+        | StateDelta::OutputUnpatched { .. } => {
             vec![]
         }
+        // A miss here is normal and not a lie: a patch aimed at a device
+        // that is not open never made it into the table, so it has no flag
+        // to flip and nothing to hear either way.
+        StateDelta::OutputTap { jack, tap } => params
+            .output_tap
+            .get(jack)
+            .map(|&flag| EngineCommand::SetFlag {
+                flag,
+                on: *tap == trib_core::SendTap::PreFader,
+            })
+            .into_iter()
+            .collect(),
     }
 }
 
@@ -2207,6 +2328,7 @@ mod tests {
             48_000,
             256,
             &trib_engine::InputSlots::single_default(64),
+            &trib_engine::OutputSlots::with_monitor(),
         );
         (state, compiled.params, compiled.meter_keys)
     }
@@ -2549,6 +2671,31 @@ mod tests {
         assert!(payload.as_str().contains(r#""seq":7"#));
     }
 
+    #[test]
+    fn only_devices_a_patch_names_are_wanted_outputs() {
+        // The monitor is not a patch: the backend puts it where it belongs
+        // without being asked. Listing the default output unconditionally
+        // would hold a second stream open on it for the daemon's lifetime.
+        let mut state = MixerState {
+            strips: vec![StripState::new(StripId(0), "Ch 1".into())],
+            ..MixerState::default()
+        };
+        assert!(wanted_outputs(&state).is_empty());
+
+        state.outputs.push(trib_core::OutputPatch::new(
+            trib_core::OutputSource::Master,
+            0,
+            trib_core::OutputJack {
+                device: Some("interface".into()),
+                channel: 2,
+            },
+        ));
+        assert_eq!(
+            wanted_outputs(&state),
+            [Some("interface".to_owned())].into_iter().collect()
+        );
+    }
+
     #[tokio::test]
     async fn a_topology_change_swaps_the_graph_and_snapshots_everyone() {
         let hub = Hub::new(16);
@@ -2714,6 +2861,7 @@ mod tests {
             48_000,
             256,
             &trib_engine::InputSlots::single_default(64),
+            &trib_engine::OutputSlots::with_monitor(),
         );
         let (keys_tx, _keys_rx) = watch::channel(compiled.meter_keys);
         let dir = tempfile::tempdir().unwrap();
@@ -2850,6 +2998,7 @@ mod tests {
             48_000,
             256,
             &trib_engine::InputSlots::single_default(64),
+            &trib_engine::OutputSlots::with_monitor(),
         );
         let (keys_tx, _keys_rx) = watch::channel(compiled.meter_keys);
         let dir = tempfile::tempdir().unwrap();
@@ -2873,6 +3022,7 @@ mod tests {
             48_000,
             256,
             &trib_engine::InputSlots::single_default(64),
+            &trib_engine::OutputSlots::with_monitor(),
         );
         (state, compiled.params, compiled.meter_keys)
     }
@@ -3055,6 +3205,61 @@ mod tests {
         assert_eq!(renamed.id, id, "the id is stable across a rename");
         control.record_stop().await;
         assert_eq!(trib_project::list_sessions(dir.path())[0].name, "Take Two");
+    }
+
+    #[tokio::test]
+    async fn re_patching_an_output_stops_the_tape_but_re_tapping_it_does_not() {
+        // The user-facing half of the rule. Re-pointing a jack costs a
+        // recompile, and a recompile reseeds every smoother and clears
+        // every FX tail — and the master record tap is post-FX, so that
+        // transient would land in the take. Flipping the pre/post switch
+        // costs a flag write, so it stays live: it is the one gesture a
+        // monitor engineer genuinely needs while the song is running.
+        let hub = Hub::new(32);
+        let (cmd_tx, mut _cmd_rx) = rtrb::RingBuffer::new(64);
+        let (state, params, keys) = armed();
+        let (keys_tx, _keys_rx) = watch::channel(keys);
+        let dir = tempfile::tempdir().unwrap();
+        let project = trib_project::create_project(dir.path(), "first", &state).unwrap();
+        let control = spawn_test_in(hub, cmd_tx, state, params, keys_tx, project);
+
+        let jack = trib_core::OutputJack {
+            device: None,
+            channel: 4,
+        };
+        control
+            .apply(
+                MixCommand::SetOutputPatch {
+                    patch: trib_core::OutputPatch::new(
+                        trib_core::OutputSource::Master,
+                        0,
+                        jack.clone(),
+                    ),
+                },
+                None,
+            )
+            .await
+            .expect("patching before the take is fine");
+
+        control.record_start().await.unwrap();
+        let refused = control
+            .apply(MixCommand::ClearOutputPatch { jack: jack.clone() }, None)
+            .await;
+        assert!(
+            matches!(refused, Err(MixError::Unsupported(_))),
+            "unpatching mid-take is refused: got {refused:?}"
+        );
+        control
+            .apply(
+                MixCommand::SetOutputTap {
+                    jack,
+                    tap: trib_core::SendTap::PostFader,
+                },
+                None,
+            )
+            .await
+            .expect("the tap switch stays live under the tape");
+        control.record_stop().await;
     }
 
     #[tokio::test]

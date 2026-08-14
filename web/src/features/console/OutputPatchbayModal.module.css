@@ -1,0 +1,224 @@
+.deviceSection {
+  margin-bottom: var(--s4);
+}
+
+.device {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0 0 var(--s2);
+  font-family: var(--font-label);
+  font-size: var(--text-md);
+  text-transform: uppercase;
+  letter-spacing: var(--track-print);
+  color: var(--text-label);
+}
+
+/* Where the input board prints a LETTER. Outputs are never lettered: a
+   second alphabet would collide in print with the stage boxes' `B2`, and
+   adding an output device must never re-letter an input jack under the
+   user's hands. */
+.chip {
+  min-width: 22px;
+  padding: 0 var(--s0);
+  border-radius: var(--radius-1);
+  background: var(--surface-control);
+  box-shadow: var(--depth-raised);
+  text-align: center;
+  font-size: var(--text-sm);
+}
+
+.deviceIcon {
+  display: grid;
+  place-items: center;
+  color: var(--text-dim);
+}
+
+.deviceName {
+  flex: 1;
+  min-width: 0;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.statusDot {
+  width: var(--btn-led-size);
+  height: var(--btn-led-size);
+  border-radius: var(--radius-round);
+  background: var(--surface-inset);
+  box-shadow: var(--depth-inset);
+}
+
+.status[data-status='open'] {
+  color: var(--led-green-on);
+}
+.status[data-status='open'] .statusDot {
+  background: var(--led-green-on);
+  box-shadow: var(--glow-green);
+}
+.status[data-status='failed'] {
+  color: var(--led-red-on);
+}
+.status[data-status='failed'] .statusDot {
+  background: var(--led-red-on);
+  box-shadow: var(--glow-red);
+}
+.status[data-status='absent'] {
+  color: var(--led-amber-on);
+}
+.status[data-status='absent'] .statusDot {
+  background: var(--led-amber-on);
+  box-shadow: var(--glow-amber);
+}
+
+.deviceError {
+  margin: 0 0 var(--s2);
+  font-size: var(--text-sm);
+  color: var(--led-red-on);
+}
+
+/* Amber, not red: nothing has failed, but nothing will come out either. */
+.ghost,
+.silenced {
+  margin: 0 0 var(--s2);
+  font-size: var(--text-sm);
+  color: var(--led-amber-on);
+}
+
+.jacks {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--s2);
+}
+
+.jack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s1);
+  padding: var(--s2);
+  background: var(--surface-strip);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-2);
+  box-shadow: var(--depth-raised);
+  transition: background var(--transition);
+}
+
+.jack:hover {
+  background: var(--surface-control-hi);
+}
+
+/* The male XLR: three pins in a triangle, against the input jack's single
+   centre pin. One CSS fact different, so the two rooms are never
+   confusable at a glance. */
+.socket {
+  display: grid;
+  place-items: center;
+  position: relative;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-round);
+  background: var(--surface-inset);
+  box-shadow: var(--depth-inset);
+}
+
+.pin {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-round);
+  background: var(--surface-control);
+  box-shadow: var(--depth-raised);
+}
+
+.pin:nth-child(1) {
+  transform: translateY(-7px);
+}
+.pin:nth-child(2) {
+  transform: translate(-7px, 5px);
+}
+.pin:nth-child(3) {
+  transform: translate(7px, 5px);
+}
+
+.jack[data-selected] {
+  box-shadow: var(--depth-inset), 0 0 0 2px var(--focus-color);
+}
+
+.jack[data-selected] .pin {
+  background: var(--focus-color);
+}
+
+.jack[data-dead] .socket {
+  opacity: 0.35;
+}
+
+.jack[data-dead] .jackLabel {
+  color: var(--text-dim);
+}
+
+.jackLabel {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-value);
+}
+
+.holder {
+  font-family: var(--font-tape);
+  font-size: var(--text-2xs);
+  color: var(--tape-cream);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.free {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
+}
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--border-divider);
+}
+
+.tap {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.consequence {
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  padding-top: var(--s3);
+}
+
+.hint {
+  max-width: 34ch;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.empty,
+.unsupported {
+  margin: 0 0 var(--s3);
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}

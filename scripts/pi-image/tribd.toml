@@ -10,3 +10,13 @@
 # cannot be granted CAP_NET_BIND_SERVICE. The daemon trusts this network —
 # see the Security section of the README before putting it on one you don't.
 bind = "0.0.0.0:80"
+
+[audio]
+# The appliance takes one ALSA card outright: capture and playback linked
+# on a single clock, the engine clocked by the card, and no server in the
+# path. Nothing else on this box can make a sound, which is the point.
+#
+# `device` is unset, so the daemon takes the first card that opens duplex
+# at the engine rate. Set it ("hw:1") if more than one interface is ever
+# plugged in — the real-time backend owns exactly one.
+layer = "exclusive"

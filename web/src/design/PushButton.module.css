@@ -21,7 +21,7 @@
 }
 
 .button:hover:not(:disabled) {
-  background: var(--gray-5);
+  background: var(--surface-control-hi);
 }
 
 .button[data-pressed] {

@@ -181,9 +181,15 @@ disabled** unless noted.
 - `SegmentedControl` stops working past about five options; this is what
   replaces it, and the two are not interchangeable — a fixed short set of
   choices is still piano keys.
-- A value that is not in the list renders **blank and lies**, so the option
-  list always appends the current value with `(not connected)` when the
-  daemon no longer offers it.
+- A value that is not in the list renders **blank and lies** — a `<select>`
+  whose value matches no option displays the FIRST one — so the option list
+  always appends the current value with `(not connected)` when the daemon
+  no longer offers it. That rule lives in `select-options.ts`, not in each
+  call site: it was reimplemented at one and omitted at another before the
+  component existed.
+- Implemented as `design/SelectField.tsx`. The two hand-rolled copies it
+  replaced **disagreed** — one was a raised control where this spec asks
+  for a recessed well.
 
 ### TextField (inset field)
 - An inset machine-text well: `--surface-inset` + `--depth-inset`,
@@ -224,7 +230,9 @@ disabled** unless noted.
   (amber ring, lit pin). A patch past a device's channel count stays
   VISIBLE: dimmed socket, "no jack on this device" — a silent strip must
   be explainable from the patchbay. With enumeration unavailable, the
-  default box draws the classic 8 jacks.
+  default box draws ZERO jacks — inventing a count drew phantom sockets
+  that looked exactly like a real device and hid the fact that enumeration
+  had found nothing.
 - An in-use jack is still selectable — sharing is legal, and is exactly
   what the tape stripe marks. Footer: hint text + Refresh + Disconnect
   (disabled when unpatched).
@@ -259,21 +267,85 @@ disabled** unless noted.
   as strips join or leave.
 - Color is never the sole signal: the tape prints its jack label, and each
   stripe carries an aria-label naming the share.
+- **Outputs earn no tape.** Tape marks a shared identity between two
+  strips; an output patch is always 1:1, so there is nothing invisible for
+  it to reveal. Tape is also the console's scarcest signal — six colors,
+  one edge per strip — and spending it on a relationship that is never
+  shared devalues it for the one that is.
+
+### OutputPatchbayModal — the output bay
+
+The mirror of the input patchbay, and deliberately not its twin: **the
+cardinality is inverted.** On the way in a STRIP is the "one" and jacks are
+the "many", so the room opens from the one and lists the many. On the way
+out an OUTPUT CHANNEL is the "one" — it holds at most one feed — so the
+room lists outputs and picks a source.
+
+That single decision is what makes the master and the buses reachable at
+all: they appear in the **source list**, not as objects needing channel
+strips they do not have. There are no bus strips in this console, and the
+master's strip is the fixed right-hand panel, so a strip-only door could
+never have reached either.
+
+- **Two doors, no third.** An `OutputButton` on every ChannelStrip
+  (mirroring INPUT, printing `—` / `OUT 3` / `2 OUTS`) and one in the
+  MasterSection. Buses need no door of their own — they are in the source
+  list. Opened from a door, clicking a FREE output patches it on the spot:
+  two informed clicks. An occupied output only selects, so its holder is
+  read before it is replaced.
+- **A modal, not a full-page room.** A full-page tab renders INSTEAD of the
+  pager and unmounts both live rooms, meters included — and you patch
+  outputs while listening to what they carry.
+- **Jack anatomy**: drawn socket → print label → status, exactly as on the
+  input side, but with **three pins in a triangle** (male XLR) against the
+  input jack's single centre pin. One CSS fact different, so the two rooms
+  are never confusable at a glance.
+- Where the input board prints a **letter**, an output section prints an
+  `OUT` chip. **Outputs are never lettered**: a second alphabet would
+  collide in print with the stage boxes' `B2`, and adding an output device
+  must never re-letter an input jack under the user's hands — the same
+  argument that keeps instruments unlettered.
+- **Print numbering follows the hardware.** A device that gives channels to
+  the monitor (the real-time backend shares one card) prints `OUT 3` for
+  its first patchable jack, because that is the socket on the back panel.
+- **Tap** is a two-cap `SegmentedControl` (Pre / Post), default Pre, with a
+  live consequence line underneath. Pre is post-gain, post-EQ, **pre-mute
+  and pre-fader**; Post is post-mute and post-fader but **pre-pan** — a
+  strip is mono and so is its jack.
+- **Honest failure, in full.** A ghost section for an unplugged output a
+  patch still names ("this output is not connected — patch these channels
+  somewhere else"); a patch past the device keeps its dimmed socket and
+  says `no jack`; a device error is a `role="alert"` line; a muted or
+  turned-down output gets the amber *Silent at the output:* lead, not red,
+  because nothing failed. An output has **no meter**, so that amber line is
+  the only place in the console a dead PA is explainable.
+- Three empty states, never merged: no output device at all; a backend with
+  no patchable outputs (the monitor still plays); and an output device
+  present but exposing no patchable channels.
+- **Patching stops the tape; re-tapping does not.** Re-pointing a jack
+  costs a graph recompile, and a recompile clears FX tails into the take —
+  so it is refused while recording, with the reason beside it. The pre/post
+  switch is a flag write and stays live: it is the one gesture a monitor
+  engineer needs mid-song.
 
 ### ChannelStrip layout (top→bottom)
 INPUT · GAIN knob (red cap) · EQ section (HF blue, swept MID blue + freq
 green, LF blue) · AUX sends (yellow) · PAN (white) · LedMeter · Fader (input
 strips white/grey cap, bus strips blue, master red) · PFL/MUTE/ARM row ·
 TapeLabel. One `--s2` gutter between blocks; `--border-panel` divider between
-strips. Bus strips: no GAIN, no ARM; INPUT reads "SOURCES".
+strips, then OUT (the output patch bay door) above the tape. Bus strips:
+no GAIN, no ARM; INPUT reads "SOURCES".
 - Top-right corner: the REMOVE control (`✕`, `--text-dim`, hover red).
   Destructive = two clicks: the first arms it ("SURE?", red, 3 s timeout),
   the second removes the strip. Disabled while recording (layout frozen).
 
 ### MasterSection (fixed right panel)
+*(The 12-LED meters are fed one reading on both columns today; true stereo
+metering needs a daemon-side `MeterKey` for each side and is not built.)*
 Session TapeLabel (editable — renames the open session) · transport
 (REC/STOP, **ARM ALL**, elapsed in mono) · 12-LED stereo meters · master
-fader · FX RETURN / MONITOR / PHONES knobs. `--master-w` wide,
+fader · OUT (the master mix's own patch bay door) · FX RETURN / MONITOR /
+PHONES knobs. `--master-w` wide,
 `--surface-section`, left `--border-panel` edge.
 
 ### ViewPager — Console ↔ Tracks

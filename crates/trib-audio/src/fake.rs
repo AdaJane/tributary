@@ -124,7 +124,11 @@ impl AudioBackend for FakeBackend {
             .name("trib-fake-audio".into())
             .spawn(move || {
                 let mut input = vec![0.0f32; block_size];
-                let mut output = vec![0.0f32; block_size * 2];
+                // The full plane, not a stereo pair: rendering narrower
+                // here would make every direct out silently vanish from
+                // `--no-default-features` builds and most of the daemon's
+                // tests — the trap the instrument rack nearly fell into.
+                let mut output = trib_engine::output_buffer(block_size);
                 let mut phase = 0.0f32;
                 while !stop_flag.load(Ordering::Relaxed) {
                     for sample in input.iter_mut() {
@@ -160,7 +164,13 @@ mod tests {
             strips: vec![strip],
             ..MixerState::default()
         };
-        let compiled = compile(&state, 48_000, 256, &InputSlots::single_default(1));
+        let compiled = compile(
+            &state,
+            48_000,
+            256,
+            &InputSlots::single_default(1),
+            &trib_engine::OutputSlots::with_monitor(),
+        );
         let (mut handle, engine) = engine_pair(compiled.graph);
         let config = StreamConfig {
             sample_rate: 48_000,

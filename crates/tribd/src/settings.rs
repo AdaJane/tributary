@@ -31,11 +31,31 @@ impl Default for Server {
     }
 }
 
+/// Which device layer owns the audio hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioLayer {
+    /// PipeWire/PulseAudio alongside everything else on the machine.
+    ///
+    /// The only safe default: taking a card exclusively would silence the
+    /// user's music, and a daemon cannot tell "I am an appliance" from "I
+    /// am running on somebody's laptop" by looking.
+    #[default]
+    Shared,
+    /// One ALSA `hw:` card, capture and playback on one clock. The
+    /// appliance posture — no server in the path, and nothing else on the
+    /// box can make a sound.
+    Exclusive,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Audio {
     pub sample_rate: u32,
     pub block_size: usize,
+    pub layer: AudioLayer,
+    /// The card the exclusive layer takes ("hw:1"). None = probe.
+    pub device: Option<String>,
 }
 
 impl Default for Audio {
@@ -43,6 +63,8 @@ impl Default for Audio {
         Audio {
             sample_rate: 48_000,
             block_size: 256,
+            layer: AudioLayer::default(),
+            device: None,
         }
     }
 }
@@ -75,7 +97,7 @@ pub struct Soundfonts {
     pub root: PathBuf,
     /// Ceiling on an uploaded file. `rustysynth` holds all sample data
     /// resident, so this is a memory budget wearing a disk-shaped hat: a
-    /// 148 MB General MIDI set is an OOM kill on a Pi Zero 2 W, not a slow
+    /// 148 MB General MIDI set is an OOM kill on a 2 GB Pi 4, not a slow
     /// load.
     pub max_bytes: u64,
 }

@@ -6,6 +6,7 @@ import { Fader } from '../../design/Fader';
 import { Knob } from '../../design/Knob';
 import { PushButton } from '../../design/PushButton';
 import { TapeLabel } from '../../design/TapeLabel';
+import { OutputButton } from './OutputButton';
 import { useTransport } from '../../state/transport';
 import type { StripState } from '../../ws/messages';
 import { gesture } from '../../ws/send';
@@ -167,6 +168,7 @@ export function ChannelStrip({ strip, link }: { strip: StripState; link?: InputL
           }
         />
       </div>
+      <OutputButton source={{ kind: 'strip', id: strip.id }} name={strip.name} />
       <TapeLabel
         id={`strip-${strip.id}`}
         name={strip.name}

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "1.3.0"
+version = "1.4.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -18,6 +18,16 @@ trib-project = { path = "crates/trib-project" }
 
 rtrb = "0.3"
 cpal = "0.16"
+# Direct ALSA for the real-time backend. Already in the tree as a
+# transitive dependency of cpal and midir — promoting it to a direct one
+# adds no supply-chain surface and no new system package, since `hardware`
+# already requires the ALSA headers.
+alsa = "0.9"
+# SCHED_FIFO on the audio thread. `rustix` gives us `getrlimit`, `mlockall`
+# and `sched_setaffinity` but has no scheduler-policy setter, and the
+# workspace forbids `unsafe_code` — so a safe wrapper is the only way to
+# ask for real-time scheduling at all.
+thread-priority = "1"
 biquad = "0.5"
 # SoundFont synthesis for virtual instruments. Pure Rust with no dependencies
 # beyond std, so it stays unconditional: instruments render even in builds
@@ -41,7 +51,7 @@ sysinfo = { version = "0.39", default-features = false, features = ["disk"] }
 # poll(2) on /proc/self/mountinfo for POLLPRI — the kernel's own "the mount
 # table changed" signal. The workspace forbids `unsafe_code`, so the raw
 # syscall needs a safe wrapper rather than an inline extern block.
-rustix = { version = "1", features = ["event"] }
+rustix = { version = "1", features = ["event", "mm", "process"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

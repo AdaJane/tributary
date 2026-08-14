@@ -2,6 +2,7 @@ import { MASTER_LED_STOPS, litSegments } from '../../audio/leds';
 import { Fader } from '../../design/Fader';
 import { LedMeter } from '../../design/LedMeter';
 import { TapeLabel } from '../../design/TapeLabel';
+import { OutputButton } from './OutputButton';
 import { renameSession, useSessions } from '../../state/sessions';
 import { SILENT_READING, readingClip, useMeters } from '../../state/meters';
 import { gesture } from '../../ws/send';
@@ -50,6 +51,7 @@ export function MasterSection({ masterDb }: { masterDb: number }) {
           )
         }
       />
+      <OutputButton source={{ kind: 'master' }} name="the master mix" />
       <FxRack />
       <Transport />
     </aside>

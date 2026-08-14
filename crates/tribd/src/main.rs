@@ -60,13 +60,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+/// Which device layer to run.
+///
+/// Chosen by CONFIG, not by a cargo feature and not by probing. One binary
+/// serves deb, rpm, AppImage, Docker and the appliance image; splitting the
+/// feature axis would give the appliance its own release leg to drift.
+///
+/// And there is deliberately no "auto": a daemon cannot tell "I am an
+/// appliance" from "I am on somebody's laptop" by looking, and both wrong
+/// guesses are bad in different ways — one takes a desktop user's
+/// soundcard, the other leaves an appliance quietly running at several
+/// times the latency with nobody able to tell.
 #[cfg(feature = "hardware")]
-fn backend() -> Arc<dyn AudioBackend> {
-    Arc::new(trib_audio::CpalBackend)
+fn backend(audio: &settings::Audio) -> Arc<dyn AudioBackend> {
+    match audio.layer {
+        settings::AudioLayer::Shared => Arc::new(trib_audio::CpalBackend),
+        settings::AudioLayer::Exclusive => {
+            Arc::new(trib_audio::AlsaBackend::new(audio.device.clone()))
+        }
+    }
 }
 
 #[cfg(not(feature = "hardware"))]
-fn backend() -> Arc<dyn AudioBackend> {
+fn backend(_audio: &settings::Audio) -> Arc<dyn AudioBackend> {
     tracing::warn!(
         "built without the `hardware` feature — running the FAKE audio backend \
          (440 Hz test tone, no devices). Install libasound2-dev and run with \
@@ -162,13 +178,17 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         sample_rate,
         settings.audio.block_size,
         &trib_engine::InputSlots::default(),
+        // The output plane starts with only the monitor pair: no output
+        // device is open yet, so every direct out resolves to silence
+        // until the orchestrator opens one.
+        &trib_engine::OutputSlots::with_monitor(),
     );
     let (engine_handle, engine) = engine_pair(compiled.graph);
 
     // Audio failure degrades (state edits still work); it never kills the
     // daemon. The command ring then has no consumer, which the control task
     // reports loudly on every dropped write.
-    let audio = backend();
+    let audio = backend(&settings.audio);
     let stream = match audio.start(
         &StreamConfig {
             sample_rate,
@@ -178,6 +198,10 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     ) {
         Ok(stream) => Some(stream),
         Err(e) => {
+            // No fallback to the shared layer. An appliance that quietly
+            // fell back would run at several times the latency with nobody
+            // able to tell; saying so and running without audio is the
+            // honest failure, and the console reports it.
             tracing::error!(%e, "audio backend failed to start; running without audio");
             None
         }
@@ -223,6 +247,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         Some(devices.clone()),
         Some(instruments.clone()),
     );
+    let supports_outputs = audio.supports_outputs();
     device_host::spawn(device_rx, audio, stream, control.clone());
     {
         let control = control.clone();
@@ -260,6 +285,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         control,
         project: project_watch_rx,
         can_format: format::available(),
+        supports_outputs,
         monitor_tx,
         devices,
         instruments,

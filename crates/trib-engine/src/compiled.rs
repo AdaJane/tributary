@@ -14,8 +14,8 @@
 use std::collections::HashMap;
 
 use trib_core::{
-    BusId, BusKind, EqBandKind, FxId, FxParams, InstrumentId, MeterKey, MixerState, SendTap,
-    StripId, db_to_linear,
+    BusId, BusKind, EqBandKind, FxId, FxParams, InstrumentId, MeterKey, MixerState, OutputJack,
+    OutputSource, SendTap, StripId, db_to_linear,
 };
 use trib_dsp::{
     BandFilter, Biquad, Coefficients, Delay, MeterAccum, Reverb, SmoothedParam, band_coefficients,
@@ -23,7 +23,7 @@ use trib_dsp::{
 };
 
 use crate::rings::{EqIx, FlagIx, MAX_METERS, ParamIx};
-use crate::slots::InputSlots;
+use crate::slots::{InputSlots, MAX_OUTPUT_CHANNELS, MONITOR_OUT, OutputSlots};
 
 /// Where a `SetParam` lands. Index in this table IS the `ParamIx`.
 #[derive(Debug, Clone, Copy)]
@@ -49,6 +49,10 @@ enum FlagSlot {
     StripEq(u16),
     StripSendPre(u16, u16),
     BusPfl(u16),
+    /// Index into `CompiledGraph::direct_outs`. Lets a patch's pre/post
+    /// switch move without a recompile, which is what keeps the tape
+    /// running under it.
+    DirectOutPre(u16),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -79,8 +83,45 @@ enum InputTap {
     Instrument(u16),
 }
 
+/// A half-open span of [`CompiledGraph::direct_outs`].
+///
+/// Compile-time data; the audio thread only ever slices with it. `Default`
+/// is the empty span, which is what almost every strip on almost every
+/// console has — so the per-sample cost of the feature is a slice-length
+/// compare, and the tap kind is *which span an entry landed in* rather
+/// than a branch in the render loop.
+#[derive(Debug, Clone, Copy, Default)]
+struct OutSpan {
+    start: u16,
+    end: u16,
+}
+
+impl OutSpan {
+    #[inline]
+    fn of(self, table: &[DirectOut]) -> &[DirectOut] {
+        &table[self.start as usize..self.end as usize]
+    }
+}
+
+/// One direct out: where it goes, and which side of the fader it takes.
+///
+/// `pre` is a per-entry flag rather than a second span because the tap has
+/// to be *dispatchable*: flipping it is `ParamOnly`, so the control task
+/// sends a `SetFlag` instead of recompiling — the same treatment an aux
+/// send's pre/post already gets. Two spans would have been marginally
+/// cheaper to walk and would have made a live tap change silently
+/// impossible.
+#[derive(Debug, Clone, Copy)]
+struct DirectOut {
+    channel: u16,
+    pre: bool,
+}
+
 struct StripNode {
     input: InputTap,
+    /// Where this strip's direct outs go. A strip is mono, so one span
+    /// rather than one per side.
+    outs: OutSpan,
     gain: SmoothedParam,
     eq_enabled: bool,
     /// low, mid, high — run in series.
@@ -106,6 +147,10 @@ struct BusNode {
     fader: SmoothedParam,
     mute: SmoothedParam,
     pfl: bool,
+    /// Direct outs per side, L then R. An aux bus is one channel wide, so
+    /// its R entry is always empty — `compile` refuses to resolve a patch
+    /// at a source channel the source does not have.
+    outs: [OutSpan; 2],
 }
 
 enum FxProcessor {
@@ -132,6 +177,12 @@ pub struct CompiledGraph {
     master_l: Vec<f32>,
     master_r: Vec<f32>,
     pfl_bus: Vec<f32>,
+    /// Every direct-out destination channel, grouped so each source's
+    /// spans are contiguous. The audio thread walks a slice — it never
+    /// filters, searches, or branches on a tap kind.
+    direct_outs: Vec<DirectOut>,
+    /// The master's direct outs per side, L then R.
+    master_outs: [OutSpan; 2],
     params: Vec<ParamSlot>,
     flags: Vec<FlagSlot>,
     eqs: Vec<EqSlot>,
@@ -161,6 +212,10 @@ pub struct ParamMap {
     pub pfl: HashMap<StripId, FlagIx>,
     pub eq_enabled: HashMap<StripId, FlagIx>,
     pub eq_band: HashMap<(StripId, EqBandKind), EqIx>,
+    /// A patch's pre/post switch, keyed by the jack that owns it. Present
+    /// only for patches that actually resolved — a patch aimed at a device
+    /// that is not open has nothing to flip.
+    pub output_tap: HashMap<OutputJack, FlagIx>,
 }
 
 pub struct CompileOutput {
@@ -177,6 +232,7 @@ pub fn compile(
     sample_rate: u32,
     block_size: usize,
     slots: &InputSlots,
+    outputs: &OutputSlots,
 ) -> CompileOutput {
     let mut params = Vec::new();
     let mut flags = Vec::new();
@@ -212,6 +268,57 @@ pub fn compile(
         .filter(|b| b.kind == BusKind::Aux)
         .map(|b| (b.id, bus_index[&b.id]))
         .collect();
+
+    // Direct outs, grouped by source so every span is contiguous. Built
+    // here rather than hung off each node so the audio thread walks one
+    // flat table and never searches.
+    let mut direct_outs: Vec<DirectOut> = Vec::new();
+    // A strip is mono: pan places it in the mix, and a direct out is taken
+    // before that, so there is only ever source channel 0.
+    let strip_outs: Vec<OutSpan> = state
+        .strips
+        .iter()
+        .map(|strip| {
+            spans_for(
+                &mut direct_outs,
+                &mut flags,
+                &mut map.output_tap,
+                state,
+                outputs,
+                OutputSource::Strip { id: strip.id },
+                0,
+            )
+        })
+        .collect();
+    let bus_outs: Vec<[OutSpan; 2]> = state
+        .buses
+        .iter()
+        .map(|bus| {
+            let source = OutputSource::Bus { id: bus.id };
+            std::array::from_fn(|side| {
+                spans_for(
+                    &mut direct_outs,
+                    &mut flags,
+                    &mut map.output_tap,
+                    state,
+                    outputs,
+                    source,
+                    side as u16,
+                )
+            })
+        })
+        .collect();
+    let master_outs: [OutSpan; 2] = std::array::from_fn(|side| {
+        spans_for(
+            &mut direct_outs,
+            &mut flags,
+            &mut map.output_tap,
+            state,
+            outputs,
+            OutputSource::Master,
+            side as u16,
+        )
+    });
 
     let strips: Vec<StripNode> = state
         .strips
@@ -263,6 +370,7 @@ pub fn compile(
                 })
                 .collect();
             StripNode {
+                outs: strip_outs[i],
                 // Patches resolve to flat frame indices here, at compile
                 // time — anything unknown lands on the silence path.
                 input: match strip.input.as_ref() {
@@ -327,6 +435,7 @@ pub fn compile(
                 fader: SmoothedParam::new(db_to_linear(bus.fader_db), sample_rate),
                 mute: SmoothedParam::new(if bus.mute { 0.0 } else { 1.0 }, sample_rate),
                 pfl: bus.pfl,
+                outs: bus_outs[i],
             }
         })
         .collect();
@@ -380,6 +489,8 @@ pub fn compile(
         fx,
         master_fader: SmoothedParam::new(db_to_linear(state.master.fader_db), sample_rate),
         master_meter: MeterAccum::default(),
+        direct_outs,
+        master_outs,
         master_l: vec![0.0; block_size],
         master_r: vec![0.0; block_size],
         pfl_bus: vec![0.0; block_size],
@@ -392,6 +503,58 @@ pub fn compile(
         graph,
         params: map,
         meter_keys,
+    }
+}
+
+/// The direct outs of one source channel, and their dispatch indices.
+///
+/// A patch aimed at a channel the source does not have — `source_channel`
+/// 1 on a mono aux, or any channel of a source the document no longer
+/// holds — resolves to nothing here. The width comes from
+/// [`MixerState::source_channels`] so the engine and the reducer cannot
+/// disagree about how wide a source is.
+///
+/// A patch whose device is not open, or whose channel is past that
+/// device's width, also resolves to nothing — the same compile-time
+/// silence path an input patch takes, and for the same reason: the console
+/// has to draw the difference between "unpatched" and "patched at
+/// something that is not there", and the render loop must not.
+fn spans_for(
+    table: &mut Vec<DirectOut>,
+    flags: &mut Vec<FlagSlot>,
+    taps: &mut HashMap<OutputJack, FlagIx>,
+    state: &MixerState,
+    outputs: &OutputSlots,
+    source: OutputSource,
+    source_channel: u16,
+) -> OutSpan {
+    let start = table.len() as u16;
+    let exists = state
+        .source_channels(&source)
+        .is_some_and(|width| source_channel < width);
+    if exists {
+        for patch in state
+            .outputs
+            .iter()
+            .filter(|p| p.source == source && p.source_channel == source_channel)
+        {
+            let Some(channel) = outputs.resolve(patch.device.as_deref(), patch.channel) else {
+                continue;
+            };
+            let entry = table.len() as u16;
+            table.push(DirectOut {
+                channel,
+                pre: patch.tap == SendTap::PreFader,
+            });
+            taps.insert(
+                patch.jack(),
+                push_flag(flags, FlagSlot::DirectOutPre(entry)),
+            );
+        }
+    }
+    OutSpan {
+        start,
+        end: table.len() as u16,
     }
 }
 
@@ -466,6 +629,7 @@ impl CompiledGraph {
             FlagSlot::StripEq(i) => self.strips[i as usize].eq_enabled = on,
             FlagSlot::StripSendPre(i, s) => self.strips[i as usize].sends[s as usize].pre = on,
             FlagSlot::BusPfl(i) => self.buses[i as usize].pfl = on,
+            FlagSlot::DirectOutPre(i) => self.direct_outs[i as usize].pre = on,
         }
     }
 
@@ -485,6 +649,10 @@ impl CompiledGraph {
     /// `input` because the device frame is a fixed 64-wide stride the fake
     /// backend does not fill — folding them in would make instruments
     /// silently vanish in every test that runs without hardware.
+    ///
+    /// `output` is the interleaved [`MAX_OUTPUT_CHANNELS`] plane, rewritten
+    /// from scratch each block. Only [`MONITOR_OUT`] is written here today;
+    /// the rest of the plane belongs to direct outs.
     #[allow(clippy::too_many_arguments)]
     pub fn process_chunk(
         &mut self,
@@ -497,8 +665,13 @@ impl CompiledGraph {
         clip_bits: &mut u64,
         mut record: Option<&mut crate::record::RecordSet>,
     ) {
-        let frames = output.len() / 2;
+        let frames = output.len() / MAX_OUTPUT_CHANNELS;
         debug_assert!(frames <= self.block_size);
+
+        // The plane is rewritten from scratch every block. A channel that
+        // stops being patched would otherwise repeat its last block for
+        // ever, because nothing else writes it.
+        output.fill(0.0);
 
         self.master_l[..frames].fill(0.0);
         self.master_r[..frames].fill(0.0);
@@ -512,6 +685,10 @@ impl CompiledGraph {
         // Stage 1: strips into master/groups/aux.
         for (strip_ix, strip) in self.strips.iter_mut().enumerate() {
             let tap = strip.input;
+            // Hoisted: the per-sample cost of direct outs on an unpatched
+            // strip is one slice-length compare, which is why this is a
+            // table walk rather than a branch on a tap kind.
+            let direct = strip.outs.of(&self.direct_outs);
             if strip.pfl {
                 any_pfl = true;
             }
@@ -550,7 +727,21 @@ impl CompiledGraph {
                 if strip.pfl {
                     self.pfl_bus[i] += x;
                 }
+                // Direct outs tap the same point the meter and the tape do
+                // — post-gain, post-EQ, and pre-MUTE as well as pre-fader.
+                // A muted strip still feeds its pre-fader direct out, which
+                // is correct (mute is a mix-bus control) and surprising
+                // enough to be worth saying out loud.
                 let level = x * strip.mute.tick() * strip.fader.tick();
+                // `pre` is post-gain and post-EQ but pre-MUTE as well as
+                // pre-fader; `post` is post-mute and post-fader but
+                // PRE-PAN, because a strip is mono and so is its jack —
+                // the pan pot places the strip in the mix and has no say
+                // over what leaves the box.
+                let base = i * MAX_OUTPUT_CHANNELS;
+                for out in direct {
+                    output[base + out.channel as usize] = if out.pre { x } else { level };
+                }
                 for send in &mut strip.sends {
                     let tap = if send.pre { x } else { level };
                     self.buses[send.bus as usize].l[i] += tap * send.level.tick();
@@ -576,19 +767,30 @@ impl CompiledGraph {
             if bus.pfl {
                 any_pfl = true;
             }
+            let direct_l = bus.outs[0].of(&self.direct_outs);
+            let direct_r = bus.outs[1].of(&self.direct_outs);
             for i in 0..frames {
+                let (pre_l, pre_r) = (bus.l[i], bus.r[i]);
                 if bus.pfl {
                     // Pre-fade listen on the bus sum.
-                    self.pfl_bus[i] += (bus.l[i] + bus.r[i]) * 0.5;
+                    self.pfl_bus[i] += (pre_l + pre_r) * 0.5;
                 }
                 let level = bus.fader.tick() * bus.mute.tick();
+                let (post_l, post_r) = (pre_l * level, pre_r * level);
+                let base = i * MAX_OUTPUT_CHANNELS;
+                for out in direct_l {
+                    output[base + out.channel as usize] = if out.pre { pre_l } else { post_l };
+                }
+                for out in direct_r {
+                    output[base + out.channel as usize] = if out.pre { pre_r } else { post_r };
+                }
                 match bus.kind {
                     BusKind::Group => {
-                        self.master_l[i] += bus.l[i] * level;
-                        self.master_r[i] += bus.r[i] * level;
+                        self.master_l[i] += post_l;
+                        self.master_r[i] += post_r;
                     }
                     BusKind::Aux => {
-                        bus.l[i] *= level;
+                        bus.l[i] = post_l;
                     }
                 }
             }
@@ -612,10 +814,13 @@ impl CompiledGraph {
         let master_track = record
             .as_deref_mut()
             .and_then(|rec| rec.master_track.map(usize::from));
+        let master_direct_l = self.master_outs[0].of(&self.direct_outs);
+        let master_direct_r = self.master_outs[1].of(&self.direct_outs);
         for i in 0..frames {
             let mf = self.master_fader.tick();
-            let l = self.master_l[i] * mf;
-            let r = self.master_r[i] * mf;
+            let (pre_l, pre_r) = (self.master_l[i], self.master_r[i]);
+            let l = pre_l * mf;
+            let r = pre_r * mf;
             self.master_meter
                 .accumulate(if l.abs() > r.abs() { l } else { r });
             // The mix records post-fader — the take is what the room heard
@@ -626,12 +831,27 @@ impl CompiledGraph {
                 rec.tracks[track_ix].push(l);
                 rec.tracks[track_ix].push(r);
             }
+            let base = i * MAX_OUTPUT_CHANNELS;
+            // The master's direct outs are written BEFORE the PFL branch
+            // below and are never touched by it: a clean program feed to
+            // the PA or the truck must not follow whoever is soloing a
+            // kick drum in the control room.
+            for out in master_direct_l {
+                output[base + out.channel as usize] = if out.pre { pre_l } else { l };
+            }
+            for out in master_direct_r {
+                output[base + out.channel as usize] = if out.pre { pre_r } else { r };
+            }
+            // PFL takes over the MONITOR PAIR and nothing else. A direct
+            // out is a feed to something outside the room — if soloing a
+            // kick to check it also sent the kick to the PA, the feature
+            // would be a hazard. The control room is the monitor pair.
             if any_pfl {
-                output[2 * i] = self.pfl_bus[i];
-                output[2 * i + 1] = self.pfl_bus[i];
+                output[base + MONITOR_OUT[0] as usize] = self.pfl_bus[i];
+                output[base + MONITOR_OUT[1] as usize] = self.pfl_bus[i];
             } else {
-                output[2 * i] = l;
-                output[2 * i + 1] = r;
+                output[base + MONITOR_OUT[0] as usize] = l;
+                output[base + MONITOR_OUT[1] as usize] = r;
             }
         }
 
@@ -664,6 +884,40 @@ mod tests {
 
     fn slots() -> InputSlots {
         InputSlots::single_default(1)
+    }
+
+    use crate::slots::{MONITOR_CHANNELS, OutputSlots};
+    use trib_core::{OutputJack, OutputPatch};
+
+    /// A device whose outputs the patch bay can aim at.
+    const OUT_DEVICE: &str = "test-outs";
+
+    /// The output plane as the orchestrator would build it with one
+    /// 8-channel interface open: the monitor pair at 0/1, so the device's
+    /// own channel 0 is plane channel 2.
+    fn out_slots() -> OutputSlots {
+        let mut plane = OutputSlots::with_monitor();
+        plane
+            .allocate(Some(OUT_DEVICE), 8)
+            .expect("an 8-channel device fits beside the monitor pair");
+        plane
+    }
+
+    /// Plane channel carrying `channel` of [`OUT_DEVICE`].
+    fn out_channel(channel: u16) -> usize {
+        usize::from(MONITOR_CHANNELS + channel)
+    }
+
+    /// A patch from `source` to [`OUT_DEVICE`]'s `channel`.
+    fn patch(source: OutputSource, source_channel: u16, channel: u16) -> OutputPatch {
+        OutputPatch::new(
+            source,
+            source_channel,
+            OutputJack {
+                device: Some(OUT_DEVICE.into()),
+                channel,
+            },
+        )
     }
 
     fn state_with_input() -> MixerState {
@@ -705,7 +959,7 @@ mod tests {
         input: &[f32],
         blocks: usize,
     ) -> (Vec<f32>, [f32; MAX_METERS], u64) {
-        let mut output = vec![0.0; input.len() * 2];
+        let mut output = crate::slots::output_buffer(input.len());
         let mut peaks = [0.0; MAX_METERS];
         let mut clips = 0;
         for _ in 0..blocks {
@@ -716,10 +970,18 @@ mod tests {
         (output, peaks, clips)
     }
 
+    /// Peak of one side of the MONITOR PAIR. `side` is 0 (L) or 1 (R) —
+    /// an index into [`MONITOR_OUT`], not a raw plane channel, so these
+    /// assertions keep meaning the control-room feed if the pair ever moves.
     fn peak_of(output: &[f32], side: usize) -> f32 {
+        peak_at(output, MONITOR_OUT[side] as usize)
+    }
+
+    /// Peak of one channel of the output plane.
+    fn peak_at(output: &[f32], channel: usize) -> f32 {
         output
-            .chunks_exact(2)
-            .map(|f| f[side].abs())
+            .chunks_exact(MAX_OUTPUT_CHANNELS)
+            .map(|f| f[channel].abs())
             .fold(0.0f32, f32::max)
     }
 
@@ -739,14 +1001,14 @@ mod tests {
         let mut state = state_with_instruments(2);
         // The right channel of the SECOND instrument: flat index 3.
         state.strips[0].input = Some(InputAssign::instrument(InstrumentId(1), 1));
-        let mut out = compile(&state, SR, BLOCK, &slots());
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
 
         let mut inst = vec![0.0; BLOCK * 4];
         for frame in inst.chunks_exact_mut(4) {
             frame[3] = 0.5;
         }
         let input = vec![0.0; BLOCK];
-        let mut output = vec![0.0; BLOCK * 2];
+        let mut output = crate::slots::output_buffer(BLOCK);
         let mut peaks = [0.0; MAX_METERS];
         let mut clips = 0;
         for _ in 0..3 {
@@ -775,7 +1037,7 @@ mod tests {
         // would change what an instrument-fed strip hears.
         let mut state = state_with_instruments(1);
         state.strips[0].input = Some(InputAssign::instrument(InstrumentId(0), 0));
-        let mut out = compile(&state, SR, BLOCK, &slots());
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
         let (output, peaks, _) = run(&mut out.graph, &sine(0.5), 3);
         assert!(peak_of(&output, 0) < 1e-6);
         assert!(peaks[0] < 1e-6);
@@ -785,10 +1047,10 @@ mod tests {
     fn a_patch_to_an_instrument_that_is_not_in_the_document_is_silent() {
         let mut state = state_with_instruments(1);
         state.strips[0].input = Some(InputAssign::instrument(InstrumentId(7), 0));
-        let mut out = compile(&state, SR, BLOCK, &slots());
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
         let inst = vec![0.5; BLOCK * 2];
         let input = vec![0.0; BLOCK];
-        let mut output = vec![0.0; BLOCK * 2];
+        let mut output = crate::slots::output_buffer(BLOCK);
         let mut peaks = [0.0; MAX_METERS];
         let mut clips = 0;
         out.graph.process_chunk(
@@ -811,13 +1073,13 @@ mod tests {
         slots.allocate(Some("dock"), 2).unwrap();
         let mut state = state_with_input();
         state.strips[0].input = Some(InputAssign::device(Some("dock".into()), 1));
-        let mut out = compile(&state, SR, BLOCK, &slots);
+        let mut out = compile(&state, SR, BLOCK, &slots, &out_slots());
         // Four-channel frame: only flat channel 3 (dock ch 1) carries signal.
         let mut input = vec![0.0; BLOCK * 4];
         for frame in input.chunks_exact_mut(4) {
             frame[3] = 0.5;
         }
-        let mut output = vec![0.0; BLOCK * 2];
+        let mut output = crate::slots::output_buffer(BLOCK);
         let mut peaks = [0.0; MAX_METERS];
         let mut clips = 0;
         for _ in 0..3 {
@@ -835,7 +1097,7 @@ mod tests {
     fn a_patch_to_an_unknown_device_is_silent() {
         let mut state = state_with_input();
         state.strips[0].input = Some(InputAssign::device(Some("unplugged interface".into()), 0));
-        let mut out = compile(&state, SR, BLOCK, &slots());
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
         let (output, peaks, _) = run(&mut out.graph, &sine(0.5), 3);
         assert!(peak_of(&output, 0) < 1e-6);
         assert!(peaks[0] < 1e-6, "no meter movement either");
@@ -843,7 +1105,7 @@ mod tests {
 
     #[test]
     fn compile_maps_every_strip_control() {
-        let out = compile(&state_with_input(), SR, BLOCK, &slots());
+        let out = compile(&state_with_input(), SR, BLOCK, &slots(), &out_slots());
         assert!(out.params.gain.contains_key(&StripId(0)));
         assert!(
             out.params
@@ -856,7 +1118,7 @@ mod tests {
 
     #[test]
     fn a_unity_strip_reaches_the_master_at_pan_law_level() {
-        let mut out = compile(&state_with_input(), SR, BLOCK, &slots());
+        let mut out = compile(&state_with_input(), SR, BLOCK, &slots(), &out_slots());
         let input = sine(0.5);
         let (output, peaks, _) = run(&mut out.graph, &input, 3);
         assert!((peak_of(&output, 0) - 0.5 * core::f32::consts::FRAC_1_SQRT_2).abs() < 0.01);
@@ -864,10 +1126,222 @@ mod tests {
     }
 
     #[test]
+    fn the_mix_reaches_the_monitor_pair_and_no_other_plane_channel() {
+        // Guards the widening itself. Before anything is patched, the only
+        // channels carrying signal are MONITOR_OUT — if the master ever
+        // leaked into the rest of the plane, every direct out would come up
+        // already carrying the mix and nobody would notice until a jack was
+        // patched to something else.
+        let mut out = compile(&state_with_input(), SR, BLOCK, &slots(), &out_slots());
+        let (output, ..) = run(&mut out.graph, &sine(0.5), 3);
+        assert!(
+            peak_of(&output, 0) > 0.1,
+            "the monitor pair carries the mix"
+        );
+        for channel in 0..MAX_OUTPUT_CHANNELS {
+            if MONITOR_OUT.contains(&(channel as u16)) {
+                continue;
+            }
+            assert!(
+                peak_at(&output, channel) < 1e-6,
+                "plane channel {channel} carries signal with nothing patched"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pre_fader_direct_out_carries_the_meter_tap_not_the_fader() {
+        let mut state = state_with_input();
+        // Fader all the way down: a pre-fader direct out must not care.
+        state.strips[0].fader_db = trib_core::FADER_MIN_DB;
+        state.outputs = vec![patch(
+            OutputSource::Strip {
+                id: state.strips[0].id,
+            },
+            0,
+            0,
+        )];
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
+        let (output, ..) = run(&mut out.graph, &sine(0.5), 3);
+
+        assert!(
+            (peak_at(&output, out_channel(0)) - 0.5).abs() < 0.01,
+            "the direct out carries the strip at unity with the fader down"
+        );
+        assert!(
+            peak_of(&output, 0) < 1e-3,
+            "and the mix stays silent, because the fader IS down"
+        );
+    }
+
+    #[test]
+    fn a_direct_out_patched_at_a_device_that_is_not_open_is_silent() {
+        // The compile-time silence path, mirroring an input patch aimed at
+        // a device that has gone away: the console must be able to draw the
+        // difference, the render loop must not.
+        let mut state = state_with_input();
+        state.outputs = vec![OutputPatch::new(
+            OutputSource::Strip {
+                id: state.strips[0].id,
+            },
+            0,
+            OutputJack {
+                device: Some("unplugged".into()),
+                channel: 0,
+            },
+        )];
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
+        let (output, ..) = run(&mut out.graph, &sine(0.5), 3);
+        for channel in 0..MAX_OUTPUT_CHANNELS {
+            if MONITOR_OUT.contains(&(channel as u16)) {
+                continue;
+            }
+            assert!(peak_at(&output, channel) < 1e-6, "channel {channel}");
+        }
+    }
+
+    #[test]
+    fn one_strip_may_feed_several_output_channels() {
+        // The mirror invariant of one jack feeding several strips. An
+        // implementation keyed on the SOURCE rather than the jack would
+        // quietly keep only the last of these.
+        let mut state = state_with_input();
+        let id = state.strips[0].id;
+        state.outputs = vec![
+            patch(OutputSource::Strip { id }, 0, 0),
+            patch(OutputSource::Strip { id }, 0, 3),
+        ];
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
+        let (output, ..) = run(&mut out.graph, &sine(0.5), 3);
+        assert!((peak_at(&output, out_channel(0)) - 0.5).abs() < 0.01);
+        assert!((peak_at(&output, out_channel(3)) - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_post_fader_direct_out_follows_the_fader_and_the_mute() {
+        let mut state = state_with_input();
+        let id = state.strips[0].id;
+        state.strips[0].fader_db = 0.0;
+        let mut post = patch(OutputSource::Strip { id }, 0, 1);
+        post.tap = SendTap::PostFader;
+        state.outputs = vec![patch(OutputSource::Strip { id }, 0, 0), post];
+
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
+        let (output, ..) = run(&mut out.graph, &sine(0.5), 3);
+        assert!((peak_at(&output, out_channel(0)) - 0.5).abs() < 0.01, "pre");
+        assert!(
+            (peak_at(&output, out_channel(1)) - 0.5).abs() < 0.01,
+            "post"
+        );
+
+        // Now mute it. The post tap goes with the mix; the pre tap does not.
+        state.strips[0].mute = true;
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
+        let (output, ..) = run(&mut out.graph, &sine(0.5), 3);
+        assert!(
+            (peak_at(&output, out_channel(0)) - 0.5).abs() < 0.01,
+            "a muted strip still feeds its PRE-fader direct out: the pre tap \
+             is pre-mute as well as pre-fader, which is correct (mute is a \
+             mix-bus control) and surprising enough to pin"
+        );
+        assert!(peak_at(&output, out_channel(1)) < 1e-3, "post follows mute");
+    }
+
+    #[test]
+    fn a_strip_direct_out_is_pre_pan_so_a_hard_left_strip_is_not_quieter() {
+        // A strip is mono and so is its jack. If pan leaked into the direct
+        // out, panning a channel in the mix would quietly change the level
+        // going to someone's wedge.
+        let mut state = state_with_input();
+        let id = state.strips[0].id;
+        state.strips[0].fader_db = 0.0;
+        state.strips[0].pan = -1.0;
+        let mut post = patch(OutputSource::Strip { id }, 0, 1);
+        post.tap = SendTap::PostFader;
+        state.outputs = vec![post];
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
+        let (output, ..) = run(&mut out.graph, &sine(0.5), 3);
+        assert!((peak_at(&output, out_channel(1)) - 0.5).abs() < 0.01);
+        assert!(
+            peak_of(&output, 1) < 1e-3,
+            "hard left: the mix's R is empty"
+        );
+    }
+
+    #[test]
+    fn a_master_direct_out_carries_the_mix_while_pfl_is_up() {
+        // The isolation invariant. PFL is a control-room convenience; a
+        // master direct out is the feed to the PA. Soloing a channel must
+        // not send that channel to the house.
+        let mut state = state_with_input();
+        state.strips[0].fader_db = 0.0;
+        state.strips[0].pfl = true;
+        let mut post = patch(OutputSource::Master, 0, 0);
+        post.tap = SendTap::PostFader;
+        state.outputs = vec![post];
+
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
+        let (output, ..) = run(&mut out.graph, &sine(0.5), 3);
+        assert!(
+            (peak_at(&output, out_channel(0)) - 0.5 * core::f32::consts::FRAC_1_SQRT_2).abs()
+                < 0.01,
+            "the master direct out still carries the panned mix, not the PFL bus"
+        );
+        assert!(
+            (peak_of(&output, 0) - 0.5).abs() < 0.01,
+            "while the monitor pair carries the un-panned PFL signal"
+        );
+    }
+
+    #[test]
+    fn a_group_bus_direct_out_carries_both_sides_and_an_aux_has_only_one() {
+        let mut state = state_with_input();
+        state.strips[0].fader_db = 0.0;
+        let group = BusId(0);
+        let aux = BusId(1);
+        state.buses = vec![
+            BusState::new(group, BusKind::Group, "Band".into()),
+            BusState::new(aux, BusKind::Aux, "Wedge".into()),
+        ];
+        state.strips[0].route_to = RouteTarget::Bus { id: group };
+        state.strips[0].sends = vec![SendState {
+            dest: aux,
+            level_db: 0.0,
+            tap: SendTap::PreFader,
+        }];
+        state.outputs = vec![
+            patch(OutputSource::Bus { id: group }, 0, 0),
+            patch(OutputSource::Bus { id: group }, 1, 1),
+            patch(OutputSource::Bus { id: aux }, 0, 2),
+            // An aux is one channel wide: this one names a side it has not
+            // got, and must resolve to silence rather than into its
+            // neighbour's audio.
+            patch(OutputSource::Bus { id: aux }, 1, 3),
+        ];
+
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
+        let (output, ..) = run(&mut out.graph, &sine(0.5), 3);
+        let centre = 0.5 * core::f32::consts::FRAC_1_SQRT_2;
+        assert!(
+            (peak_at(&output, out_channel(0)) - centre).abs() < 0.01,
+            "L"
+        );
+        assert!(
+            (peak_at(&output, out_channel(1)) - centre).abs() < 0.01,
+            "R"
+        );
+        assert!((peak_at(&output, out_channel(2)) - 0.5).abs() < 0.01, "aux");
+        assert!(
+            peak_at(&output, out_channel(3)) < 1e-6,
+            "an aux bus has no right side"
+        );
+    }
+
+    #[test]
     fn hard_left_pan_leaves_the_right_bus_silent() {
         let mut state = state_with_input();
         state.strips[0].pan = -1.0;
-        let mut out = compile(&state, SR, BLOCK, &slots());
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
         let (output, _, _) = run(&mut out.graph, &sine(0.5), 3);
         assert!(peak_of(&output, 1) < 1e-3);
     }
@@ -878,17 +1352,17 @@ mod tests {
         state.strips[0].eq.enabled = true; // defaults are OFF now
         state.strips[0].eq.high.gain_db = -15.0;
         state.strips[0].eq.high.freq_hz = 220.0;
-        let mut cut = compile(&state, SR, BLOCK, &slots());
+        let mut cut = compile(&state, SR, BLOCK, &slots(), &out_slots());
         let (_, peaks_cut, _) = run(&mut cut.graph, &sine(0.5), 4);
         state.strips[0].eq.enabled = false;
-        let mut flat = compile(&state, SR, BLOCK, &slots());
+        let mut flat = compile(&state, SR, BLOCK, &slots(), &out_slots());
         let (_, peaks_flat, _) = run(&mut flat.graph, &sine(0.5), 4);
         assert!(peaks_cut[0] < peaks_flat[0] * 0.5);
     }
 
     #[test]
     fn mute_command_silences_after_the_ramp() {
-        let mut out = compile(&state_with_input(), SR, BLOCK, &slots());
+        let mut out = compile(&state_with_input(), SR, BLOCK, &slots(), &out_slots());
         let mute_ix = out.params.mute[&StripId(0)];
         out.graph.set_param(mute_ix, 0.0);
         let (output, _, _) = run(&mut out.graph, &sine(0.8), 4);
@@ -900,7 +1374,7 @@ mod tests {
         let mut state = state_with_input();
         state.strips[0].fader_db = -90.0;
         state.strips[0].pfl = true;
-        let mut out = compile(&state, SR, BLOCK, &slots());
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
         let (output, peaks, _) = run(&mut out.graph, &sine(0.5), 3);
         let out_peak = output.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
         assert!((out_peak - 0.5).abs() < 0.01, "PFL is pre-fader listen");
@@ -916,7 +1390,7 @@ mod tests {
             .push(BusState::new(BusId(0), BusKind::Group, "Band".into()));
         state.strips[0].route_to = RouteTarget::Bus { id: BusId(0) };
         state.buses[0].fader_db = -6.0;
-        let mut out = compile(&state, SR, BLOCK, &slots());
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
         let (output, _, _) = run(&mut out.graph, &sine(0.5), 3);
         let expected = 0.5 * core::f32::consts::FRAC_1_SQRT_2 * db_to_linear(-6.0);
         assert!((peak_of(&output, 0) - expected).abs() < 0.01);
@@ -930,12 +1404,12 @@ mod tests {
             level_db: 0.0,
             tap: SendTap::PostFader,
         });
-        let mut out = compile(&state, SR, BLOCK, &slots());
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
         // Impulse block, then silence: the echo must appear later.
         let mut impulse = vec![0.0f32; BLOCK];
         impulse[0] = 0.8;
         let silence = vec![0.0f32; BLOCK];
-        let mut output = vec![0.0; BLOCK * 2];
+        let mut output = crate::slots::output_buffer(BLOCK);
         let mut peaks = [0.0; MAX_METERS];
         let mut clips = 0;
         out.graph.process_chunk(
@@ -975,11 +1449,11 @@ mod tests {
             level_db: 0.0,
             tap: SendTap::PreFader, // …but the send taps pre-fader
         });
-        let mut out = compile(&state, SR, BLOCK, &slots());
+        let mut out = compile(&state, SR, BLOCK, &slots(), &out_slots());
         let mut impulse = vec![0.0f32; BLOCK];
         impulse[0] = 0.8;
         let silence = vec![0.0f32; BLOCK];
-        let mut output = vec![0.0; BLOCK * 2];
+        let mut output = crate::slots::output_buffer(BLOCK);
         let mut peaks = [0.0; MAX_METERS];
         let mut clips = 0;
         out.graph.process_chunk(
@@ -1020,7 +1494,7 @@ mod tests {
             },
         )
         .unwrap();
-        let mut out = compile(&next, SR, BLOCK, &slots());
+        let mut out = compile(&next, SR, BLOCK, &slots(), &out_slots());
         let (output, _, _) = run(&mut out.graph, &sine(0.5), 3);
         let expected = 0.5 * db_to_linear(-6.0) * core::f32::consts::FRAC_1_SQRT_2;
         assert!((peak_of(&output, 0) - expected).abs() < 0.01);
@@ -1028,7 +1502,7 @@ mod tests {
 
     #[test]
     fn stale_dispatch_indices_are_ignored_not_fatal() {
-        let mut out = compile(&state_with_input(), SR, BLOCK, &slots());
+        let mut out = compile(&state_with_input(), SR, BLOCK, &slots(), &out_slots());
         out.graph.set_param(ParamIx(999), 1.0);
         out.graph.set_flag(FlagIx(999), true);
     }

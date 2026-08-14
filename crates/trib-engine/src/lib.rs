@@ -32,4 +32,7 @@ pub use rings::{
     CMD_RING_CAPACITY, EngineCommand, EqIx, FlagIx, MAX_METERS, METER_RING_CAPACITY,
     MONITOR_RING_CAPACITY, MeterBlock, MonitorTarget, ParamIx, RETIRE_RING_CAPACITY, Retired,
 };
-pub use slots::{InputSlots, MAX_INPUT_CHANNELS, SlotError};
+pub use slots::{
+    Input, InputSlots, MAX_INPUT_CHANNELS, MAX_OUTPUT_CHANNELS, MONITOR_CHANNELS, MONITOR_OUT,
+    Output, OutputSlots, Plane, SlotError, Slots, output_buffer,
+};

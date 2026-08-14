@@ -14,6 +14,7 @@ use crate::rings::{
     CMD_RING_CAPACITY, EngineCommand, MAX_METERS, METER_RING_CAPACITY, MONITOR_RING_CAPACITY,
     MeterBlock, MonitorTarget, RETIRE_RING_CAPACITY, Retired,
 };
+use crate::slots::{MAX_OUTPUT_CHANNELS, MONITOR_OUT};
 
 /// Commands drained per block. Bounds per-callback work; the rest waits one
 /// block (~5 ms) — invisible at gesture rates.
@@ -108,15 +109,39 @@ pub fn engine_pair(initial: Box<CompiledGraph>) -> (EngineHandle, GraphEngine) {
 
 impl GraphEngine {
     /// One callback's work. `input` is interleaved `input_channels`;
-    /// `output` interleaved stereo. Arbitrary callback sizes are handled by
+    /// `output` is the interleaved [`MAX_OUTPUT_CHANNELS`] plane, built by
+    /// [`crate::output_buffer`]. Arbitrary callback sizes are handled by
     /// sub-blocking at the compiled block size.
+    ///
+    /// Channels [`MONITOR_OUT`] are the control-room feed, which PFL and
+    /// the tape return may take over. Everything above them belongs to
+    /// direct outs, which neither may touch.
     pub fn process(&mut self, input: &[f32], input_channels: usize, output: &mut [f32]) {
         self.drain_commands();
         self.flush_parked();
 
         let block = self.graph.block_size();
-        let frames = output.len() / 2;
-        debug_assert_eq!(input.len(), frames * input_channels);
+        // Not a `debug_assert`: a backend that hands us a narrower buffer
+        // would render every direct out into silence, and silence is
+        // exactly the failure this is insurance against. A panicking audio
+        // thread is loud; a quietly dead output jack is not.
+        //
+        // "Multiple of the stride" alone is far too weak to be that
+        // insurance — a stereo-sized buffer at a 256-frame block is 512
+        // samples, which IS a multiple of 64, and would quietly render 8
+        // frames instead of 256. So the two frames must also agree with
+        // each other, which is what actually pins the length.
+        let frames = output.len() / MAX_OUTPUT_CHANNELS;
+        assert!(
+            output.len().is_multiple_of(MAX_OUTPUT_CHANNELS)
+                && input.len() == frames * input_channels,
+            "the engine output is a fixed {MAX_OUTPUT_CHANNELS}-channel plane \
+             and must describe the same frame count as the input: got {} output \
+             samples ({frames} frames) against {} input samples at {input_channels} \
+             channels — build the plane with `trib_engine::output_buffer`",
+            output.len(),
+            input.len(),
+        );
 
         let mut done = 0;
         while done < frames {
@@ -142,7 +167,7 @@ impl GraphEngine {
                 input_channels,
                 &self.instrument_buf[..chunk * inst_channels.max(1)],
                 inst_channels,
-                &mut output[done * 2..(done + chunk) * 2],
+                &mut output[done * MAX_OUTPUT_CHANNELS..(done + chunk) * MAX_OUTPUT_CHANNELS],
                 &mut peaks,
                 &mut clip_bits,
                 self.record.as_deref_mut(),
@@ -154,31 +179,46 @@ impl GraphEngine {
             // Full ring = a stalled pump; meters are droppable by doctrine.
             let _ = self.meter_tx.push(meter_block);
             // The tape return: on the hardware monitor it replaces the live
-            // mix (the PFL precedent one stage up); on the stream monitor it
-            // fills the browser ring and the wire keeps the live mix. Meters
-            // always show the live mix.
+            // mix in the MONITOR PAIR (the PFL precedent one stage up); on
+            // the stream monitor it fills the browser ring and the wire
+            // keeps the live mix. Meters always show the live mix, and
+            // direct outs are untouched either way — a review convenience
+            // must not reach a feed to the PA.
+            //
+            // Both arms render into `monitor_buf` rather than into the
+            // plane: `mix_chunk` zeroes what it cannot fill and strides by
+            // two, so handing it a slice of a 64-wide plane would wipe
+            // every direct out on every block.
             let mut finished = false;
             if let Some(playback) = &mut self.playback {
-                let popped = match self.monitor {
-                    MonitorTarget::Hardware => {
-                        playback.mix_chunk(&mut output[done * 2..(done + chunk) * 2])
-                    }
-                    MonitorTarget::Stream => {
-                        let buf = &mut self.monitor_buf[..chunk * 2];
-                        let popped = playback.mix_chunk(buf);
-                        for &sample in &buf[..popped * 2] {
-                            // Full ring = a stalled pump; stream audio is
-                            // droppable by doctrine.
-                            let _ = self.monitor_tx.push(sample);
-                        }
-                        popped
-                    }
-                };
+                let buf = &mut self.monitor_buf[..chunk * 2];
+                let popped = playback.mix_chunk(buf);
                 playback
                     .shared
                     .position
                     .fetch_add(popped as u64, Ordering::Relaxed);
                 finished = playback.shared.finished.load(Ordering::Relaxed);
+                match self.monitor {
+                    // `mix_chunk` leaves the buffer untouched in exactly
+                    // one case — the tape has run out — so copying then
+                    // would paste a stale block over the live mix that is
+                    // supposed to return in the same block.
+                    MonitorTarget::Hardware if !finished => {
+                        for i in 0..chunk {
+                            let base = (done + i) * MAX_OUTPUT_CHANNELS;
+                            output[base + MONITOR_OUT[0] as usize] = buf[i * 2];
+                            output[base + MONITOR_OUT[1] as usize] = buf[i * 2 + 1];
+                        }
+                    }
+                    MonitorTarget::Hardware => {}
+                    MonitorTarget::Stream => {
+                        for &sample in &buf[..popped * 2] {
+                            // Full ring = a stalled pump; stream audio is
+                            // droppable by doctrine.
+                            let _ = self.monitor_tx.push(sample);
+                        }
+                    }
+                }
             }
             if finished && let Some(set) = self.playback.take() {
                 self.retire(Retired::Playback(set));
@@ -316,7 +356,13 @@ mod tests {
 
     #[test]
     fn a_fader_command_changes_the_level_after_the_ramp() {
-        let compiled = compile(&state(), SR, BLOCK, &slots());
+        let compiled = compile(
+            &state(),
+            SR,
+            BLOCK,
+            &slots(),
+            &crate::slots::OutputSlots::with_monitor(),
+        );
         let fader_ix = compiled.params.fader[&StripId(0)];
         let (mut handle, mut engine) = engine_pair(compiled.graph);
         handle
@@ -327,7 +373,7 @@ mod tests {
             })
             .unwrap();
         let input = sine(0.8, BLOCK);
-        let mut output = vec![0.0; BLOCK * 2];
+        let mut output = crate::slots::output_buffer(BLOCK);
         for _ in 0..3 {
             engine.process(&input, 1, &mut output);
         }
@@ -341,12 +387,18 @@ mod tests {
 
     #[test]
     fn variable_callback_sizes_are_sub_blocked() {
-        let compiled = compile(&state(), SR, BLOCK, &slots());
+        let compiled = compile(
+            &state(),
+            SR,
+            BLOCK,
+            &slots(),
+            &crate::slots::OutputSlots::with_monitor(),
+        );
         let (mut handle, mut engine) = engine_pair(compiled.graph);
         // 3.5 blocks in one callback.
         let frames = BLOCK * 7 / 2;
         let input = sine(0.5, frames);
-        let mut output = vec![0.0; frames * 2];
+        let mut output = crate::slots::output_buffer(frames);
         engine.process(&input, 1, &mut output);
         let mut blocks = 0;
         while handle.meter_rx.pop().is_ok() {
@@ -357,9 +409,21 @@ mod tests {
 
     #[test]
     fn swap_retires_the_old_graph_to_the_control_side() {
-        let compiled = compile(&state(), SR, BLOCK, &slots());
+        let compiled = compile(
+            &state(),
+            SR,
+            BLOCK,
+            &slots(),
+            &crate::slots::OutputSlots::with_monitor(),
+        );
         let (mut handle, mut engine) = engine_pair(compiled.graph);
-        let replacement = compile(&state(), SR, BLOCK, &slots());
+        let replacement = compile(
+            &state(),
+            SR,
+            BLOCK,
+            &slots(),
+            &crate::slots::OutputSlots::with_monitor(),
+        );
         handle
             .cmd_tx
             .push(EngineCommand::SwapGraph {
@@ -367,7 +431,7 @@ mod tests {
             })
             .unwrap();
         let input = sine(0.5, BLOCK);
-        let mut output = vec![0.0; BLOCK * 2];
+        let mut output = crate::slots::output_buffer(BLOCK);
         engine.process(&input, 1, &mut output);
         assert!(
             handle.retire_rx.pop().is_ok(),
@@ -377,10 +441,22 @@ mod tests {
 
     #[test]
     fn the_process_path_never_allocates_even_across_a_swap() {
-        let compiled = compile(&state(), SR, BLOCK, &slots());
+        let compiled = compile(
+            &state(),
+            SR,
+            BLOCK,
+            &slots(),
+            &crate::slots::OutputSlots::with_monitor(),
+        );
         let gain_ix = compiled.params.gain[&StripId(0)];
         let (mut handle, mut engine) = engine_pair(compiled.graph);
-        let replacement = compile(&state(), SR, BLOCK, &slots());
+        let replacement = compile(
+            &state(),
+            SR,
+            BLOCK,
+            &slots(),
+            &crate::slots::OutputSlots::with_monitor(),
+        );
         handle
             .cmd_tx
             .push(EngineCommand::SetParam {
@@ -413,7 +489,7 @@ mod tests {
         }
         drop(playback_tx); // rings drain mid-run, so the finish path is covered
         let input = sine(0.5, BLOCK);
-        let mut output = vec![0.0; BLOCK * 2];
+        let mut output = crate::slots::output_buffer(BLOCK);
         assert_no_alloc::assert_no_alloc(|| {
             for _ in 0..8 {
                 engine.process(&input, 1, &mut output);
@@ -475,7 +551,13 @@ mod tests {
     // the master mix — with no device, no backend and no hardware anywhere.
     #[test]
     fn a_midi_note_reaches_the_master_mix_through_an_instrument_and_a_strip() {
-        let compiled = compile(&instrument_state(), SR, BLOCK, &slots());
+        let compiled = compile(
+            &instrument_state(),
+            SR,
+            BLOCK,
+            &slots(),
+            &crate::slots::OutputSlots::with_monitor(),
+        );
         let (mut handle, mut engine) = engine_pair(compiled.graph);
         handle
             .cmd_tx
@@ -486,7 +568,7 @@ mod tests {
         handle.midi_tx.push(note_on(78)).unwrap();
 
         let input = vec![0.0; BLOCK];
-        let mut output = vec![0.0; BLOCK * 2];
+        let mut output = crate::slots::output_buffer(BLOCK);
         let mut peak = 0.0f32;
         for _ in 0..4 {
             engine.process(&input, 1, &mut output);
@@ -499,7 +581,13 @@ mod tests {
     fn a_console_with_no_instruments_hears_nothing_from_the_rack() {
         // The rack is loaded but no strip is patched to it: an instrument
         // must not leak into the mix just by existing.
-        let compiled = compile(&state(), SR, BLOCK, &slots());
+        let compiled = compile(
+            &state(),
+            SR,
+            BLOCK,
+            &slots(),
+            &crate::slots::OutputSlots::with_monitor(),
+        );
         let (mut handle, mut engine) = engine_pair(compiled.graph);
         handle
             .cmd_tx
@@ -510,7 +598,7 @@ mod tests {
         handle.midi_tx.push(note_on(78)).unwrap();
 
         let input = vec![0.0; BLOCK];
-        let mut output = vec![0.0; BLOCK * 2];
+        let mut output = crate::slots::output_buffer(BLOCK);
         for _ in 0..4 {
             engine.process(&input, 1, &mut output);
         }
@@ -521,7 +609,13 @@ mod tests {
     fn a_rack_swap_retires_the_old_rack_to_the_control_side() {
         // Freeing a SoundFont on the audio thread is exactly what the
         // retire ring exists to prevent.
-        let compiled = compile(&instrument_state(), SR, BLOCK, &slots());
+        let compiled = compile(
+            &instrument_state(),
+            SR,
+            BLOCK,
+            &slots(),
+            &crate::slots::OutputSlots::with_monitor(),
+        );
         let (mut handle, mut engine) = engine_pair(compiled.graph);
         handle
             .cmd_tx
@@ -530,7 +624,7 @@ mod tests {
             })
             .unwrap();
         let input = vec![0.0; BLOCK];
-        let mut output = vec![0.0; BLOCK * 2];
+        let mut output = crate::slots::output_buffer(BLOCK);
         engine.process(&input, 1, &mut output);
         // The first swap replaces the empty default rack.
         assert!(matches!(handle.retire_rx.pop(), Ok(Retired::Rack(_))));
@@ -547,7 +641,13 @@ mod tests {
 
     #[test]
     fn the_process_path_never_allocates_with_a_live_instrument_rack() {
-        let compiled = compile(&instrument_state(), SR, BLOCK, &slots());
+        let compiled = compile(
+            &instrument_state(),
+            SR,
+            BLOCK,
+            &slots(),
+            &crate::slots::OutputSlots::with_monitor(),
+        );
         let (mut handle, mut engine) = engine_pair(compiled.graph);
         handle
             .cmd_tx
@@ -558,7 +658,7 @@ mod tests {
         // Install the rack before the guarded run: the swap itself retires
         // a box, which is control-side work the guard would flag.
         let input = vec![0.0; BLOCK];
-        let mut output = vec![0.0; BLOCK * 2];
+        let mut output = crate::slots::output_buffer(BLOCK);
         engine.process(&input, 1, &mut output);
         while handle.retire_rx.pop().is_ok() {}
 
@@ -587,8 +687,71 @@ mod tests {
     }
 
     #[test]
+    fn the_tape_return_replaces_the_monitor_pair_and_leaves_direct_outs_alone() {
+        // The second isolation invariant. `mix_chunk` zeroes what it cannot
+        // fill and strides by two, so handing it a slice of the 64-wide
+        // plane would wipe every direct out on every block — the front of
+        // house dying because somebody reviewed a take.
+        use crate::slots::{MONITOR_CHANNELS, MONITOR_OUT, OutputSlots};
+        use trib_core::{OutputJack, OutputPatch, OutputSource, SendTap};
+
+        let mut plane = OutputSlots::with_monitor();
+        plane.allocate(Some("outs"), 8).unwrap();
+        let mut state = state();
+        let mut patch = OutputPatch::new(
+            OutputSource::Master,
+            0,
+            OutputJack {
+                device: Some("outs".into()),
+                channel: 0,
+            },
+        );
+        patch.tap = SendTap::PostFader;
+        state.outputs = vec![patch];
+
+        let compiled = compile(&state, SR, BLOCK, &slots(), &plane);
+        let (mut handle, mut engine) = engine_pair(compiled.graph);
+        let (mut tx, rx) = RingBuffer::new(BLOCK * 8);
+        for _ in 0..BLOCK * 8 {
+            tx.push(0.4).unwrap();
+        }
+        handle
+            .cmd_tx
+            .push(EngineCommand::StartPlayback {
+                set: Box::new(playback_set(rx)),
+            })
+            .unwrap();
+
+        let input = sine(0.8, BLOCK);
+        let mut output = crate::slots::output_buffer(BLOCK);
+        for _ in 0..3 {
+            engine.process(&input, 1, &mut output);
+        }
+
+        let frame = 4;
+        let base = frame * MAX_OUTPUT_CHANNELS;
+        let take = 0.4 * core::f32::consts::FRAC_1_SQRT_2;
+        assert!(
+            (output[base + MONITOR_OUT[0] as usize] - take).abs() < 1e-3,
+            "the monitor pair carries the take"
+        );
+        let direct = output[base + usize::from(MONITOR_CHANNELS)];
+        assert!(
+            direct.abs() > 1e-3 && (direct - take).abs() > 1e-3,
+            "the direct out still carries the LIVE mix, not the tape and not \
+             silence: got {direct}"
+        );
+    }
+
+    #[test]
     fn playback_replaces_the_live_mix_and_advances_position() {
-        let compiled = compile(&state(), SR, BLOCK, &slots());
+        let compiled = compile(
+            &state(),
+            SR,
+            BLOCK,
+            &slots(),
+            &crate::slots::OutputSlots::with_monitor(),
+        );
         let (mut handle, mut engine) = engine_pair(compiled.graph);
         let (mut tx, rx) = RingBuffer::new(BLOCK * 8);
         for _ in 0..BLOCK * 8 {
@@ -601,7 +764,7 @@ mod tests {
             .push(EngineCommand::StartPlayback { set: Box::new(set) })
             .unwrap();
         let input = sine(0.8, BLOCK);
-        let mut output = vec![0.0; BLOCK * 2];
+        let mut output = crate::slots::output_buffer(BLOCK);
         for _ in 0..3 {
             engine.process(&input, 1, &mut output);
         }
@@ -619,7 +782,13 @@ mod tests {
 
     #[test]
     fn the_stream_monitor_keeps_the_live_mix_and_fills_the_ring() {
-        let compiled = compile(&state(), SR, BLOCK, &slots());
+        let compiled = compile(
+            &state(),
+            SR,
+            BLOCK,
+            &slots(),
+            &crate::slots::OutputSlots::with_monitor(),
+        );
         let (mut handle, mut engine) = engine_pair(compiled.graph);
         let (mut tx, rx) = RingBuffer::new(BLOCK * 8);
         for _ in 0..BLOCK * 8 {
@@ -638,7 +807,7 @@ mod tests {
             })
             .unwrap();
         let input = sine(0.8, BLOCK);
-        let mut output = vec![0.0; BLOCK * 2];
+        let mut output = crate::slots::output_buffer(BLOCK);
         assert_no_alloc::assert_no_alloc(|| {
             for _ in 0..3 {
                 engine.process(&input, 1, &mut output);
@@ -669,7 +838,13 @@ mod tests {
 
     #[test]
     fn a_finished_playback_retires_itself() {
-        let compiled = compile(&state(), SR, BLOCK, &slots());
+        let compiled = compile(
+            &state(),
+            SR,
+            BLOCK,
+            &slots(),
+            &crate::slots::OutputSlots::with_monitor(),
+        );
         let (mut handle, mut engine) = engine_pair(compiled.graph);
         let (mut tx, rx) = RingBuffer::new(BLOCK * 2);
         for _ in 0..100 {
@@ -683,7 +858,7 @@ mod tests {
             })
             .unwrap();
         let input = sine(0.5, BLOCK);
-        let mut output = vec![0.0; BLOCK * 2];
+        let mut output = crate::slots::output_buffer(BLOCK);
         engine.process(&input, 1, &mut output);
         engine.process(&input, 1, &mut output);
         assert!(

@@ -40,7 +40,7 @@
 }
 
 .cap:hover:not(:disabled) {
-  background: var(--gray-5);
+  background: var(--surface-control-hi);
 }
 
 .cap[data-checked] {

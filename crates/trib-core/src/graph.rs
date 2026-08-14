@@ -220,6 +220,7 @@ mod tests {
             // input source, so they enter the graph through a strip's patch
             // like any device, never as a node of their own.
             instruments: Vec::new(),
+            outputs: Vec::new(),
             master: MasterState::default(),
         }
     }

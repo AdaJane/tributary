@@ -7,6 +7,12 @@
   box-shadow: var(--depth-pop);
   min-width: 320px;
   max-width: min(90vw, 560px);
+  /* A tall dialog SCROLLS. Without a max-height the UA stylesheet clips
+     it instead, which loses the footer — and the footer is where Refresh
+     and Disconnect live. */
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
 }
 
 .dialog::backdrop {
@@ -47,4 +53,5 @@
 
 .body {
   padding: var(--s4);
+  overflow-y: auto;
 }
