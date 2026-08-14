@@ -4,7 +4,8 @@ use crate::bus::{BusKind, BusState};
 use crate::db::{FADER_MAX_DB, FADER_MIN_DB, GAIN_MAX_DB, GAIN_MIN_DB};
 use crate::eq::{EQ_FREQ_MAX_HZ, EQ_FREQ_MIN_HZ, EQ_GAIN_RANGE_DB, EQ_Q_MAX, EQ_Q_MIN, EqBandKind};
 use crate::fx::FxParams;
-use crate::id::{BusId, FxId, StripId};
+use crate::id::{BusId, FxId, InstrumentId, StripId};
+use crate::instrument::{InstrumentSplit, InstrumentState};
 use crate::mix::MixerState;
 use crate::strip::{InputAssign, RouteTarget, SendState, SendTap, StripState};
 
@@ -14,6 +15,17 @@ pub const MAX_NAME_LEN: usize = 60;
 /// Console capacity. Keeps every strip metered within the engine's fixed
 /// MeterBlock (64 slots shared with buses, FX and master).
 pub const MAX_STRIPS: usize = 32;
+
+/// Instruments the rack will hold. Each one is a live synthesiser on the
+/// render thread, so the ceiling is CPU, not bookkeeping — eight is already
+/// past what a Pi will carry.
+pub const MAX_INSTRUMENTS: usize = 8;
+
+/// Voice-pool bounds. One voice is one note in flight; below 4 a chord
+/// eats itself, and past 256 a Pi runs out of core before it runs out of
+/// voices.
+pub const MIN_POLYPHONY: u16 = 4;
+pub const MAX_POLYPHONY: u16 = 256;
 
 /// Which fader a level command addresses; doubles as the mute/PFL/rename
 /// target (the master supports only fader moves in v1 — see `apply`).
@@ -115,6 +127,49 @@ pub enum MixCommand {
     SetRecordArmAll {
         armed: bool,
     },
+    AddInstrument {
+        name: Option<String>,
+    },
+    RemoveInstrument {
+        id: InstrumentId,
+    },
+    /// Everything `rustysynth` can only take at construction. Rebuilding a
+    /// synth means reloading its samples, so this is a topology change and
+    /// the tape refuses it — mid-take is exactly when you cannot afford a
+    /// pause to read a soundfont off a USB stick.
+    SetInstrumentVoice {
+        id: InstrumentId,
+        soundfont: Option<String>,
+        polyphony: u16,
+        effects: bool,
+    },
+    /// Everything a running synth accepts: the preset, what it listens to,
+    /// and its name. Deliberately NOT frozen while recording — changing
+    /// sound mid-take is normal playing, and a keyboardist who finds
+    /// themselves on the wrong MIDI channel has to be able to fix it.
+    SetInstrumentPerformance {
+        id: InstrumentId,
+        name: String,
+        bank: u16,
+        program: u8,
+        port: Option<String>,
+        midi_channel: Option<u8>,
+    },
+    /// How an instrument reaches the desk: one stereo pair, or a fader per
+    /// named piece. Rebuilds the synth, so it is a topology change.
+    SetInstrumentSplits {
+        id: InstrumentId,
+        splits: Vec<InstrumentSplit>,
+    },
+    /// Put every one of an instrument's channels on the desk in one move.
+    ///
+    /// The setup step a kit needs before anyone plays: six drums, six
+    /// faders, named and patched, ready to pan. Adds only what is missing,
+    /// so pressing it twice is safe and pressing it after adding a split
+    /// does the obvious thing rather than doubling the desk.
+    AddInstrumentStrips {
+        id: InstrumentId,
+    },
 }
 
 /// What a successful `apply` changed — the WS `state_changed` payload.
@@ -199,6 +254,28 @@ pub enum StateDelta {
     },
     RecordArmAll {
         armed: bool,
+    },
+    InstrumentAdded {
+        instrument: InstrumentState,
+    },
+    /// Carries the strips it unpatched, so a client's mirror does not need
+    /// to re-derive which channels just went quiet.
+    InstrumentRemoved {
+        id: InstrumentId,
+        unpatched: Vec<StripId>,
+    },
+    /// Both instrument edits report the whole instrument rather than the
+    /// fields that moved: it is small, and a client that misses one field
+    /// of a preset change would render a lie about what is playing.
+    InstrumentChanged {
+        instrument: InstrumentState,
+    },
+    /// The strips "add all channels" created. A structural change, so the
+    /// daemon broadcasts a snapshot too; the delta carries the list because
+    /// the console wants to say what it just did.
+    InstrumentStripsAdded {
+        id: InstrumentId,
+        added: Vec<StripState>,
     },
 }
 
@@ -502,8 +579,161 @@ pub fn apply(state: &MixerState, command: MixCommand) -> Result<Applied, MixErro
             }
             (StateDelta::RecordArmAll { armed }, ParamOnly)
         }
+        MixCommand::AddInstrument { name } => {
+            if next.instruments.len() >= MAX_INSTRUMENTS {
+                return Err(MixError::Unsupported("the instrument rack is full"));
+            }
+            let id = next.next_instrument_id();
+            let name = match name {
+                Some(name) => check_name(&name)?,
+                None => format!("Inst {}", next.instruments.len() + 1),
+            };
+            let instrument = InstrumentState::new(id, name);
+            next.instruments.push(instrument.clone());
+            (StateDelta::InstrumentAdded { instrument }, Topology)
+        }
+        MixCommand::RemoveInstrument { id } => {
+            let before = next.instruments.len();
+            next.instruments.retain(|i| i.id != id);
+            if next.instruments.len() == before {
+                return Err(MixError::UnknownTarget(id.to_string()));
+            }
+            // Orphaned patches heal, exactly as they do when a bus dies. A
+            // strip left pointing at a removed instrument would be silent
+            // with nothing in the patchbay to explain it.
+            let mut unpatched = Vec::new();
+            for strip in &mut next.strips {
+                if strip.input.as_ref().and_then(InputAssign::instrument_id) == Some(id) {
+                    strip.input = None;
+                    unpatched.push(strip.id);
+                }
+            }
+            (StateDelta::InstrumentRemoved { id, unpatched }, Topology)
+        }
+        MixCommand::SetInstrumentVoice {
+            id,
+            soundfont,
+            polyphony,
+            effects,
+        } => {
+            if !(MIN_POLYPHONY..=MAX_POLYPHONY).contains(&polyphony) {
+                return Err(MixError::OutOfRange {
+                    field: "polyphony",
+                    value: f32::from(polyphony),
+                });
+            }
+            let instrument = instrument_mut(&mut next, id)?;
+            instrument.soundfont = soundfont;
+            instrument.polyphony = polyphony;
+            instrument.effects = effects;
+            let instrument = instrument.clone();
+            (StateDelta::InstrumentChanged { instrument }, Topology)
+        }
+        MixCommand::SetInstrumentPerformance {
+            id,
+            name,
+            bank,
+            program,
+            port,
+            midi_channel,
+        } => {
+            let name = check_name(&name)?;
+            if program > 127 {
+                return Err(MixError::OutOfRange {
+                    field: "program",
+                    value: f32::from(program),
+                });
+            }
+            if midi_channel.is_some_and(|channel| channel > 15) {
+                return Err(MixError::OutOfRange {
+                    field: "midi_channel",
+                    value: f32::from(midi_channel.unwrap_or_default()),
+                });
+            }
+            let instrument = instrument_mut(&mut next, id)?;
+            instrument.name = name;
+            instrument.bank = bank;
+            instrument.program = program;
+            instrument.port = port;
+            instrument.midi_channel = midi_channel;
+            let instrument = instrument.clone();
+            (StateDelta::InstrumentChanged { instrument }, ParamOnly)
+        }
+        MixCommand::SetInstrumentSplits { id, splits } => {
+            for split in &splits {
+                check_name(&split.name)?;
+                if split.ranges.is_empty() {
+                    return Err(MixError::BadName("a split needs at least one key range"));
+                }
+                if split.ranges.iter().any(|(lo, hi)| lo > hi || *hi > 127) {
+                    return Err(MixError::OutOfRange {
+                        field: "key range",
+                        value: 0.0,
+                    });
+                }
+            }
+            // Changing the layout moves every channel after this
+            // instrument, so patches that pointed past the new width would
+            // land on a neighbour. Heal them instead.
+            let width = if splits.is_empty() { 2 } else { splits.len() };
+            let instrument = instrument_mut(&mut next, id)?;
+            instrument.splits = splits;
+            let instrument = instrument.clone();
+            for strip in &mut next.strips {
+                if let Some(assign) = &strip.input
+                    && assign.instrument_id() == Some(id)
+                    && (assign.channel() as usize) >= width
+                {
+                    strip.input = None;
+                }
+            }
+            (StateDelta::InstrumentChanged { instrument }, Topology)
+        }
+        MixCommand::AddInstrumentStrips { id } => {
+            let instrument = next
+                .instruments
+                .iter()
+                .find(|i| i.id == id)
+                .ok_or_else(|| MixError::UnknownTarget(id.to_string()))?
+                .clone();
+            let names = instrument.channel_names();
+            let mut added = Vec::new();
+            for (channel, name) in names.into_iter().enumerate() {
+                let channel = channel as u16;
+                let wanted = InputAssign::instrument(id, channel);
+                // Only what is missing: an existing strip carries someone's
+                // level, pan and EQ, and a second press must not duplicate
+                // it or reset it.
+                if next
+                    .strips
+                    .iter()
+                    .any(|s| s.input.as_ref() == Some(&wanted))
+                {
+                    continue;
+                }
+                if next.strips.len() >= MAX_STRIPS {
+                    return Err(MixError::Unsupported("the console is full"));
+                }
+                let mut strip = StripState::new(next.next_strip_id(), check_name(&name)?);
+                strip.input = Some(wanted);
+                next.strips.push(strip.clone());
+                added.push(strip);
+            }
+            (StateDelta::InstrumentStripsAdded { id, added }, Topology)
+        }
     };
     Ok((next, delta, need))
+}
+
+fn instrument_mut(
+    state: &mut MixerState,
+    id: InstrumentId,
+) -> Result<&mut InstrumentState, MixError> {
+    state
+        .instruments
+        .iter_mut()
+        .find(|i| i.id == id)
+        .ok_or_else(|| MixError::UnknownTarget(id.to_string()))
 }
 
 fn check_fx_params(params: &FxParams) -> Result<(), MixError> {
@@ -624,18 +854,9 @@ mod tests {
     fn input_patching_needs_a_recompile() {
         let (next, _, need) = ok(MixCommand::SetInput {
             strip: StripId(0),
-            input: Some(InputAssign {
-                device: None,
-                device_channel: 3,
-            }),
+            input: Some(InputAssign::device(None, 3)),
         });
-        assert_eq!(
-            next.strips[0].input,
-            Some(InputAssign {
-                device: None,
-                device_channel: 3
-            })
-        );
+        assert_eq!(next.strips[0].input, Some(InputAssign::device(None, 3)));
         assert_eq!(need, ReconcileNeed::Topology);
     }
 
@@ -875,5 +1096,307 @@ mod tests {
         };
         let json = serde_json::to_string(&delta).unwrap();
         assert_eq!(json, r#"{"kind":"input","strip":1,"input":null}"#);
+    }
+
+    #[test]
+    fn instrument_commands_and_deltas_round_trip_on_the_wire() {
+        let command = MixCommand::SetInstrumentPerformance {
+            id: InstrumentId(1),
+            name: "Rhodes".into(),
+            bank: 0,
+            program: 4,
+            port: Some("nanoKEY2 MIDI 1".into()),
+            midi_channel: Some(9),
+        };
+        let json = serde_json::to_string(&command).unwrap();
+        assert_eq!(
+            json,
+            r#"{"op":"set_instrument_performance","id":1,"name":"Rhodes","bank":0,"program":4,"port":"nanoKEY2 MIDI 1","midi_channel":9}"#
+        );
+        assert_eq!(serde_json::from_str::<MixCommand>(&json).unwrap(), command);
+
+        let voice = MixCommand::SetInstrumentVoice {
+            id: InstrumentId(1),
+            soundfont: None,
+            polyphony: 32,
+            effects: false,
+        };
+        let json = serde_json::to_string(&voice).unwrap();
+        assert_eq!(
+            json,
+            r#"{"op":"set_instrument_voice","id":1,"soundfont":null,"polyphony":32,"effects":false}"#
+        );
+        assert_eq!(serde_json::from_str::<MixCommand>(&json).unwrap(), voice);
+
+        let removed = StateDelta::InstrumentRemoved {
+            id: InstrumentId(1),
+            unpatched: vec![StripId(0), StripId(2)],
+        };
+        assert_eq!(
+            serde_json::to_string(&removed).unwrap(),
+            r#"{"kind":"instrument_removed","id":1,"unpatched":[0,2]}"#
+        );
+    }
+
+    #[test]
+    fn adding_an_instrument_needs_a_recompile_and_names_itself() {
+        let (next, delta, need) = ok(MixCommand::AddInstrument { name: None });
+        assert_eq!(next.instruments.len(), 1);
+        assert_eq!(next.instruments[0].name, "Inst 1");
+        assert_eq!(need, ReconcileNeed::Topology);
+        assert!(matches!(delta, StateDelta::InstrumentAdded { .. }));
+    }
+
+    #[test]
+    fn the_rack_refuses_to_grow_past_its_ceiling() {
+        let mut state = state();
+        for i in 0..MAX_INSTRUMENTS {
+            state.instruments.push(InstrumentState::new(
+                InstrumentId(i as u32),
+                format!("Inst {i}"),
+            ));
+        }
+        assert!(matches!(
+            apply(&state, MixCommand::AddInstrument { name: None }),
+            Err(MixError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn changing_a_preset_is_a_parameter_move_not_a_recompile() {
+        // The user-facing rule: changing the sound stops the tape, changing
+        // the patch does not. Reloading a soundfont rebuilds the synth;
+        // choosing a preset is a MIDI message to a running one.
+        let (state, _, _) = ok(MixCommand::AddInstrument { name: None });
+        let (_, _, need) = apply(
+            &state,
+            MixCommand::SetInstrumentPerformance {
+                id: InstrumentId(0),
+                name: "Rhodes".into(),
+                bank: 0,
+                program: 4,
+                port: None,
+                midi_channel: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(need, ReconcileNeed::ParamOnly);
+
+        let (_, _, need) = apply(
+            &state,
+            MixCommand::SetInstrumentVoice {
+                id: InstrumentId(0),
+                soundfont: Some("piano.sf2".into()),
+                polyphony: 32,
+                effects: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(need, ReconcileNeed::Topology);
+    }
+
+    #[test]
+    fn removing_an_instrument_heals_the_strips_that_pointed_at_it() {
+        // Same rule as a removed bus: a strip left patched at something
+        // that no longer exists is silence the patchbay cannot explain.
+        let (mut state, _, _) = ok(MixCommand::AddInstrument { name: None });
+        state.strips[0].input = Some(InputAssign::instrument(InstrumentId(0), 0));
+        let (healed, delta, need) = apply(
+            &state,
+            MixCommand::RemoveInstrument {
+                id: InstrumentId(0),
+            },
+        )
+        .unwrap();
+        assert!(healed.strips[0].input.is_none());
+        assert_eq!(need, ReconcileNeed::Topology);
+        let StateDelta::InstrumentRemoved { unpatched, .. } = delta else {
+            panic!("expected an InstrumentRemoved");
+        };
+        assert_eq!(unpatched, vec![StripId(0)]);
+    }
+
+    #[test]
+    fn removing_an_instrument_leaves_device_patches_alone() {
+        let (mut state, _, _) = ok(MixCommand::AddInstrument { name: None });
+        state.strips[0].input = Some(InputAssign::device(Some("dock".into()), 1));
+        let (healed, _, _) = apply(
+            &state,
+            MixCommand::RemoveInstrument {
+                id: InstrumentId(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            healed.strips[0].input,
+            Some(InputAssign::device(Some("dock".into()), 1))
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_polyphony_or_channel_is_refused() {
+        let (state, _, _) = ok(MixCommand::AddInstrument { name: None });
+        assert!(matches!(
+            apply(
+                &state,
+                MixCommand::SetInstrumentVoice {
+                    id: InstrumentId(0),
+                    soundfont: None,
+                    polyphony: 0,
+                    effects: false,
+                }
+            ),
+            Err(MixError::OutOfRange { .. })
+        ));
+        assert!(matches!(
+            apply(
+                &state,
+                MixCommand::SetInstrumentPerformance {
+                    id: InstrumentId(0),
+                    name: "Rhodes".into(),
+                    bank: 0,
+                    program: 0,
+                    port: None,
+                    midi_channel: Some(16),
+                }
+            ),
+            Err(MixError::OutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn adding_all_channels_puts_a_named_patched_strip_on_every_output() {
+        // The drum-kit setup move: six pieces, six faders, ready to pan.
+        let (mut state, _, _) = ok(MixCommand::AddInstrument {
+            name: Some("Kit".into()),
+        });
+        state.instruments[0].splits = crate::instrument::gm_drum_splits();
+        let before = state.strips.len();
+
+        let (next, delta, need) = apply(
+            &state,
+            MixCommand::AddInstrumentStrips {
+                id: InstrumentId(0),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(need, ReconcileNeed::Topology);
+        assert_eq!(next.strips.len(), before + 6);
+        assert_eq!(next.strips[before].name, "Kit Kick");
+        assert_eq!(
+            next.strips[before].input,
+            Some(InputAssign::instrument(InstrumentId(0), 0))
+        );
+        assert_eq!(next.strips[before + 3].name, "Kit HiHat");
+        let StateDelta::InstrumentStripsAdded { added, .. } = delta else {
+            panic!("expected InstrumentStripsAdded");
+        };
+        assert_eq!(added.len(), 6);
+    }
+
+    #[test]
+    fn adding_all_channels_twice_adds_nothing_the_second_time() {
+        // Pressing it again must not double the desk or reset the levels
+        // someone has already set on the first set of strips.
+        let (state, _, _) = ok(MixCommand::AddInstrument { name: None });
+        let (once, _, _) = apply(
+            &state,
+            MixCommand::AddInstrumentStrips {
+                id: InstrumentId(0),
+            },
+        )
+        .unwrap();
+        let (twice, _, _) = apply(
+            &once,
+            MixCommand::AddInstrumentStrips {
+                id: InstrumentId(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(once.strips.len(), twice.strips.len());
+    }
+
+    #[test]
+    fn an_unsplit_instrument_lands_on_the_desk_as_a_stereo_pair() {
+        // The "only assign the stereo mix" case: two strips, L and R.
+        let (state, _, _) = ok(MixCommand::AddInstrument {
+            name: Some("Rhodes".into()),
+        });
+        let before = state.strips.len();
+        let (next, _, _) = apply(
+            &state,
+            MixCommand::AddInstrumentStrips {
+                id: InstrumentId(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(next.strips.len(), before + 2);
+        assert_eq!(next.strips[before].name, "Rhodes L");
+        assert_eq!(next.strips[before + 1].name, "Rhodes R");
+    }
+
+    #[test]
+    fn narrowing_the_outputs_heals_strips_that_pointed_past_the_new_width() {
+        // Going from six drum faders back to a stereo mix leaves channels
+        // 2..5 with nothing behind them. Silently keeping those patches
+        // would land them on the NEXT instrument's audio.
+        let (mut state, _, _) = ok(MixCommand::AddInstrument { name: None });
+        state.instruments[0].splits = crate::instrument::gm_drum_splits();
+        let (state, _, _) = apply(
+            &state,
+            MixCommand::AddInstrumentStrips {
+                id: InstrumentId(0),
+            },
+        )
+        .unwrap();
+        let (narrowed, _, need) = apply(
+            &state,
+            MixCommand::SetInstrumentSplits {
+                id: InstrumentId(0),
+                splits: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(need, ReconcileNeed::Topology);
+        let still_patched = narrowed
+            .strips
+            .iter()
+            .filter(|s| {
+                s.input.as_ref().and_then(InputAssign::instrument_id) == Some(InstrumentId(0))
+            })
+            .count();
+        assert_eq!(still_patched, 2, "only L and R survive a stereo layout");
+    }
+
+    #[test]
+    fn a_split_with_no_key_ranges_is_refused() {
+        let (state, _, _) = ok(MixCommand::AddInstrument { name: None });
+        assert!(matches!(
+            apply(
+                &state,
+                MixCommand::SetInstrumentSplits {
+                    id: InstrumentId(0),
+                    splits: vec![crate::instrument::InstrumentSplit {
+                        name: "Kick".into(),
+                        ranges: Vec::new(),
+                    }],
+                }
+            ),
+            Err(MixError::BadName(_))
+        ));
+    }
+
+    #[test]
+    fn editing_an_instrument_that_is_not_there_is_an_unknown_target() {
+        assert!(matches!(
+            apply(
+                &state(),
+                MixCommand::RemoveInstrument {
+                    id: InstrumentId(9)
+                }
+            ),
+            Err(MixError::UnknownTarget(_))
+        ));
     }
 }

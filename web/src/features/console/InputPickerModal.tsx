@@ -7,7 +7,10 @@ import {
   setCardProfile,
   useDevices,
 } from "../../state/devices";
-import type { StripState } from "../../ws/messages";
+import { useMixer } from "../../state/mixer";
+import { useInstruments } from "../../state/instruments";
+import type { InstrumentState, StripState } from "../../ws/messages";
+import type { InstrumentReport } from "./instrument-logic";
 import styles from "./InputPickerModal.module.css";
 import { SourceIcon } from "./SourceIcon";
 import {
@@ -16,17 +19,15 @@ import {
   silencedReason,
   sourceKind,
 } from "./devices";
+import { inputSource, sameSource } from "./input-source";
+import type { InputSource } from "./input-source";
+import { holdersOf, instrumentSections } from "./instrument-sections";
 import {
   jackKey,
   jackLabel,
   deviceLetters,
   stripeColor,
 } from "./linked-inputs";
-
-export interface PatchTarget {
-  device: string | null;
-  channel: number;
-}
 
 export interface InputPickerModalProps {
   /** The strip being patched. */
@@ -36,8 +37,23 @@ export interface InputPickerModalProps {
   open: boolean;
   onClose: () => void;
   /** `null` disconnects. The caller performs the mutation and closes. */
-  onPatch: (target: PatchTarget | null) => void;
+  onPatch: (target: InputSource | null) => void;
 }
+
+/** The rack's own four words map onto the same four lamps the stage boxes
+ * use, so one dialect covers both halves of the patchbay. */
+const RACK_STATUS_DATA = {
+  live: "open",
+  ready: "available",
+  failed: "failed",
+  missing: "absent",
+} as const;
+
+// Stable empties: a selector that builds a fresh [] every render makes
+// zustand think the store changed on every render, which React answers
+// with "Maximum update depth exceeded".
+const NO_INSTRUMENTS: readonly InstrumentState[] = [];
+const NO_REPORTS: readonly InstrumentReport[] = [];
 
 const STATUS_LABEL = {
   open: "live",
@@ -57,9 +73,14 @@ export function InputPickerModal({
   onClose,
   onPatch,
 }: InputPickerModalProps) {
-  const currentDevice = strip.input ? (strip.input.device ?? null) : undefined;
-  const currentChannel = strip.input?.device_channel;
+  const current = inputSource(strip.input);
+  const currentDevice =
+    current?.kind === "device" ? current.device : undefined;
+  const currentChannel = current?.kind === "device" ? current.channel : undefined;
   const devices = useDevices((s) => s.devices);
+  const instruments = useMixer((s) => s.state.instruments) ?? NO_INSTRUMENTS;
+  const reports = useInstruments((s) => s.doc?.reports) ?? NO_REPORTS;
+  const racks = instrumentSections(instruments, reports, strips);
   const pendingCard = useDevices((s) => s.pendingCard);
   const [profileError, setProfileError] = useState<{
     card: string;
@@ -180,8 +201,11 @@ export function InputPickerModal({
                   (s) =>
                     s.id !== strip.id &&
                     s.input &&
-                    (s.input.device ?? null) === section.device &&
-                    s.input.device_channel === channel,
+                      sameSource(inputSource(s.input), {
+                      kind: "device",
+                      device: section.device,
+                      channel,
+                    }),
                 );
                 const selected =
                   currentDevice === section.device &&
@@ -210,7 +234,13 @@ export function InputPickerModal({
                         ? `${label} on ${section.title}, in use by ${holderNames}${selected ? ", patched here" : ""}${dead ? ", no jack on this device" : ""}`
                         : `${label} on ${section.title}, ${state}`
                     }
-                    onClick={() => onPatch({ device: section.device, channel })}
+                    onClick={() =>
+                      onPatch({
+                        kind: "device",
+                        device: section.device,
+                        channel,
+                      })
+                    }
                   >
                     <span className={styles.socket} aria-hidden>
                       <span className={styles.pin} />
@@ -239,6 +269,86 @@ export function InputPickerModal({
           </section>
         );
       })}
+      {racks.map((rack) => (
+        <section key={`inst-${rack.id}`} className={styles.deviceSection}>
+          <p className={styles.device}>
+            {/* A slot chip where a letter would be: instruments sit in the
+                same rack as the stage boxes without pretending to be one. */}
+            <span className={styles.letter} data-slot>
+              {rack.slot}
+            </span>
+            <span className={styles.deviceIcon}>
+              <SourceIcon kind="instrument" />
+            </span>
+            <span className={styles.deviceName}>{rack.title}</span>
+            <span className={styles.status} data-status={RACK_STATUS_DATA[rack.status]}>
+              <span className={styles.statusDot} aria-hidden />
+              {rack.status}
+            </span>
+          </p>
+          {rack.silence && (
+            <p className={styles.deviceSilenced}>
+              Silent at the source: {rack.silence}
+            </p>
+          )}
+          {rack.channels.length > 0 && (
+            <div
+              className={styles.jacks}
+              role="listbox"
+              aria-label={`Channels on ${rack.title}`}
+            >
+              {rack.channels.map((name, channel) => {
+                const holders = holdersOf(strips, rack.id, channel).filter(
+                  (n) => n !== strip.name,
+                );
+                const selected = sameSource(current, {
+                  kind: "instrument",
+                  instrument: rack.id,
+                  channel,
+                });
+                const inUse = holders.length > 0;
+                const label = `INST ${rack.id + 1}.${channel + 1}`;
+                return (
+                  <button
+                    key={channel}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    className={styles.jack}
+                    data-selected={selected || undefined}
+                    data-in-use={inUse || undefined}
+                    aria-label={`${name} on ${rack.title}, ${
+                      inUse
+                        ? `in use by ${holders.join(", ")}`
+                        : selected
+                          ? "patched here"
+                          : "free"
+                    }`}
+                    onClick={() =>
+                      onPatch({
+                        kind: "instrument",
+                        instrument: rack.id,
+                        channel,
+                      })
+                    }
+                  >
+                    <span className={styles.socket} aria-hidden>
+                      <span className={styles.pin} />
+                    </span>
+                    <span className={styles.jackLabel}>{label}</span>
+                    <span className={styles.free}>{name}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      ))}
+      {instruments.length === 0 && (
+        <p className={styles.empty}>
+          No instruments yet — add one in the Instruments tab.
+        </p>
+      )}
       <footer className={styles.footer}>
         <span className={styles.hint}>
           Patching a jack that's in use links the channels — marked by matching
@@ -255,7 +365,7 @@ export function InputPickerModal({
           label="Disconnect"
           ariaLabel={`Disconnect input from ${strip.name}`}
           onPress={() => onPatch(null)}
-          disabled={currentDevice === undefined}
+          disabled={current === null}
         />
       </footer>
     </Modal>

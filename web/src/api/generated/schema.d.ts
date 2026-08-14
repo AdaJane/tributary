@@ -102,6 +102,140 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/instruments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_instruments"];
+        put?: never;
+        post: operations["create_instrument"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/instruments/panic": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Silence every held note on every instrument.
+         * @description Every synthesiser ships one of these because a lost note-off is a note
+         *     that hangs until something makes it stop.
+         */
+        post: operations["panic_instruments"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/instruments/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Re-enumerate MIDI ports and retry anything that failed to load.
+         * @description The manual belt, exactly like the patchbay's Refresh: nothing retries in
+         *     the background, so plugging a keyboard in and pressing this is the whole
+         *     recovery story.
+         */
+        post: operations["refresh_instruments"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/instruments/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_instrument"];
+        post?: never;
+        delete: operations["delete_instrument"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/instruments/{id}/outputs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["set_instrument_outputs"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/instruments/{id}/strips": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Put every one of an instrument's channels on the desk.
+         * @description The move a drum kit needs before anyone plays: one named, patched strip
+         *     per piece, ready to pan and fade. Only missing channels are added, so
+         *     pressing it twice costs nothing and existing levels survive.
+         */
+        post: operations["add_instrument_strips"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/instruments/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Play one note on an instrument.
+         * @description The cheap half of "why is this silent?": it bisects a dead keyboard from
+         *     a dead instrument without any live MIDI at all.
+         */
+        post: operations["test_instrument"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/master": {
         parameters: {
             query?: never;
@@ -177,6 +311,39 @@ export interface paths {
         put: operations["update_recording"];
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/soundfonts/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Take a SoundFont into the library.
+         * @description The body is the file. Deliberately not multipart: the payload is one
+         *     opaque blob, multipart would add a dependency and a parser to say so,
+         *     and the name already has a home in the path.
+         *
+         *     Note that axum's `DefaultBodyLimit` does NOT apply to a body consumed as
+         *     a stream, so there is no limit to raise — and equally no limit at all
+         *     unless the handler enforces one. On a daemon with no authentication that
+         *     is not acceptable, so the byte budget is counted here, and exceeding it
+         *     aborts and unlinks rather than filling the disk.
+         */
+        post: operations["upload_soundfont"];
+        /**
+         * Remove a soundfont from the library.
+         * @description Only the internal library: a file on somebody's USB stick is theirs, and
+         *     the console says so rather than offering a button that deletes it.
+         */
+        delete: operations["delete_soundfont"];
         options?: never;
         head?: never;
         patch?: never;
@@ -773,23 +940,206 @@ export interface components {
             return_level_db: number;
         };
         /**
-         * @description A hardware input patched into a strip: a device (by OS name) and a
-         *     channel within it. `device: None` means the system default input — the
-         *     shape every pre-multi-device manifest carries.
+         * @description What feeds a strip: a hardware input (a device by OS name, plus a
+         *     channel within it) or one side of a virtual instrument.
+         *
+         *     `Device { device: None }` means the system default input — the shape
+         *     every pre-multi-device manifest carries.
+         *
+         *     The wire form is **untagged**, and that is deliberate: a device patch
+         *     serializes to exactly the bytes it always has, so a manifest written by
+         *     this daemon still opens under an older one. Only instrument patches —
+         *     which an older daemon could not render anyway — carry a shape it has
+         *     never seen. Instruments live in their own channel space rather than
+         *     borrowing a reserved device name, so device identity, its rename
+         *     reconciliation and its slot allocator never learn they exist.
          */
         InputAssign: {
             device?: string | null;
             /** Format: int32 */
             device_channel: number;
+        } | {
+            /** Format: int32 */
+            channel: number;
+            instrument: components["schemas"]["InstrumentId"];
         };
         /**
-         * @description A device-qualified patch target: which device (by OS name, `null` = the
-         *     system default input) and which of its channels.
+         * @description What to patch a strip to: either a device (by OS name, `null` = the
+         *     system default input) or a virtual instrument, plus a channel within it.
+         *
+         *     `channel` is shared by both because it means the same thing either way,
+         *     and naming both `device` and `instrument` is refused rather than
+         *     silently resolved — a patch that quietly picks the wrong source reads as
+         *     a silent strip with no explanation.
          */
         InputAssignBody: {
             /** Format: int32 */
             channel: number;
             device?: string | null;
+            instrument?: null | components["schemas"]["InstrumentId"];
+        };
+        /**
+         * Format: int32
+         * @description A virtual instrument in the rack. Never reused within a session:
+         *     it is the printed slot ("INST 3"), the patch identity a strip
+         *     holds, and the seed for the link tape's colour.
+         */
+        InstrumentId: number;
+        /**
+         * @description Any subset of an instrument's settings. Absent fields stay put.
+         *
+         *     The daemon fans this out into the two commands the reducer draws a line
+         *     between — voice settings rebuild the synth and are refused while the
+         *     tape rolls, performance settings do not and are not.
+         */
+        InstrumentPatch: {
+            /** Format: int32 */
+            bank?: number | null;
+            effects?: boolean | null;
+            /** Format: int32 */
+            midi_channel?: number | null;
+            name?: string | null;
+            /** Format: int32 */
+            polyphony?: number | null;
+            port?: string | null;
+            /** Format: int32 */
+            program?: number | null;
+            soundfont?: string | null;
+        };
+        InstrumentReport: {
+            /** Format: int32 */
+            id: number;
+            name: string;
+            /**
+             * Format: int32
+             * @description Presets the loaded soundfont carries, so the console can say
+             *     whether a preset number means anything.
+             */
+            presets?: number | null;
+            /**
+             * @description The daemon's own sentence for why, in the console's voice. `None`
+             *     when there is nothing to explain.
+             */
+            reason?: string | null;
+            /**
+             * Format: int64
+             * @description Resident sample data, so a Pi's memory budget is legible.
+             */
+            resident_bytes?: number | null;
+            status: components["schemas"]["InstrumentStatus"];
+        };
+        /**
+         * @description One mixer channel of a split instrument: a named slice of the keyboard.
+         *
+         *     This is how a drum kit reaches the desk as separate faders. A SoundFont
+         *     kit is one MIDI channel with a different drum on every key, so the only
+         *     axis that separates a kick from a snare is the key number.
+         *
+         *     A split is **mono**, deliberately. A drum is a point source you pan
+         *     yourself, and the alternative — two strips per piece — turns a five-piece
+         *     kit into ten channels of desk to manage before anyone has played a note.
+         *     An unsplit instrument stays stereo, because a piano's stereo image is
+         *     the thing you actually want.
+         */
+        InstrumentSplit: {
+            name: string;
+            /**
+             * @description Inclusive key ranges this channel answers to.
+             *
+             *     A list, not one range, because the General MIDI drum map
+             *     **interleaves** toms and hi-hats — 41 tom, 42 hat, 43 tom, 44 hat,
+             *     45 tom, 46 hat. A single contiguous range cannot put the toms on
+             *     one fader and the hats on another, which is the first thing anyone
+             *     mixing drums wants.
+             */
+            ranges: [
+                number,
+                number
+            ][];
+        };
+        /**
+         * @description A virtual instrument: a SoundFont, a preset within it, and the MIDI
+         *     traffic it answers to.
+         *
+         *     Part of the console document, so it persists in `project.toml` and
+         *     reaches every client through the mixer snapshot. Note what is *not*
+         *     here: whether the soundfont actually loaded, how many presets it has,
+         *     whether its port is connected. Those are facts about the machine, not
+         *     about the desk, and they travel on the instruments report the way a
+         *     device's status travels on the devices report — the same rule that keeps
+         *     the transport out of the reducer.
+         */
+        InstrumentState: {
+            /** Format: int32 */
+            bank: number;
+            /**
+             * @description `rustysynth`'s own reverb and chorus. Off by default: the console
+             *     already ships an FX 1 reverb send, and stacking a second one costs a
+             *     Pi real CPU to sound worse.
+             */
+            effects: boolean;
+            id: components["schemas"]["InstrumentId"];
+            /**
+             * Format: int32
+             * @description `None` = omni: every channel on that port.
+             */
+            midi_channel?: number | null;
+            name: string;
+            /** Format: int32 */
+            polyphony: number;
+            /** @description MIDI source port, by name. `None` = bound to nothing. */
+            port?: string | null;
+            /** Format: int32 */
+            program: number;
+            /**
+             * @description A file name within the soundfont library — never a path.
+             *     `project.toml` travels to a USB stick and opens on another box, so a
+             *     path would be a promise about a machine the session may never see
+             *     again. `None` = nothing chosen yet, which is silence with a reason.
+             */
+            soundfont?: string | null;
+            /**
+             * @description Per-drum (or per-region) mixer channels. Empty = one stereo output,
+             *     which is what a piano wants; non-empty = one mono channel per split,
+             *     which is what a kit wants.
+             */
+            splits?: components["schemas"]["InstrumentSplit"][];
+        };
+        /**
+         * @description Why an instrument is or is not making sound.
+         *
+         *     This is machinery, not document — the same split that keeps the
+         *     transport out of the reducer. It lives on the instruments report
+         *     alongside a sentence, because "the strip is silent" must always have an
+         *     answer somewhere in the console.
+         * @enum {string}
+         */
+        InstrumentStatus: "live" | "ready" | "missing" | "failed";
+        /**
+         * @description Everything the Instruments tab needs in one read: what the console
+         *     holds, why each one is or is not sounding, what MIDI is available, and
+         *     what there is to load.
+         *
+         *     One document rather than three endpoints because the three answers are
+         *     entangled — deleting a soundfont changes an instrument's status, and
+         *     unplugging a keyboard changes its reason. Split reads would let the
+         *     console render a pair that never existed together.
+         */
+        InstrumentsDto: {
+            /** @description The console document's instruments, in rack order. */
+            instruments: components["schemas"]["InstrumentState"][];
+            /**
+             * Format: int64
+             * @description Ceiling on an upload, so the console can refuse a file before
+             *     spending twenty minutes sending it.
+             */
+            max_upload_bytes: number;
+            midi_ports: components["schemas"]["MidiPortReport"][];
+            /** @description Machine truth about each one, keyed by the same id. */
+            reports: components["schemas"]["InstrumentReport"][];
+            /** @description Where uploads land, for the console to print. */
+            soundfont_dir: string;
+            soundfonts: components["schemas"]["SoundfontInfo"][];
         };
         /**
          * @description Playback gate for one lane of the latest take (index-aligned with the
@@ -839,6 +1189,18 @@ export interface components {
         } | {
             /** @enum {string} */
             kind: "master";
+        };
+        MidiPortReport: {
+            /** @description An instrument references it but the system does not offer it. */
+            absent: boolean;
+            /** @description True when an instrument is bound to it and it is connected. */
+            connected: boolean;
+            /**
+             * @description Stable across a replug: the port's name, not its ALSA client
+             *     number, which the kernel hands out afresh every time.
+             */
+            id: string;
+            name: string;
         };
         /**
          * @description A mutation of the mixer document. The API-facing command enum: REST
@@ -948,6 +1310,43 @@ export interface components {
             armed: boolean;
             /** @enum {string} */
             op: "set_record_arm_all";
+        } | {
+            name?: string | null;
+            /** @enum {string} */
+            op: "add_instrument";
+        } | {
+            id: components["schemas"]["InstrumentId"];
+            /** @enum {string} */
+            op: "remove_instrument";
+        } | {
+            effects: boolean;
+            id: components["schemas"]["InstrumentId"];
+            /** @enum {string} */
+            op: "set_instrument_voice";
+            /** Format: int32 */
+            polyphony: number;
+            soundfont?: string | null;
+        } | {
+            /** Format: int32 */
+            bank: number;
+            id: components["schemas"]["InstrumentId"];
+            /** Format: int32 */
+            midi_channel?: number | null;
+            name: string;
+            /** @enum {string} */
+            op: "set_instrument_performance";
+            port?: string | null;
+            /** Format: int32 */
+            program: number;
+        } | {
+            id: components["schemas"]["InstrumentId"];
+            /** @enum {string} */
+            op: "set_instrument_splits";
+            splits: components["schemas"]["InstrumentSplit"][];
+        } | {
+            id: components["schemas"]["InstrumentId"];
+            /** @enum {string} */
+            op: "add_instrument_strips";
         };
         /**
          * @description The whole console document: the single authoritative mix state the daemon
@@ -956,6 +1355,13 @@ export interface components {
         MixerState: {
             buses: components["schemas"]["BusState"][];
             fx: components["schemas"]["FxState"][];
+            /**
+             * @description Declared after the other arrays and before `master` on purpose:
+             *     `toml` serializes in declaration order and refuses a value after a
+             *     table, so a scalar section between the arrays-of-tables would make
+             *     every manifest unwritable.
+             */
+            instruments?: components["schemas"]["InstrumentState"][];
             master: components["schemas"]["MasterState"];
             strips: components["schemas"]["StripState"][];
         };
@@ -968,6 +1374,9 @@ export interface components {
          * @enum {string}
          */
         MonitorTarget: "hardware" | "stream";
+        NewInstrument: {
+            name?: string | null;
+        };
         NewSession: {
             name: string;
             /** @description What the new session's desk starts from. */
@@ -975,6 +1384,18 @@ export interface components {
         };
         NewStrip: {
             name?: string | null;
+        };
+        /** @description How an instrument reaches the desk. */
+        OutputLayout: {
+            /** @enum {string} */
+            kind: "stereo_mix";
+        } | {
+            /** @enum {string} */
+            kind: "gm_drums";
+        } | {
+            /** @enum {string} */
+            kind: "custom";
+            splits: components["schemas"]["InstrumentSplit"][];
         };
         /** @description One profile a device's card can be switched into. */
         ProfileReport: {
@@ -1158,6 +1579,24 @@ export interface components {
             /** @description One of that card's `DeviceReport.profiles[].name`. */
             profile: string;
         };
+        SoundfontInfo: {
+            /** Format: int64 */
+            bytes: number;
+            /** @description Library id — the file name, which is also what an instrument stores. */
+            id: string;
+            origin: components["schemas"]["SoundfontOrigin"];
+            path: string;
+            /**
+             * @description Volume label for a removable file, so the console can say *which*
+             *     stick it wants back.
+             */
+            volume?: string | null;
+        };
+        /**
+         * @description Where a file came from. Drives what the console offers to do with it.
+         * @enum {string}
+         */
+        SoundfontOrigin: "internal" | "removable";
         /**
          * @description What a successful `apply` changed — the WS `state_changed` payload.
          *     Semantically complete per change: a client patches its mirror from the
@@ -1266,6 +1705,24 @@ export interface components {
             armed: boolean;
             /** @enum {string} */
             kind: "record_arm_all";
+        } | {
+            instrument: components["schemas"]["InstrumentState"];
+            /** @enum {string} */
+            kind: "instrument_added";
+        } | {
+            id: components["schemas"]["InstrumentId"];
+            /** @enum {string} */
+            kind: "instrument_removed";
+            unpatched: components["schemas"]["StripId"][];
+        } | {
+            instrument: components["schemas"]["InstrumentState"];
+            /** @enum {string} */
+            kind: "instrument_changed";
+        } | {
+            added: components["schemas"]["StripState"][];
+            id: components["schemas"]["InstrumentId"];
+            /** @enum {string} */
+            kind: "instrument_strips_added";
         };
         /**
          * Format: int32
@@ -1321,6 +1778,11 @@ export interface components {
             damaged: boolean;
             /** Format: double */
             duration_secs: number;
+            /**
+             * @description MIDI sidecars beside the audio, one per instrument that was armed.
+             *     Empty for every take without one, which is most of them.
+             */
+            midi_tracks?: components["schemas"]["TakeMidiTrackDto"][];
             /** Format: int32 */
             sample_rate: number;
             /** Format: int64 */
@@ -1328,6 +1790,12 @@ export interface components {
             /** Format: int32 */
             take: number;
             tracks: components["schemas"]["TakeTrackDto"][];
+        };
+        TakeMidiTrackDto: {
+            /** Format: int64 */
+            events: number;
+            file: string;
+            name: string;
         };
         TakeTrackDto: {
             /** Format: int32 */
@@ -1563,6 +2031,293 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["DeviceReport"][];
                 };
+            };
+        };
+    };
+    list_instruments: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rack, its status, MIDI ports and the library */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstrumentsDto"];
+                };
+            };
+        };
+    };
+    create_instrument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NewInstrument"];
+            };
+        };
+        responses: {
+            /** @description The instrument, silent until it is given a soundfont */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstrumentState"];
+                };
+            };
+            /** @description Recording, or the rack is full */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    panic_instruments: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every held note released */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    refresh_instruments: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rack after re-enumeration */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstrumentsDto"];
+                };
+            };
+        };
+    };
+    update_instrument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Instrument id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstrumentPatch"];
+            };
+        };
+        responses: {
+            /** @description The instrument after the patch */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstrumentState"];
+                };
+            };
+            /** @description No such instrument */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A voice change while recording */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A value out of range */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_instrument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Instrument id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rack after the removal */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstrumentsDto"];
+                };
+            };
+            /** @description No such instrument */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Recording in progress */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_instrument_outputs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Instrument id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OutputLayout"];
+            };
+        };
+        responses: {
+            /** @description The instrument after the change */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstrumentState"];
+                };
+            };
+            /** @description No such instrument */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Recording in progress */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A split with no keys, or a bad range */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    add_instrument_strips: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Instrument id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The strips that were added */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StripState"][];
+                };
+            };
+            /** @description No such instrument */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Recording, or the console is full */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    test_instrument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Instrument id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A note was played */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such instrument */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -1819,6 +2574,91 @@ export interface operations {
             };
             /** @description Invalid destination, format, or sample rate */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    upload_soundfont: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description File name, slugged by the daemon */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": number[];
+            };
+        };
+        responses: {
+            /** @description The library after the upload */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstrumentsDto"];
+                };
+            };
+            /** @description Recording in progress */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Larger than this installation allows */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not a SoundFont, or it would not load */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_soundfont: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Library id */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The library after the removal */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstrumentsDto"];
+                };
+            };
+            /** @description Not in the internal library */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description An instrument is using it, or tape is rolling */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

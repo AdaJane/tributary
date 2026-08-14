@@ -7,13 +7,15 @@ mod eq;
 mod fx;
 mod graph;
 mod id;
+mod instrument;
 mod meter;
 mod mix;
 mod strip;
 
 pub use bus::{BusKind, BusState};
 pub use command::{
-    FaderTarget, MAX_NAME_LEN, MAX_STRIPS, MixCommand, MixError, ReconcileNeed, StateDelta, apply,
+    FaderTarget, MAX_INSTRUMENTS, MAX_NAME_LEN, MAX_POLYPHONY, MAX_STRIPS, MIN_POLYPHONY,
+    MixCommand, MixError, ReconcileNeed, StateDelta, apply,
 };
 pub use db::{FADER_MAX_DB, FADER_MIN_DB, GAIN_MAX_DB, GAIN_MIN_DB, db_to_linear, linear_to_db};
 pub use eq::{
@@ -24,7 +26,10 @@ pub use fx::{FxParams, FxState};
 pub use graph::{
     CycleError, Edge, EdgeKind, NodeId, NodeKind, SignalGraph, derive_graph, topo_order,
 };
-pub use id::{BusId, FxId, StripId, TakeId};
+pub use id::{BusId, FxId, InstrumentId, StripId, TakeId};
+pub use instrument::{
+    CapturedMidi, DEFAULT_POLYPHONY, InstrumentSplit, InstrumentState, gm_drum_splits,
+};
 pub use meter::{CLIP_DB, MeterKey};
 pub use mix::{MasterState, MixerState};
 pub use strip::{InputAssign, RouteTarget, SendState, SendTap, StripState};

@@ -160,6 +160,10 @@
   /* PushButton */
   --btn-h: 22px;
   --btn-led-size: 6px;
+  /* A picker for an unbounded, machine-supplied list — a soundfont's
+     presets, the MIDI ports the system offers. Taller than a button
+     because a native select carries its own chrome. */
+  --select-h: 32px;
 
   /* TapeLabel — two lines of sharpie at full size; the fit probe shrinks
    * longer names into the same box. */

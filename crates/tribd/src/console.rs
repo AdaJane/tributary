@@ -29,10 +29,7 @@ pub enum SessionSeed {
 /// AUX 1/2 → reverb/delay loop pre-wired.
 pub fn fresh_console() -> MixerState {
     let mut first = StripState::new(StripId(0), "Ch 1".into());
-    first.input = Some(InputAssign {
-        device: None,
-        device_channel: 0,
-    });
+    first.input = Some(InputAssign::device(None, 0));
     MixerState {
         strips: vec![first],
         buses: vec![
@@ -90,6 +87,13 @@ pub fn seed_console(seed: SessionSeed, current: &MixerState) -> MixerState {
             let template = fresh_console();
             MixerState {
                 strips,
+                // Instruments come across whole. They are wiring in the
+                // strongest sense — a strip's patch names one by id, so
+                // dropping them would leave every instrument-fed channel
+                // pointing at nothing, silent with no explanation. And
+                // they carry no mix decision to reset: level lives on the
+                // strip fader, which resets anyway.
+                instruments: current.instruments.clone(),
                 master: trib_core::MasterState {
                     record_arm: current.master.record_arm,
                     ..template.master
@@ -109,10 +113,7 @@ mod tests {
     /// on top of them.
     fn wired() -> MixerState {
         let mut kick = StripState::new(StripId(0), "Kick".into());
-        kick.input = Some(InputAssign {
-            device: Some("UMC1820".into()),
-            device_channel: 3,
-        });
+        kick.input = Some(InputAssign::device(Some("UMC1820".into()), 3));
         kick.record_arm = true;
         kick.gain_db = 12.0;
         kick.fader_db = -6.0;
@@ -121,14 +122,20 @@ mod tests {
         kick.route_to = RouteTarget::Bus { id: BusId(0) };
 
         let mut vox = StripState::new(StripId(1), "Vox".into());
-        vox.input = Some(InputAssign {
-            device: None,
-            device_channel: 7,
-        });
+        vox.input = Some(InputAssign::device(None, 7));
         vox.fader_db = -3.0;
 
+        let mut keys = StripState::new(StripId(2), "Keys".into());
+        keys.input = Some(InputAssign::instrument(trib_core::InstrumentId(0), 0));
+
+        let mut rhodes =
+            trib_core::InstrumentState::new(trib_core::InstrumentId(0), "Rhodes".into());
+        rhodes.soundfont = Some("piano.sf2".into());
+        rhodes.program = 4;
+
         MixerState {
-            strips: vec![kick, vox],
+            strips: vec![kick, vox, keys],
+            instruments: vec![rhodes],
             master: trib_core::MasterState {
                 record_arm: true,
                 fader_db: -2.0,
@@ -157,12 +164,17 @@ mod tests {
         let seeded = seed_console(SessionSeed::Mapping, &current);
 
         // Kept: which strips exist, their names, their inputs, their arming.
-        assert_eq!(seeded.strips.len(), 2);
+        assert_eq!(seeded.strips.len(), 3);
         assert_eq!(seeded.strips[0].name, "Kick");
         assert_eq!(seeded.strips[0].input, current.strips[0].input);
         assert_eq!(seeded.strips[1].input, current.strips[1].input);
         assert!(seeded.strips[0].record_arm);
         assert!(seeded.master.record_arm);
+        // Instruments are wiring too, and the strongest case of it: strip
+        // 2 patches one by id, so dropping the rack would leave that
+        // channel silent with nothing to explain why.
+        assert_eq!(seeded.instruments, current.instruments);
+        assert_eq!(seeded.strips[2].input, current.strips[2].input);
 
         // Reset: everything that shapes sound. The fader in particular
         // lands down, so a new room gets a level check before any level.
@@ -176,6 +188,13 @@ mod tests {
         // Buses and FX come back as the template's.
         assert_eq!(seeded.buses, fresh_console().buses);
         assert_eq!(seeded.fx, fresh_console().fx);
+    }
+
+    #[test]
+    fn template_drops_the_instruments_with_the_rest_of_the_desk() {
+        // A clean desk is clean: nothing to load, nothing to explain.
+        let seeded = seed_console(SessionSeed::Template, &wired());
+        assert!(seeded.instruments.is_empty());
     }
 
     /// The implicit seed at an empty destination copies the running desk.

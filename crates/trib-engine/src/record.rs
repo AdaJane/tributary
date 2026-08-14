@@ -4,13 +4,23 @@
 //! take stays sample-aligned.
 
 use std::sync::Arc;
+
 use std::sync::atomic::{AtomicU64, Ordering};
+use trib_core::CapturedMidi;
 
 use rtrb::Producer;
 
 /// Ring seconds per recorded track: generous slack for a stalled writer
 /// (a busy disk) before anything is lost. ~1.5 MB per mono track at 48 kHz.
 pub const RECORD_RING_SECS: usize = 8;
+
+/// Events a take's MIDI capture can hold before the writer drains it.
+///
+/// The writer wakes every 50 ms; sixteen thousand events is minutes of
+/// dense playing, so this only ever fills if the writer thread has died —
+/// and a lost note is the right thing to lose there, because the audio is
+/// what the room heard.
+pub const MIDI_CAPTURE_CAPACITY: usize = 16_384;
 
 pub struct RecordTrack {
     pub tx: Producer<f32>,
@@ -39,4 +49,33 @@ pub struct RecordSet {
     /// The stereo mix (post-master-fader), interleaved L/R.
     pub master_track: Option<u16>,
     pub tracks: Vec<RecordTrack>,
+    /// The notes, beside the audio.
+    ///
+    /// Carried inside the record set rather than installed by a second
+    /// command, so the sidecar starts and stops on exactly the block the
+    /// audio does. Two commands could land in different blocks, and the
+    /// take writer exists to guarantee they do not.
+    pub midi: Option<Box<MidiCapture>>,
+}
+
+/// The MIDI half of a take. Filled by the rack as it applies events, drained
+/// by the take writer.
+pub struct MidiCapture {
+    pub tx: Producer<CapturedMidi>,
+    pub dropped: Arc<AtomicU64>,
+    /// Engine sample position when recording started, so stamps come out
+    /// relative to the take rather than to the daemon's uptime.
+    pub start_sample: u64,
+}
+
+impl MidiCapture {
+    /// Record one applied event. A full ring loses the note rather than
+    /// the take: the audio is authoritative and must not stall for the
+    /// sidecar.
+    #[inline]
+    pub fn push(&mut self, event: CapturedMidi) {
+        if self.tx.push(event).is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }

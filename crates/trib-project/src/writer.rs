@@ -22,6 +22,18 @@ use crate::peaks::PeakAccum;
 /// empty without spinning.
 const DRAIN_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Turn a console name into a file name: lowercase, and anything that is
+/// not alphanumeric becomes a dash.
+///
+/// Shared by the audio tracks and the MIDI sidecars so a take's files are
+/// named by one rule — `ch01-kick.wav` beside `inst01-kit-kick.mid`.
+pub fn file_slug(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
 pub struct TakeTrackSpec {
     /// File name within the take directory ("ch01-vocal.wav").
     pub file: String,
@@ -57,6 +69,24 @@ struct TakeManifest {
     format: RecordFormat,
     damaged: bool,
     tracks: Vec<TrackManifest>,
+    /// The MIDI sidecars, as a sibling array rather than a field on each
+    /// audio track.
+    ///
+    /// The association is instrument→take and it is not one-to-one: a
+    /// stereo instrument can feed two mono strips (which row would own the
+    /// file?), and an instrument whose strip is unarmed has no track row at
+    /// all. A per-track field would make both of those unrepresentable
+    /// states representable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    midi_tracks: Vec<MidiTrackManifest>,
+}
+
+#[derive(Serialize)]
+struct MidiTrackManifest {
+    file: String,
+    name: String,
+    events: u64,
+    dropped_events: u64,
 }
 
 #[derive(Serialize)]
@@ -238,6 +268,7 @@ pub fn spawn_writer(
     started_at_unix: u64,
     format: RecordFormat,
     sinks: Vec<TrackSink>,
+    midi: Option<crate::midi::MidiSink>,
     peaks_tap: Option<PeaksTap>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::fs::create_dir_all(&take_dir)?;
@@ -320,6 +351,32 @@ pub fn spawn_writer(
                     }
                 })
                 .collect();
+            // The sidecars are written HERE, before the manifest, so
+            // `take.toml` can never name a file that is not on disk yet.
+            //
+            // A failure writing them does NOT set `damaged`: that flag
+            // means the audio is not what the room heard, and a missing
+            // sidecar means you have the audio but not the notes. Two
+            // different facts deserve two different words.
+            let midi_tracks: Vec<MidiTrackManifest> = match midi {
+                Some(sink) => match crate::midi::write_sidecars(&take_dir, sample_rate, sink) {
+                    Ok(reports) => reports
+                        .into_iter()
+                        .map(|r| MidiTrackManifest {
+                            file: r.file,
+                            name: r.name,
+                            events: r.events,
+                            dropped_events: r.dropped_events,
+                        })
+                        .collect(),
+                    Err(e) => {
+                        tracing::error!(%e, "MIDI sidecar write failed; the audio take is intact");
+                        Vec::new()
+                    }
+                },
+                None => Vec::new(),
+            };
+
             let manifest = TakeManifest {
                 schema_version: 1,
                 started_at_unix,
@@ -327,6 +384,7 @@ pub fn spawn_writer(
                 format,
                 damaged,
                 tracks: manifest_tracks,
+                midi_tracks,
             };
             match toml::to_string_pretty(&manifest) {
                 Ok(text) => {
@@ -372,6 +430,7 @@ mod tests {
             RecordFormat::Wav32Float,
             vec![sink("ch01-test.wav", 1, Some(4), rx)],
             None,
+            None,
         )
         .unwrap();
         drop(tx); // the take ends when producers drop
@@ -412,6 +471,7 @@ mod tests {
             1_000,
             RecordFormat::Wav32Float,
             vec![sink("ch01-test.wav", 1, Some(0), rx)],
+            None,
             Some(Box::new(move |batch: PeakBatch| {
                 tap_seen
                     .lock()
@@ -460,6 +520,7 @@ mod tests {
                 dropped,
             }],
             None,
+            None,
         )
         .unwrap();
         drop(tx);
@@ -496,6 +557,7 @@ mod tests {
                 1_000,
                 format,
                 vec![sink(&file, 1, Some(0), rx)],
+                None,
                 None,
             )
             .unwrap();
@@ -538,6 +600,7 @@ mod tests {
                 format,
                 vec![sink(&file, 1, None, rx)],
                 None,
+                None,
             )
             .unwrap();
             drop(tx);
@@ -570,6 +633,7 @@ mod tests {
                 sink("ch02-b.flac", 1, Some(1), rx_b),
                 sink("master.flac", 2, None, rx_m),
             ],
+            None,
             None,
         )
         .unwrap();
@@ -616,6 +680,7 @@ mod tests {
             1_000,
             RecordFormat::Wav32Float,
             vec![sink("ch01-a.wav", 1, None, rx)],
+            None,
             None,
         );
         assert!(result.is_err());

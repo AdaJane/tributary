@@ -19,3 +19,15 @@
 
 [projects]
 # root = "projects"
+
+[soundfonts]
+# Where virtual instruments load their .sf2 files from. On the boot disk,
+# never under the recording destination — that follows whatever USB stick
+# is mounted, and an instrument would lose its sound every time it moved.
+# Uploads land here; mounted drives are also scanned, one level deep.
+# root = "soundfonts"
+#
+# Ceiling on an uploaded soundfont. This is a MEMORY budget wearing a disk
+# hat: the synthesiser holds all sample data resident, so a 148 MB General
+# MIDI set is an OOM kill on a Pi Zero 2 W rather than a slow load.
+# max_bytes = 67108864

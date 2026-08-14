@@ -12,7 +12,11 @@ description = "The Tributary daemon: recording engine host with an HTTP/WS contr
 # (libasound2-dev); build with --no-default-features for the fake backend
 # (test tone, no devices) on header-less machines.
 default = ["hardware"]
-hardware = ["trib-audio/cpal-backend"]
+# midir joins cpal here because it links libasound too. Instruments
+# themselves stay unconditional (rustysynth is pure Rust), so a
+# --no-default-features build still renders them — it just has no external
+# MIDI in, and tests drive the event ring directly.
+hardware = ["trib-audio/cpal-backend", "dep:midir"]
 # Bakes web/dist into the binary so one file serves console + API. Opt-in:
 # plain builds never require the web build to exist. Used by `just dist`
 # and the release workflow.
@@ -30,6 +34,7 @@ axum.workspace = true
 clap.workspace = true
 config.workspace = true
 futures.workspace = true
+midir = { workspace = true, optional = true }
 rust-embed = { workspace = true, optional = true }
 rustix.workspace = true
 serde.workspace = true

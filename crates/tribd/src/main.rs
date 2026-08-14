@@ -9,12 +9,16 @@ mod device_match;
 mod engine_host;
 mod format;
 mod hub;
+mod instrument_host;
 mod meter_pump;
+mod midi_in;
+mod midi_ports;
 mod monitor_pump;
 mod mount_watch;
 mod recording_prefs;
 mod registry;
 mod settings;
+mod soundfonts;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -115,6 +119,20 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         }
     };
     let sample_rate = prefs.effective_sample_rate(&settings);
+    // The soundfont library lives on the boot disk, never under the
+    // recording destination — that follows whatever stick is mounted, and
+    // an instrument would lose its sound every time it moved. Created
+    // eagerly so the first upload has somewhere to land; a failure here is
+    // a warning, not a boot error, because a box with no instruments is
+    // still a recorder.
+    let soundfont_root = std::path::absolute(&settings.soundfonts.root)?;
+    if let Err(e) = std::fs::create_dir_all(&soundfont_root) {
+        tracing::warn!(
+            root = %soundfont_root.display(),
+            %e,
+            "could not create the soundfont library; instruments will have nothing to load"
+        );
+    }
 
     // Reopen the latest project, or tear off fresh tape: one strip patched
     // to input 0 and the classic AUX 1/2 → reverb/delay loop pre-wired.
@@ -169,6 +187,11 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     // when its channel closes at shutdown and the thread drops the handle.
     let (device_tx, device_rx) = std::sync::mpsc::channel();
     let devices = device_host::DeviceHandle::new(device_tx);
+    // The instrument host is the device orchestrator's sibling, not its
+    // tenant: it owns MIDI ports and the SoundFont cache, both of which
+    // block, and neither of which has anything to say about audio devices.
+    let (instrument_tx, instrument_rx) = std::sync::mpsc::channel();
+    let instruments = instrument_host::InstrumentHandle::new(instrument_tx);
 
     let (meter_keys_tx, meter_keys_rx) = tokio::sync::watch::channel(compiled.meter_keys);
     // The control task owns the project and republishes it on a
@@ -198,8 +221,19 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             project_watch: project_watch_tx,
         },
         Some(devices.clone()),
+        Some(instruments.clone()),
     );
     device_host::spawn(device_rx, audio, stream, control.clone());
+    {
+        let control = control.clone();
+        instrument_host::spawn(
+            instrument_rx,
+            soundfont_root.clone(),
+            sample_rate,
+            engine_handle.midi_tx,
+            Box::new(move |rack| control.instrument_rack_changed_blocking(rack)),
+        );
+    }
     meter_pump::spawn(
         hub.clone(),
         registry.clone(),
@@ -228,6 +262,9 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         can_format: format::available(),
         monitor_tx,
         devices,
+        instruments,
+        soundfont_dir: soundfont_root.to_string_lossy().into_owned(),
+        max_soundfont_bytes: settings.soundfonts.max_bytes,
     };
 
     let listener = tokio::net::TcpListener::bind(&settings.server.bind).await?;

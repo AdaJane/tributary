@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::compiled::CompiledGraph;
+use crate::instrument::{InstrumentRack, MAX_INSTRUMENT_CHANNELS, MIDI_RING_CAPACITY, MidiEvent};
 use crate::playback::PlaybackSet;
 use crate::record::RecordSet;
 use crate::rings::{
@@ -32,12 +33,25 @@ pub struct EngineHandle {
     pub retire_rx: Consumer<Retired>,
     /// The playback mix while the monitor targets the browser stream.
     pub monitor_rx: Consumer<f32>,
+    /// MIDI into the rack. Written by the port threads, not the control
+    /// task: an event's whole job is to arrive quickly, and routing it
+    /// through the control loop would put a fader drag between a key and
+    /// its note.
+    pub midi_tx: Producer<MidiEvent>,
 }
 
 /// The audio side. `process` runs on the audio callback: no allocation, no
 /// locks, no syscalls.
 pub struct GraphEngine {
     graph: Box<CompiledGraph>,
+    /// Virtual instruments. Empty until the instrument host publishes one,
+    /// and an empty rack short-circuits, so a console with no instruments
+    /// pays nothing for their existence.
+    rack: Box<InstrumentRack>,
+    /// Scratch the rack renders into — preallocated at the widest the rack
+    /// may ever be, so adding an instrument never allocates here.
+    instrument_buf: Vec<f32>,
+    midi_rx: Consumer<MidiEvent>,
     record: Option<Box<RecordSet>>,
     playback: Option<Box<PlaybackSet>>,
     monitor: MonitorTarget,
@@ -47,6 +61,10 @@ pub struct GraphEngine {
     /// Retirees waiting for ring space. Preallocated; never grows.
     parked: Vec<Retired>,
     frame: u64,
+    /// Frames rendered since the engine started. Unlike `frame`, which
+    /// counts blocks for the meter pump, this counts samples — the unit a
+    /// MIDI capture has to stamp events in.
+    sample_frame: u64,
     cmd_rx: Consumer<EngineCommand>,
     meter_tx: Producer<MeterBlock>,
     retire_tx: Producer<Retired>,
@@ -57,16 +75,22 @@ pub fn engine_pair(initial: Box<CompiledGraph>) -> (EngineHandle, GraphEngine) {
     let (meter_tx, meter_rx) = RingBuffer::new(METER_RING_CAPACITY);
     let (retire_tx, retire_rx) = RingBuffer::new(RETIRE_RING_CAPACITY);
     let (monitor_tx, monitor_rx) = RingBuffer::new(MONITOR_RING_CAPACITY);
+    let (midi_tx, midi_rx) = RingBuffer::new(MIDI_RING_CAPACITY);
     let monitor_buf = vec![0.0; initial.block_size() * 2];
+    let instrument_buf = vec![0.0; initial.block_size() * MAX_INSTRUMENT_CHANNELS];
     (
         EngineHandle {
             cmd_tx,
             meter_rx,
             retire_rx,
             monitor_rx,
+            midi_tx,
         },
         GraphEngine {
             graph: initial,
+            rack: Box::default(),
+            instrument_buf,
+            midi_rx,
             record: None,
             playback: None,
             monitor: MonitorTarget::Hardware,
@@ -74,6 +98,7 @@ pub fn engine_pair(initial: Box<CompiledGraph>) -> (EngineHandle, GraphEngine) {
             monitor_tx,
             parked: Vec::with_capacity(MAX_PARKED),
             frame: 0,
+            sample_frame: 0,
             cmd_rx,
             meter_tx,
             retire_tx,
@@ -98,9 +123,25 @@ impl GraphEngine {
             let chunk = (frames - done).min(block);
             let mut peaks = [0.0f32; MAX_METERS];
             let mut clip_bits = 0u64;
+            // Instruments render first: they are an input source, and the
+            // strip pass reads them exactly the way it reads a device.
+            // The sidecar's clock is the take's, not the daemon's uptime.
+            let capture = self.record.as_deref_mut().and_then(|set| {
+                let start = set.midi.as_ref()?.start_sample;
+                let elapsed = self.sample_frame.saturating_sub(start);
+                Some((set.midi.as_deref_mut()?, elapsed))
+            });
+            let inst_channels = self.rack.render_into(
+                &mut self.instrument_buf[..chunk * MAX_INSTRUMENT_CHANNELS],
+                chunk,
+                &mut self.midi_rx,
+                capture,
+            );
             self.graph.process_chunk(
                 &input[done * input_channels..(done + chunk) * input_channels],
                 input_channels,
+                &self.instrument_buf[..chunk * inst_channels.max(1)],
+                inst_channels,
                 &mut output[done * 2..(done + chunk) * 2],
                 &mut peaks,
                 &mut clip_bits,
@@ -143,6 +184,7 @@ impl GraphEngine {
                 self.retire(Retired::Playback(set));
             }
             self.frame += 1;
+            self.sample_frame += chunk as u64;
             done += chunk;
         }
     }
@@ -161,7 +203,21 @@ impl GraphEngine {
                     let old = std::mem::replace(&mut self.graph, graph);
                     self.retire(Retired::Graph(old));
                 }
-                Ok(EngineCommand::StartRecord { set }) => {
+                Ok(EngineCommand::SwapRack { rack }) => {
+                    let mut old = std::mem::replace(&mut self.rack, rack);
+                    // The outgoing synths are about to lose the only thing
+                    // that could ever release their voices.
+                    old.all_notes_off();
+                    self.retire(Retired::Rack(old));
+                }
+                Ok(EngineCommand::StartRecord { mut set }) => {
+                    // Stamp the take's zero here rather than control-side:
+                    // the control task cannot see the audio thread's clock,
+                    // and a sidecar offset by the command's queue time
+                    // would drift the notes off the waveform.
+                    if let Some(midi) = set.midi.as_deref_mut() {
+                        midi.start_sample = self.sample_frame;
+                    }
                     if let Some(old) = self.record.replace(set) {
                         self.retire(Retired::Record(old));
                     }
@@ -224,7 +280,7 @@ impl GraphEngine {
 
 #[cfg(test)]
 mod tests {
-    use trib_core::{InputAssign, MixerState, StripId, StripState};
+    use trib_core::{InputAssign, InstrumentId, InstrumentState, MixerState, StripId, StripState};
 
     use super::*;
     use crate::compiled::compile;
@@ -244,10 +300,7 @@ mod tests {
 
     fn state() -> MixerState {
         let mut strip = StripState::new(StripId(0), "Ch 1".into());
-        strip.input = Some(InputAssign {
-            device: None,
-            device_channel: 0,
-        });
+        strip.input = Some(InputAssign::device(None, 0));
         strip.fader_db = 0.0;
         MixerState {
             strips: vec![strip],
@@ -361,6 +414,157 @@ mod tests {
         drop(playback_tx); // rings drain mid-run, so the finish path is covered
         let input = sine(0.5, BLOCK);
         let mut output = vec![0.0; BLOCK * 2];
+        assert_no_alloc::assert_no_alloc(|| {
+            for _ in 0..8 {
+                engine.process(&input, 1, &mut output);
+            }
+        });
+    }
+
+    /// A one-instrument console with the strip patched to its left channel.
+    fn instrument_state() -> MixerState {
+        let mut strip = StripState::new(StripId(0), "Keys".into());
+        strip.input = Some(InputAssign::instrument(InstrumentId(0), 0));
+        strip.fader_db = 0.0;
+        MixerState {
+            strips: vec![strip],
+            instruments: vec![InstrumentState::new(InstrumentId(0), "Rhodes".into())],
+            ..MixerState::default()
+        }
+    }
+
+    fn loaded_rack() -> Box<InstrumentRack> {
+        let mut bytes = std::io::Cursor::new(crate::instrument::fixture::sine_soundfont());
+        let sf = std::sync::Arc::new(rustysynth::SoundFont::new(&mut bytes).unwrap());
+        let binding = crate::instrument::MidiBinding {
+            port: Some(0),
+            channel: None,
+        };
+        Box::new(InstrumentRack::new(
+            vec![Some(
+                crate::instrument::Instrument::new(
+                    &sf,
+                    &crate::instrument::VoiceSpec {
+                        sample_rate: SR,
+                        polyphony: 32,
+                        effects: false,
+                        bank: 0,
+                        program: 0,
+                        binding,
+                        keys: crate::instrument::KeyFilter::all(),
+                    },
+                )
+                .unwrap(),
+            )],
+            vec![2],
+        ))
+    }
+
+    fn note_on(key: u8) -> MidiEvent {
+        MidiEvent {
+            port: 0,
+            channel: 0,
+            status: 0x90,
+            data1: key,
+            data2: 100,
+        }
+    }
+
+    // The tracer bullet, end to end inside the engine: a MIDI event enters
+    // the ring, the rack synthesises it, and it leaves through a strip in
+    // the master mix — with no device, no backend and no hardware anywhere.
+    #[test]
+    fn a_midi_note_reaches_the_master_mix_through_an_instrument_and_a_strip() {
+        let compiled = compile(&instrument_state(), SR, BLOCK, &slots());
+        let (mut handle, mut engine) = engine_pair(compiled.graph);
+        handle
+            .cmd_tx
+            .push(EngineCommand::SwapRack {
+                rack: loaded_rack(),
+            })
+            .unwrap();
+        handle.midi_tx.push(note_on(78)).unwrap();
+
+        let input = vec![0.0; BLOCK];
+        let mut output = vec![0.0; BLOCK * 2];
+        let mut peak = 0.0f32;
+        for _ in 0..4 {
+            engine.process(&input, 1, &mut output);
+            peak = peak.max(output.iter().map(|s| s.abs()).fold(0.0, f32::max));
+        }
+        assert!(peak > 0.0, "the note never reached the mix");
+    }
+
+    #[test]
+    fn a_console_with_no_instruments_hears_nothing_from_the_rack() {
+        // The rack is loaded but no strip is patched to it: an instrument
+        // must not leak into the mix just by existing.
+        let compiled = compile(&state(), SR, BLOCK, &slots());
+        let (mut handle, mut engine) = engine_pair(compiled.graph);
+        handle
+            .cmd_tx
+            .push(EngineCommand::SwapRack {
+                rack: loaded_rack(),
+            })
+            .unwrap();
+        handle.midi_tx.push(note_on(78)).unwrap();
+
+        let input = vec![0.0; BLOCK];
+        let mut output = vec![0.0; BLOCK * 2];
+        for _ in 0..4 {
+            engine.process(&input, 1, &mut output);
+        }
+        assert!(output.iter().all(|s| s.abs() < 1e-6));
+    }
+
+    #[test]
+    fn a_rack_swap_retires_the_old_rack_to_the_control_side() {
+        // Freeing a SoundFont on the audio thread is exactly what the
+        // retire ring exists to prevent.
+        let compiled = compile(&instrument_state(), SR, BLOCK, &slots());
+        let (mut handle, mut engine) = engine_pair(compiled.graph);
+        handle
+            .cmd_tx
+            .push(EngineCommand::SwapRack {
+                rack: loaded_rack(),
+            })
+            .unwrap();
+        let input = vec![0.0; BLOCK];
+        let mut output = vec![0.0; BLOCK * 2];
+        engine.process(&input, 1, &mut output);
+        // The first swap replaces the empty default rack.
+        assert!(matches!(handle.retire_rx.pop(), Ok(Retired::Rack(_))));
+
+        handle
+            .cmd_tx
+            .push(EngineCommand::SwapRack {
+                rack: loaded_rack(),
+            })
+            .unwrap();
+        engine.process(&input, 1, &mut output);
+        assert!(matches!(handle.retire_rx.pop(), Ok(Retired::Rack(_))));
+    }
+
+    #[test]
+    fn the_process_path_never_allocates_with_a_live_instrument_rack() {
+        let compiled = compile(&instrument_state(), SR, BLOCK, &slots());
+        let (mut handle, mut engine) = engine_pair(compiled.graph);
+        handle
+            .cmd_tx
+            .push(EngineCommand::SwapRack {
+                rack: loaded_rack(),
+            })
+            .unwrap();
+        // Install the rack before the guarded run: the swap itself retires
+        // a box, which is control-side work the guard would flag.
+        let input = vec![0.0; BLOCK];
+        let mut output = vec![0.0; BLOCK * 2];
+        engine.process(&input, 1, &mut output);
+        while handle.retire_rx.pop().is_ok() {}
+
+        for key in 60..72u8 {
+            handle.midi_tx.push(note_on(key)).unwrap();
+        }
         assert_no_alloc::assert_no_alloc(|| {
             for _ in 0..8 {
                 engine.process(&input, 1, &mut output);

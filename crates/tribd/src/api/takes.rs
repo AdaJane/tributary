@@ -26,6 +26,17 @@ pub struct TakeDto {
     pub damaged: bool,
     pub duration_secs: f64,
     pub tracks: Vec<TakeTrackDto>,
+    /// MIDI sidecars beside the audio, one per instrument that was armed.
+    /// Empty for every take without one, which is most of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub midi_tracks: Vec<TakeMidiTrackDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct TakeMidiTrackDto {
+    pub file: String,
+    pub name: String,
+    pub events: u64,
 }
 
 /// Finished takes, newest first. Read fresh from disk on every call — the
@@ -96,6 +107,15 @@ pub fn take_dtos(project: &trib_project::Project) -> Vec<TakeDto> {
                         frames: t.frames,
                         dropped_samples: t.dropped_samples,
                         strip_id: t.strip_id,
+                    })
+                    .collect(),
+                midi_tracks: info
+                    .midi_tracks
+                    .into_iter()
+                    .map(|m| TakeMidiTrackDto {
+                        file: m.file,
+                        name: m.name,
+                        events: m.events,
                     })
                     .collect(),
             }

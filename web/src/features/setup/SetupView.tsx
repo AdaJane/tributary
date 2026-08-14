@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
-import type { ReactNode } from 'react';
 
+import { InlineError, Panel, Waiting } from '../../design/Panel';
 import { SegmentedControl } from '../../design/SegmentedControl';
 import type { SegmentedOption } from '../../design/SegmentedControl';
 import { loadSettings, saveSettings, useSettings } from '../../state/settings';
@@ -27,35 +27,6 @@ const RATE_OPTIONS: readonly SegmentedOption<RateValue>[] = [
   { value: '48000', label: '48 kHz' },
   { value: '96000', label: '96 kHz' },
 ];
-
-function Panel({
-  title,
-  badge,
-  children,
-}: {
-  title: string;
-  badge?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <section className={styles.panel}>
-      <header className={styles.panelHeader}>
-        <h2 className={styles.panelTitle}>{title}</h2>
-        {badge}
-      </header>
-      {children}
-    </section>
-  );
-}
-
-function InlineError({ message }: { message: string }) {
-  return (
-    <p className={styles.error} role="status">
-      <span className={styles.errorDot} />
-      {message}
-    </p>
-  );
-}
 
 /**
  * The console's rear panel: recording destination, file format, and
@@ -95,7 +66,7 @@ export function SetupView() {
 
         <Panel title="File format">
           {settings === null ? (
-            <p className={styles.waiting}>waiting for the daemon…</p>
+            <Waiting />
           ) : (
             <>
               <SegmentedControl
@@ -122,7 +93,7 @@ export function SetupView() {
           }
         >
           {settings === null ? (
-            <p className={styles.waiting}>waiting for the daemon…</p>
+            <Waiting />
           ) : (
             <>
               <SegmentedControl

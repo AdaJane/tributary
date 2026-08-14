@@ -67,6 +67,18 @@ export function paramKey(delta: StateDelta): string {
       return `arm:${JSON.stringify(delta.target)}`;
     case 'record_arm_all':
       return 'arm:all';
+    // Instrument edits are REST, not gestures — no drag produces them, so
+    // they never enter the hot window. They still need a key here because
+    // the switch is exhaustive by design: a new delta kind must be a
+    // compile error until somebody decides what it means.
+    case 'instrument_added':
+      return `inst+:${delta.instrument.id}`;
+    case 'instrument_removed':
+      return `inst-:${delta.id}`;
+    case 'instrument_changed':
+      return `inst:${delta.instrument.id}`;
+    case 'instrument_strips_added':
+      return `inst-strips:${delta.id}`;
   }
 }
 

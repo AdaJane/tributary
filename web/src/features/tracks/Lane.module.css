@@ -35,6 +35,16 @@
   font-size: var(--text-2xs);
 }
 
+/* Green rather than red: a sidecar is a thing you gained, not a fault. */
+.midi {
+  margin-left: var(--s1);
+  padding: 0 var(--s1);
+  border-radius: var(--radius-1);
+  background: var(--led-green-off);
+  color: var(--led-green-on);
+  font-size: var(--text-2xs);
+}
+
 .name {
   font-family: var(--font-label);
   font-size: var(--text-xs);

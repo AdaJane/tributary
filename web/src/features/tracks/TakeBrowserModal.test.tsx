@@ -21,8 +21,8 @@ function base() {
     damaged: false,
     durationSecs: 187,
     tracks: [
-      { file: 'ch01-kick.wav', channels: 1, stripId: 0, damaged: false },
-      { file: 'master.wav', channels: 2, stripId: null, damaged: false },
+      { file: 'ch01-kick.wav', channels: 1, stripId: 0, damaged: false, midi: false },
+      { file: 'master.wav', channels: 2, stripId: null, damaged: false, midi: false },
     ],
   };
 }

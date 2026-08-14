@@ -172,6 +172,7 @@ export function Timeline() {
             solo={lanes[i]?.solo ?? false}
             mute={lanes[i]?.mute ?? false}
             damaged={trackMeta[i]?.damaged ?? false}
+            midi={trackMeta[i]?.midi ?? false}
             pairs={pairs}
             samplesPerBin={samplesPerBin}
             fpp={effFpp}

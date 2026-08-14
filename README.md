@@ -205,13 +205,69 @@ or vanishing output (Bluetooth renegotiation, route changes) costs
 monitor audio only — metering and recording continue — and the monitor
 stream rebuilds itself on the current default once one is healthy.
 
+## Instruments
+
+Not every source is outside the box. The **Instruments** tab holds a rack of
+SoundFont players: pick a `.sf2`, pick a preset, point it at a MIDI keyboard,
+and it becomes an input source like any other — patched from the same
+patchbay, with the same gain, EQ, fader and record arm as a microphone. From
+the strip downward nothing knows the difference, which is why instrument
+channels record, meter, play back and draw waveform lanes with no special
+handling anywhere.
+
+**Outputs.** An instrument reaches the desk either as one **stereo pair** —
+what a piano wants — or as **per-drum splits**: named slices of the keyboard
+(Kick, Snare, Toms, HiHat, Cymbals, Percussion), each its own mono channel
+with its own fader and pan. A SoundFont kit is one MIDI channel with a
+different drum on every key, so the key number is the only thing that can
+separate them; the General MIDI map interleaves toms and hi-hats, which is
+why a split holds a list of key ranges rather than one. **Add all channels
+to mixer** then creates and names a strip for every output in one move —
+six drums, six faders, ready to balance before anyone plays. It adds only
+what is missing, so pressing it twice costs nothing and levels you have
+already set survive.
+
+Splits share one loaded soundfont and only ever sound their own keys, so a
+six-piece kit costs no extra sample memory and no extra voices — just one
+synthesiser instance each.
+
+**Soundfonts** live in `soundfonts.root` on the boot disk (the appliance
+uses `/var/lib/tributary/soundfonts`), and any mounted drive is scanned one
+level deep, so dropping files on a USB stick is enough. The console can also
+upload one directly. Note the memory cost: all sample data stays resident, so
+`soundfonts.max_bytes` (64 MB by default) is a RAM budget, not a disk one — a
+148 MB General MIDI set is an OOM kill on a Pi Zero 2 W rather than a slow
+load. None is bundled; Tributary ships no soundfont of its own.
+
+**MIDI** comes in over the ALSA sequencer, so any USB keyboard the system
+enumerates works, and no extra package is needed. Ports open when an
+instrument names one and close when none does; nothing retries in the
+background, so plugging a keyboard in and pressing Refresh is the whole
+recovery story. An instrument that names a port which is not there says so
+rather than guessing at a different one.
+
+**Takes carry the notes too.** Recording an armed instrument channel writes
+its audio exactly like any other track, and drops a Standard MIDI File beside
+it (`inst01-kit-kick.mid`), listed in `take.toml` under `[[midi_tracks]]`. The
+audio stays authoritative — a sidecar that fails to write never marks a take
+damaged, because "the audio is not what the room heard" and "you have the
+audio but not the notes" are different problems. Lanes carrying one show a
+`MIDI` chip in the Tracks view.
+
+**Latency, honestly.** Playing an instrument live goes through the engine
+block and the monitor's output prefill: roughly 50–70 ms end to end. That is
+fine for pads and workable for parts, and too slow for fast keyboard work.
+The prefill is what keeps a stalling output device from freezing metering
+and recording, so it is not lowered by default.
+
 ## Layout
 
 - `crates/trib-core` — pure mixer domain (state, signal graph, reducer)
 - `crates/trib-dsp` — DSP building blocks (filters, dynamics, reverb)
-- `crates/trib-engine` — realtime mix engine (strips, buses, tape return)
+- `crates/trib-engine` — realtime mix engine (strips, buses, tape return,
+  the SoundFont instrument rack)
 - `crates/trib-audio` — device IO (cpal/ALSA backend, Pulse capture)
-- `crates/trib-project` — persistence (takes, manifests, peaks sidecars)
+- `crates/trib-project` — persistence (takes, manifests, peaks and MIDI sidecars)
 - `crates/tribd` — the daemon: axum API, WS hub, engine host
 - `web/` — React console UI
 - `design-system/tributary/MASTER.md` — the design system spec

@@ -1,7 +1,9 @@
 pub mod destinations;
 pub mod devices;
+pub mod instruments;
 pub mod recording;
 pub mod sessions;
+pub mod soundfonts;
 pub mod state;
 pub mod strips;
 pub mod takes;
@@ -47,6 +49,12 @@ pub struct AppState {
     pub monitor_tx: tokio::sync::broadcast::Sender<axum::body::Bytes>,
     /// The device orchestrator — the only path to the audio backend.
     pub devices: crate::device_host::DeviceHandle,
+    /// The instrument orchestrator — MIDI ports and the SoundFont library.
+    pub instruments: crate::instrument_host::InstrumentHandle,
+    /// Where uploads land. Resolved once at boot, so handlers never
+    /// re-derive it and cannot disagree about it.
+    pub soundfont_dir: String,
+    pub max_soundfont_bytes: u64,
 }
 
 /// Errors surfaced by REST handlers.
@@ -66,6 +74,11 @@ pub enum ApiError {
     /// rather than failing as though the user got something wrong.
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// The body outgrew what this installation accepts. Distinct from
+    /// `Invalid` because the file is fine — there is just too much of it,
+    /// and the console's advice ("use a smaller soundfont") differs.
+    #[error("too large: {0}")]
+    TooLarge(String),
 }
 
 impl IntoResponse for ApiError {
@@ -90,6 +103,11 @@ impl IntoResponse for ApiError {
             ApiError::Unsupported(detail) => (
                 StatusCode::NOT_IMPLEMENTED,
                 Json(serde_json::json!({ "error": "unsupported", "detail": detail })),
+            )
+                .into_response(),
+            ApiError::TooLarge(detail) => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({ "error": "too_large", "detail": detail })),
             )
                 .into_response(),
             // Internal details go to the log, never to the client.
@@ -138,6 +156,23 @@ fn api_router() -> OpenApiRouter<AppState> {
         .routes(routes!(devices::list_devices))
         .routes(routes!(devices::refresh_devices))
         .routes(routes!(devices::set_card_profile))
+        .routes(routes!(
+            instruments::list_instruments,
+            instruments::create_instrument
+        ))
+        .routes(routes!(instruments::refresh_instruments))
+        .routes(routes!(instruments::panic_instruments))
+        .routes(routes!(
+            instruments::update_instrument,
+            instruments::delete_instrument
+        ))
+        .routes(routes!(instruments::test_instrument))
+        .routes(routes!(instruments::set_instrument_outputs))
+        .routes(routes!(instruments::add_instrument_strips))
+        .routes(routes!(
+            soundfonts::upload_soundfont,
+            soundfonts::delete_soundfont
+        ))
         .routes(routes!(
             recording::get_recording,
             recording::update_recording

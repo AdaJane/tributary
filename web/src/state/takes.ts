@@ -22,6 +22,8 @@ export interface TakeTrack {
   stripId: number | null;
   /** Pre-derived: the writer counts dropped samples, the UI shows a chip. */
   damaged: boolean;
+  /** This track's instrument also left a `.mid` beside the audio. */
+  midi: boolean;
 }
 
 export interface Take {
@@ -71,6 +73,9 @@ const fromDtos = (dtos: readonly TakeDto[]): Take[] =>
       channels: track.channels,
       stripId: track.strip_id ?? null,
       damaged: track.dropped_samples > 0,
+      // A sidecar belongs to an instrument, and an instrument can feed
+      // more than one strip — so every lane fed by one carries the chip.
+      midi: (t.midi_tracks ?? []).length > 0 && track.strip_id !== null,
     })),
   }));
 

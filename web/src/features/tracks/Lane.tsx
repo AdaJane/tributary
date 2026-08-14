@@ -12,6 +12,8 @@ export interface LaneProps {
   solo: boolean;
   mute: boolean;
   damaged: boolean;
+  /** A MIDI sidecar was recorded beside this track. */
+  midi: boolean;
   pairs: Int16Array;
   samplesPerBin: number;
   fpp: number;
@@ -29,6 +31,7 @@ export function Lane({
   solo,
   mute,
   damaged,
+  midi,
   pairs,
   samplesPerBin,
   fpp,
@@ -83,6 +86,11 @@ export function Lane({
           {damaged && (
             <span className={styles.damaged} title="Dropped samples were padded with silence">
               DAMAGED
+            </span>
+          )}
+          {midi && (
+            <span className={styles.midi} title="A MIDI sidecar was recorded beside this track">
+              MIDI
             </span>
           )}
         </span>

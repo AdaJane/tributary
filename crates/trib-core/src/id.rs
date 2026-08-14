@@ -34,6 +34,11 @@ id_newtype!(
 id_newtype!(
     /// One recording pass within a project.
     TakeId, "take");
+id_newtype!(
+    /// A virtual instrument in the rack. Never reused within a session:
+    /// it is the printed slot ("INST 3"), the patch identity a strip
+    /// holds, and the seed for the link tape's colour.
+    InstrumentId, "instrument");
 
 #[cfg(test)]
 mod tests {
@@ -45,6 +50,7 @@ mod tests {
         assert_eq!(BusId(1).to_string(), "bus#1");
         assert_eq!(FxId(0).to_string(), "fx#0");
         assert_eq!(TakeId(7).to_string(), "take#7");
+        assert_eq!(InstrumentId(2).to_string(), "instrument#2");
     }
 
     #[test]

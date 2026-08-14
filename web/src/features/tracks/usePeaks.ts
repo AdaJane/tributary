@@ -24,9 +24,17 @@ export function usePeaks(): void {
     const meta = [
       ...mixer.strips
         .filter((strip) => strip.record_arm)
-        .map((strip) => ({ file: '', channels: 1, stripId: strip.id, damaged: false })),
+        .map((strip) => ({
+          file: '',
+          channels: 1,
+          stripId: strip.id,
+          damaged: false,
+          // While recording, the chip is derived from what the strip is
+          // patched to — the manifest does not exist yet.
+          midi: strip.input != null && 'instrument' in strip.input,
+        })),
       ...(mixer.master.record_arm
-        ? [{ file: 'master.wav', channels: 2, stripId: null, damaged: false }]
+        ? [{ file: 'master.wav', channels: 2, stripId: null, damaged: false, midi: false }]
         : []),
     ];
     usePeaksStore.getState().startLive(transport.take ?? 0, meta);
@@ -87,6 +95,7 @@ export function usePeaks(): void {
             channels: t.channels,
             stripId: t.stripId,
             damaged: t.damaged,
+            midi: t.midi,
           })),
         );
       })

@@ -14,8 +14,8 @@
 use std::collections::HashMap;
 
 use trib_core::{
-    BusId, BusKind, EqBandKind, FxId, FxParams, MeterKey, MixerState, SendTap, StripId,
-    db_to_linear,
+    BusId, BusKind, EqBandKind, FxId, FxParams, InstrumentId, MeterKey, MixerState, SendTap,
+    StripId, db_to_linear,
 };
 use trib_dsp::{
     BandFilter, Biquad, Coefficients, Delay, MeterAccum, Reverb, SmoothedParam, band_coefficients,
@@ -64,8 +64,23 @@ struct SendSlot {
     pre: bool,
 }
 
+/// Where a strip's dry sample comes from, resolved to flat indices at
+/// compile time so the audio thread never sees a device name or an
+/// instrument id.
+///
+/// `None` covers both "unpatched" and "patched at something that is not
+/// there" — a distinction the console must draw, but the render loop must
+/// not: both are silence, and branching on the difference per sample would
+/// buy nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputTap {
+    None,
+    Device(u16),
+    Instrument(u16),
+}
+
 struct StripNode {
-    input_channel: Option<u16>,
+    input: InputTap,
     gain: SmoothedParam,
     eq_enabled: bool,
     /// low, mid, high — run in series.
@@ -168,6 +183,23 @@ pub fn compile(
     let mut eqs = Vec::new();
     let mut map = ParamMap::default();
 
+    // Where each instrument's channels start in the rack's frame. Derived
+    // from the document, exactly as the rack derives its own widths, so the
+    // two agree on the layout without either telling the other.
+    let instrument_bases: Vec<(InstrumentId, usize, usize)> = {
+        let mut base = 0usize;
+        state
+            .instruments
+            .iter()
+            .map(|inst| {
+                let width = inst.channels();
+                let entry = (inst.id, base, width);
+                base += width;
+                entry
+            })
+            .collect()
+    };
+
     let bus_index: HashMap<BusId, u16> = state
         .buses
         .iter()
@@ -231,12 +263,30 @@ pub fn compile(
                 })
                 .collect();
             StripNode {
-                // Device+channel resolves to a flat frame index here, at
-                // compile time — unknown devices land on the silence path.
-                input_channel: strip
-                    .input
-                    .as_ref()
-                    .and_then(|a| slots.resolve(a.device.as_deref(), a.device_channel)),
+                // Patches resolve to flat frame indices here, at compile
+                // time — anything unknown lands on the silence path.
+                input: match strip.input.as_ref() {
+                    None => InputTap::None,
+                    Some(assign) => match assign.instrument_id() {
+                        // Instruments own a plane of their own, laid out in
+                        // document order. `channel` indexes within the
+                        // instrument — 0/1 for a stereo pair, or one per
+                        // split — and a channel past its width resolves to
+                        // silence rather than into its neighbour's audio.
+                        Some(id) => instrument_bases
+                            .iter()
+                            .find(|(other, _, _)| *other == id)
+                            .filter(|(_, _, width)| (assign.channel() as usize) < *width)
+                            .and_then(|(_, base, _)| {
+                                u16::try_from(base + assign.channel() as usize).ok()
+                            })
+                            .map_or(InputTap::None, InputTap::Instrument),
+                        None => assign
+                            .device_name()
+                            .and_then(|device| slots.resolve(device, assign.channel()))
+                            .map_or(InputTap::None, InputTap::Device),
+                    },
+                },
                 gain: SmoothedParam::new(db_to_linear(strip.gain_db), sample_rate),
                 eq_enabled: strip.eq.enabled,
                 eq: [
@@ -427,12 +477,21 @@ impl CompiledGraph {
     }
 
     /// Process one chunk of at most `block_size` frames. `input` is
-    /// interleaved with `input_channels`; `output` is interleaved stereo.
-    /// A live `record` set receives dry strip taps and the stereo mix.
+    /// interleaved with `input_channels`; `inst` is the instrument rack's
+    /// output, interleaved with `inst_channels`; `output` is interleaved
+    /// stereo. A live `record` set receives dry strip taps and the mix.
+    ///
+    /// Instruments arrive in a buffer of their own rather than inside
+    /// `input` because the device frame is a fixed 64-wide stride the fake
+    /// backend does not fill — folding them in would make instruments
+    /// silently vanish in every test that runs without hardware.
+    #[allow(clippy::too_many_arguments)]
     pub fn process_chunk(
         &mut self,
         input: &[f32],
         input_channels: usize,
+        inst: &[f32],
+        inst_channels: usize,
         output: &mut [f32],
         peaks: &mut [f32; MAX_METERS],
         clip_bits: &mut u64,
@@ -452,7 +511,7 @@ impl CompiledGraph {
 
         // Stage 1: strips into master/groups/aux.
         for (strip_ix, strip) in self.strips.iter_mut().enumerate() {
-            let channel = strip.input_channel.map(usize::from);
+            let tap = strip.input;
             if strip.pfl {
                 any_pfl = true;
             }
@@ -464,8 +523,13 @@ impl CompiledGraph {
                     .map(usize::from)
             });
             for i in 0..frames {
-                let dry = match channel {
-                    Some(c) if c < input_channels => input[i * input_channels + c],
+                let dry = match tap {
+                    InputTap::Device(c) if (c as usize) < input_channels => {
+                        input[i * input_channels + c as usize]
+                    }
+                    InputTap::Instrument(c) if (c as usize) < inst_channels => {
+                        inst[i * inst_channels + c as usize]
+                    }
                     _ => 0.0,
                 };
                 let mut x = dry * strip.gain.tick();
@@ -589,8 +653,8 @@ impl CompiledGraph {
 #[cfg(test)]
 mod tests {
     use trib_core::{
-        BusState, FaderTarget, FxState, InputAssign, MixCommand, RouteTarget, SendState,
-        StripState, apply,
+        BusState, FaderTarget, FxState, InputAssign, InstrumentState, MixCommand, RouteTarget,
+        SendState, StripState, apply,
     };
 
     use super::*;
@@ -604,10 +668,7 @@ mod tests {
 
     fn state_with_input() -> MixerState {
         let mut strip = StripState::new(StripId(0), "Ch 1".into());
-        strip.input = Some(InputAssign {
-            device: None,
-            device_channel: 0,
-        });
+        strip.input = Some(InputAssign::device(None, 0));
         strip.fader_db = 0.0;
         MixerState {
             strips: vec![strip],
@@ -650,7 +711,7 @@ mod tests {
         for _ in 0..blocks {
             peaks = [0.0; MAX_METERS];
             clips = 0;
-            graph.process_chunk(input, 1, &mut output, &mut peaks, &mut clips, None);
+            graph.process_chunk(input, 1, &[], 0, &mut output, &mut peaks, &mut clips, None);
         }
         (output, peaks, clips)
     }
@@ -662,16 +723,94 @@ mod tests {
             .fold(0.0f32, f32::max)
     }
 
+    /// Instrument `n` owns channels 2n and 2n+1 of the rack's frame — the
+    /// layout `compile` and `InstrumentRack` agree on without either
+    /// telling the other.
+    fn state_with_instruments(count: u32) -> MixerState {
+        let mut state = state_with_input();
+        state.instruments = (0..count)
+            .map(|i| InstrumentState::new(InstrumentId(i), format!("Inst {i}")))
+            .collect();
+        state
+    }
+
+    #[test]
+    fn a_strip_patched_to_an_instrument_reads_its_stereo_pair() {
+        let mut state = state_with_instruments(2);
+        // The right channel of the SECOND instrument: flat index 3.
+        state.strips[0].input = Some(InputAssign::instrument(InstrumentId(1), 1));
+        let mut out = compile(&state, SR, BLOCK, &slots());
+
+        let mut inst = vec![0.0; BLOCK * 4];
+        for frame in inst.chunks_exact_mut(4) {
+            frame[3] = 0.5;
+        }
+        let input = vec![0.0; BLOCK];
+        let mut output = vec![0.0; BLOCK * 2];
+        let mut peaks = [0.0; MAX_METERS];
+        let mut clips = 0;
+        for _ in 0..3 {
+            peaks = [0.0; MAX_METERS];
+            out.graph.process_chunk(
+                &input,
+                1,
+                &inst,
+                4,
+                &mut output,
+                &mut peaks,
+                &mut clips,
+                None,
+            );
+        }
+        assert!(
+            (peaks[0] - 0.5).abs() < 0.01,
+            "the instrument's right channel reached the strip"
+        );
+    }
+
+    #[test]
+    fn an_instrument_patch_reads_nothing_from_the_device_frame() {
+        // The two planes are separate on purpose: an instrument index must
+        // never resolve into a device channel, or unplugging a microphone
+        // would change what an instrument-fed strip hears.
+        let mut state = state_with_instruments(1);
+        state.strips[0].input = Some(InputAssign::instrument(InstrumentId(0), 0));
+        let mut out = compile(&state, SR, BLOCK, &slots());
+        let (output, peaks, _) = run(&mut out.graph, &sine(0.5), 3);
+        assert!(peak_of(&output, 0) < 1e-6);
+        assert!(peaks[0] < 1e-6);
+    }
+
+    #[test]
+    fn a_patch_to_an_instrument_that_is_not_in_the_document_is_silent() {
+        let mut state = state_with_instruments(1);
+        state.strips[0].input = Some(InputAssign::instrument(InstrumentId(7), 0));
+        let mut out = compile(&state, SR, BLOCK, &slots());
+        let inst = vec![0.5; BLOCK * 2];
+        let input = vec![0.0; BLOCK];
+        let mut output = vec![0.0; BLOCK * 2];
+        let mut peaks = [0.0; MAX_METERS];
+        let mut clips = 0;
+        out.graph.process_chunk(
+            &input,
+            1,
+            &inst,
+            2,
+            &mut output,
+            &mut peaks,
+            &mut clips,
+            None,
+        );
+        assert!(peaks[0] < 1e-6, "a dangling instrument patch is silence");
+    }
+
     #[test]
     fn a_strip_on_a_second_device_reads_its_slot_offset() {
         let mut slots = InputSlots::default();
         slots.allocate(None, 2).unwrap();
         slots.allocate(Some("dock"), 2).unwrap();
         let mut state = state_with_input();
-        state.strips[0].input = Some(InputAssign {
-            device: Some("dock".into()),
-            device_channel: 1,
-        });
+        state.strips[0].input = Some(InputAssign::device(Some("dock".into()), 1));
         let mut out = compile(&state, SR, BLOCK, &slots);
         // Four-channel frame: only flat channel 3 (dock ch 1) carries signal.
         let mut input = vec![0.0; BLOCK * 4];
@@ -684,7 +823,7 @@ mod tests {
         for _ in 0..3 {
             peaks = [0.0; MAX_METERS];
             out.graph
-                .process_chunk(&input, 4, &mut output, &mut peaks, &mut clips, None);
+                .process_chunk(&input, 4, &[], 0, &mut output, &mut peaks, &mut clips, None);
         }
         assert!(
             (peaks[0] - 0.5).abs() < 0.01,
@@ -695,10 +834,7 @@ mod tests {
     #[test]
     fn a_patch_to_an_unknown_device_is_silent() {
         let mut state = state_with_input();
-        state.strips[0].input = Some(InputAssign {
-            device: Some("unplugged interface".into()),
-            device_channel: 0,
-        });
+        state.strips[0].input = Some(InputAssign::device(Some("unplugged interface".into()), 0));
         let mut out = compile(&state, SR, BLOCK, &slots());
         let (output, peaks, _) = run(&mut out.graph, &sine(0.5), 3);
         assert!(peak_of(&output, 0) < 1e-6);
@@ -802,13 +938,29 @@ mod tests {
         let mut output = vec![0.0; BLOCK * 2];
         let mut peaks = [0.0; MAX_METERS];
         let mut clips = 0;
-        out.graph
-            .process_chunk(&impulse, 1, &mut output, &mut peaks, &mut clips, None);
+        out.graph.process_chunk(
+            &impulse,
+            1,
+            &[],
+            0,
+            &mut output,
+            &mut peaks,
+            &mut clips,
+            None,
+        );
         // 100 ms at 48k = 4800 samples ≈ 19 blocks. Echo lands in block 18.
         let mut echo_peak = 0.0f32;
         for _ in 0..20 {
-            out.graph
-                .process_chunk(&silence, 1, &mut output, &mut peaks, &mut clips, None);
+            out.graph.process_chunk(
+                &silence,
+                1,
+                &[],
+                0,
+                &mut output,
+                &mut peaks,
+                &mut clips,
+                None,
+            );
             echo_peak = echo_peak.max(peak_of(&output, 0));
         }
         assert!(echo_peak > 0.3, "the echo came back ({echo_peak})");
@@ -830,12 +982,28 @@ mod tests {
         let mut output = vec![0.0; BLOCK * 2];
         let mut peaks = [0.0; MAX_METERS];
         let mut clips = 0;
-        out.graph
-            .process_chunk(&impulse, 1, &mut output, &mut peaks, &mut clips, None);
+        out.graph.process_chunk(
+            &impulse,
+            1,
+            &[],
+            0,
+            &mut output,
+            &mut peaks,
+            &mut clips,
+            None,
+        );
         let mut echo_peak = 0.0f32;
         for _ in 0..20 {
-            out.graph
-                .process_chunk(&silence, 1, &mut output, &mut peaks, &mut clips, None);
+            out.graph.process_chunk(
+                &silence,
+                1,
+                &[],
+                0,
+                &mut output,
+                &mut peaks,
+                &mut clips,
+                None,
+            );
             echo_peak = echo_peak.max(peak_of(&output, 0));
         }
         assert!(echo_peak > 0.3, "pre-fader send still fed the FX");

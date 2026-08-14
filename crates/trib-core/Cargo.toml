@@ -18,6 +18,10 @@ utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true
+# Only to pin the field ordering `project.toml` depends on: toml refuses a
+# value after a table, so a reordered MixerState would make every manifest
+# unwritable. The crate itself stays serialization-format agnostic.
+toml.workspace = true
 
 [lints]
 workspace = true

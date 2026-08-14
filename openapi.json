@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "1.1.1"
+    "version": "1.2.1"
   },
   "paths": {
     "/api/v1/destinations": {
@@ -132,6 +132,283 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/instruments": {
+      "get": {
+        "operationId": "list_instruments",
+        "responses": {
+          "200": {
+            "description": "The rack, its status, MIDI ports and the library",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstrumentsDto"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "create_instrument",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewInstrument"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The instrument, silent until it is given a soundfont",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstrumentState"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Recording, or the rack is full"
+          }
+        }
+      }
+    },
+    "/api/v1/instruments/panic": {
+      "post": {
+        "summary": "Silence every held note on every instrument.",
+        "description": "Every synthesiser ships one of these because a lost note-off is a note\nthat hangs until something makes it stop.",
+        "operationId": "panic_instruments",
+        "responses": {
+          "204": {
+            "description": "Every held note released"
+          }
+        }
+      }
+    },
+    "/api/v1/instruments/refresh": {
+      "post": {
+        "summary": "Re-enumerate MIDI ports and retry anything that failed to load.",
+        "description": "The manual belt, exactly like the patchbay's Refresh: nothing retries in\nthe background, so plugging a keyboard in and pressing this is the whole\nrecovery story.",
+        "operationId": "refresh_instruments",
+        "responses": {
+          "200": {
+            "description": "The rack after re-enumeration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstrumentsDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/instruments/{id}": {
+      "put": {
+        "operationId": "update_instrument",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instrument id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstrumentPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The instrument after the patch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstrumentState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such instrument"
+          },
+          "409": {
+            "description": "A voice change while recording"
+          },
+          "422": {
+            "description": "A value out of range"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_instrument",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instrument id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The rack after the removal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstrumentsDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such instrument"
+          },
+          "409": {
+            "description": "Recording in progress"
+          }
+        }
+      }
+    },
+    "/api/v1/instruments/{id}/outputs": {
+      "put": {
+        "operationId": "set_instrument_outputs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instrument id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OutputLayout"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The instrument after the change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstrumentState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such instrument"
+          },
+          "409": {
+            "description": "Recording in progress"
+          },
+          "422": {
+            "description": "A split with no keys, or a bad range"
+          }
+        }
+      }
+    },
+    "/api/v1/instruments/{id}/strips": {
+      "post": {
+        "summary": "Put every one of an instrument's channels on the desk.",
+        "description": "The move a drum kit needs before anyone plays: one named, patched strip\nper piece, ready to pan and fade. Only missing channels are added, so\npressing it twice costs nothing and existing levels survive.",
+        "operationId": "add_instrument_strips",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instrument id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The strips that were added",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StripState"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such instrument"
+          },
+          "409": {
+            "description": "Recording, or the console is full"
+          }
+        }
+      }
+    },
+    "/api/v1/instruments/{id}/test": {
+      "post": {
+        "summary": "Play one note on an instrument.",
+        "description": "The cheap half of \"why is this silent?\": it bisects a dead keyboard from\na dead instrument without any live MIDI at all.",
+        "operationId": "test_instrument",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instrument id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "A note was played"
+          },
+          "404": {
+            "description": "No such instrument"
           }
         }
       }
@@ -361,6 +638,94 @@
           },
           "422": {
             "description": "Invalid destination, format, or sample rate"
+          }
+        }
+      }
+    },
+    "/api/v1/soundfonts/{name}": {
+      "post": {
+        "summary": "Take a SoundFont into the library.",
+        "description": "The body is the file. Deliberately not multipart: the payload is one\nopaque blob, multipart would add a dependency and a parser to say so,\nand the name already has a home in the path.\n\nNote that axum's `DefaultBodyLimit` does NOT apply to a body consumed as\na stream, so there is no limit to raise — and equally no limit at all\nunless the handler enforces one. On a daemon with no authentication that\nis not acceptable, so the byte budget is counted here, and exceeding it\naborts and unlinks rather than filling the disk.",
+        "operationId": "upload_soundfont",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "File name, slugged by the daemon",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The library after the upload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstrumentsDto"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Recording in progress"
+          },
+          "413": {
+            "description": "Larger than this installation allows"
+          },
+          "422": {
+            "description": "Not a SoundFont, or it would not load"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Remove a soundfont from the library.",
+        "description": "Only the internal library: a file on somebody's USB stick is theirs, and\nthe console says so rather than offering a button that deletes it.",
+        "operationId": "delete_soundfont",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Library id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The library after the removal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstrumentsDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not in the internal library"
+          },
+          "409": {
+            "description": "An instrument is using it, or tape is rolling"
           }
         }
       }
@@ -1549,28 +1914,49 @@
         }
       },
       "InputAssign": {
-        "type": "object",
-        "description": "A hardware input patched into a strip: a device (by OS name) and a\nchannel within it. `device: None` means the system default input — the\nshape every pre-multi-device manifest carries.",
-        "required": [
-          "device_channel"
-        ],
-        "properties": {
-          "device": {
-            "type": [
-              "string",
-              "null"
-            ]
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "device_channel"
+            ],
+            "properties": {
+              "device": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "device_channel": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
           },
-          "device_channel": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
+          {
+            "type": "object",
+            "required": [
+              "instrument",
+              "channel"
+            ],
+            "properties": {
+              "channel": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "instrument": {
+                "$ref": "#/components/schemas/InstrumentId"
+              }
+            }
           }
-        }
+        ],
+        "description": "What feeds a strip: a hardware input (a device by OS name, plus a\nchannel within it) or one side of a virtual instrument.\n\n`Device { device: None }` means the system default input — the shape\nevery pre-multi-device manifest carries.\n\nThe wire form is **untagged**, and that is deliberate: a device patch\nserializes to exactly the bytes it always has, so a manifest written by\nthis daemon still opens under an older one. Only instrument patches —\nwhich an older daemon could not render anyway — carry a shape it has\nnever seen. Instruments live in their own channel space rather than\nborrowing a reserved device name, so device identity, its rename\nreconciliation and its slot allocator never learn they exist."
       },
       "InputAssignBody": {
         "type": "object",
-        "description": "A device-qualified patch target: which device (by OS name, `null` = the\nsystem default input) and which of its channels.",
+        "description": "What to patch a strip to: either a device (by OS name, `null` = the\nsystem default input) or a virtual instrument, plus a channel within it.\n\n`channel` is shared by both because it means the same thing either way,\nand naming both `device` and `instrument` is refused rather than\nsilently resolved — a patch that quietly picks the wrong source reads as\na silent strip with no explanation.",
         "required": [
           "channel"
         ],
@@ -1585,9 +1971,296 @@
               "string",
               "null"
             ]
+          },
+          "instrument": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/InstrumentId"
+              }
+            ]
           }
         },
         "additionalProperties": false
+      },
+      "InstrumentId": {
+        "type": "integer",
+        "format": "int32",
+        "description": "A virtual instrument in the rack. Never reused within a session:\nit is the printed slot (\"INST 3\"), the patch identity a strip\nholds, and the seed for the link tape's colour.",
+        "minimum": 0
+      },
+      "InstrumentPatch": {
+        "type": "object",
+        "description": "Any subset of an instrument's settings. Absent fields stay put.\n\nThe daemon fans this out into the two commands the reducer draws a line\nbetween — voice settings rebuild the synth and are refused while the\ntape rolls, performance settings do not and are not.",
+        "properties": {
+          "bank": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "effects": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "midi_channel": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "polyphony": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "port": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "program": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "soundfont": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "InstrumentReport": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "presets": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Presets the loaded soundfont carries, so the console can say\nwhether a preset number means anything.",
+            "minimum": 0
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The daemon's own sentence for why, in the console's voice. `None`\nwhen there is nothing to explain."
+          },
+          "resident_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Resident sample data, so a Pi's memory budget is legible.",
+            "minimum": 0
+          },
+          "status": {
+            "$ref": "#/components/schemas/InstrumentStatus"
+          }
+        }
+      },
+      "InstrumentSplit": {
+        "type": "object",
+        "description": "One mixer channel of a split instrument: a named slice of the keyboard.\n\nThis is how a drum kit reaches the desk as separate faders. A SoundFont\nkit is one MIDI channel with a different drum on every key, so the only\naxis that separates a kick from a snare is the key number.\n\nA split is **mono**, deliberately. A drum is a point source you pan\nyourself, and the alternative — two strips per piece — turns a five-piece\nkit into ten channels of desk to manage before anyone has played a note.\nAn unsplit instrument stays stereo, because a piano's stereo image is\nthe thing you actually want.",
+        "required": [
+          "name",
+          "ranges"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "ranges": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": false,
+              "prefixItems": [
+                {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                },
+                {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              ]
+            },
+            "description": "Inclusive key ranges this channel answers to.\n\nA list, not one range, because the General MIDI drum map\n**interleaves** toms and hi-hats — 41 tom, 42 hat, 43 tom, 44 hat,\n45 tom, 46 hat. A single contiguous range cannot put the toms on\none fader and the hats on another, which is the first thing anyone\nmixing drums wants."
+          }
+        }
+      },
+      "InstrumentState": {
+        "type": "object",
+        "description": "A virtual instrument: a SoundFont, a preset within it, and the MIDI\ntraffic it answers to.\n\nPart of the console document, so it persists in `project.toml` and\nreaches every client through the mixer snapshot. Note what is *not*\nhere: whether the soundfont actually loaded, how many presets it has,\nwhether its port is connected. Those are facts about the machine, not\nabout the desk, and they travel on the instruments report the way a\ndevice's status travels on the devices report — the same rule that keeps\nthe transport out of the reducer.",
+        "required": [
+          "id",
+          "name",
+          "bank",
+          "program",
+          "polyphony",
+          "effects"
+        ],
+        "properties": {
+          "bank": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "effects": {
+            "type": "boolean",
+            "description": "`rustysynth`'s own reverb and chorus. Off by default: the console\nalready ships an FX 1 reverb send, and stacking a second one costs a\nPi real CPU to sound worse."
+          },
+          "id": {
+            "$ref": "#/components/schemas/InstrumentId"
+          },
+          "midi_channel": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "`None` = omni: every channel on that port.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "polyphony": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "port": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "MIDI source port, by name. `None` = bound to nothing."
+          },
+          "program": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "soundfont": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A file name within the soundfont library — never a path.\n`project.toml` travels to a USB stick and opens on another box, so a\npath would be a promise about a machine the session may never see\nagain. `None` = nothing chosen yet, which is silence with a reason."
+          },
+          "splits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InstrumentSplit"
+            },
+            "description": "Per-drum (or per-region) mixer channels. Empty = one stereo output,\nwhich is what a piano wants; non-empty = one mono channel per split,\nwhich is what a kit wants."
+          }
+        }
+      },
+      "InstrumentStatus": {
+        "type": "string",
+        "description": "Why an instrument is or is not making sound.\n\nThis is machinery, not document — the same split that keeps the\ntransport out of the reducer. It lives on the instruments report\nalongside a sentence, because \"the strip is silent\" must always have an\nanswer somewhere in the console.",
+        "enum": [
+          "live",
+          "ready",
+          "missing",
+          "failed"
+        ]
+      },
+      "InstrumentsDto": {
+        "type": "object",
+        "description": "Everything the Instruments tab needs in one read: what the console\nholds, why each one is or is not sounding, what MIDI is available, and\nwhat there is to load.\n\nOne document rather than three endpoints because the three answers are\nentangled — deleting a soundfont changes an instrument's status, and\nunplugging a keyboard changes its reason. Split reads would let the\nconsole render a pair that never existed together.",
+        "required": [
+          "instruments",
+          "reports",
+          "midi_ports",
+          "soundfonts",
+          "soundfont_dir",
+          "max_upload_bytes"
+        ],
+        "properties": {
+          "instruments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InstrumentState"
+            },
+            "description": "The console document's instruments, in rack order."
+          },
+          "max_upload_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ceiling on an upload, so the console can refuse a file before\nspending twenty minutes sending it.",
+            "minimum": 0
+          },
+          "midi_ports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MidiPortReport"
+            }
+          },
+          "reports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InstrumentReport"
+            },
+            "description": "Machine truth about each one, keyed by the same id."
+          },
+          "soundfont_dir": {
+            "type": "string",
+            "description": "Where uploads land, for the console to print."
+          },
+          "soundfonts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SoundfontInfo"
+            }
+          }
+        }
       },
       "LaneDto": {
         "type": "object",
@@ -1747,6 +2420,32 @@
           }
         ],
         "description": "What a metered point on the console refers to."
+      },
+      "MidiPortReport": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "connected",
+          "absent"
+        ],
+        "properties": {
+          "absent": {
+            "type": "boolean",
+            "description": "An instrument references it but the system does not offer it."
+          },
+          "connected": {
+            "type": "boolean",
+            "description": "True when an instrument is bound to it and it is connected."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable across a replug: the port's name, not its ALSA client\nnumber, which the kernel hands out afresh every time."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
       },
       "MixCommand": {
         "oneOf": [
@@ -2193,6 +2892,173 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "required": [
+              "op"
+            ],
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "add_instrument"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "op"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/InstrumentId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "remove_instrument"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Everything `rustysynth` can only take at construction. Rebuilding a\nsynth means reloading its samples, so this is a topology change and\nthe tape refuses it — mid-take is exactly when you cannot afford a\npause to read a soundfont off a USB stick.",
+            "required": [
+              "id",
+              "polyphony",
+              "effects",
+              "op"
+            ],
+            "properties": {
+              "effects": {
+                "type": "boolean"
+              },
+              "id": {
+                "$ref": "#/components/schemas/InstrumentId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_instrument_voice"
+                ]
+              },
+              "polyphony": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "soundfont": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Everything a running synth accepts: the preset, what it listens to,\nand its name. Deliberately NOT frozen while recording — changing\nsound mid-take is normal playing, and a keyboardist who finds\nthemselves on the wrong MIDI channel has to be able to fix it.",
+            "required": [
+              "id",
+              "name",
+              "bank",
+              "program",
+              "op"
+            ],
+            "properties": {
+              "bank": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "id": {
+                "$ref": "#/components/schemas/InstrumentId"
+              },
+              "midi_channel": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "minimum": 0
+              },
+              "name": {
+                "type": "string"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_instrument_performance"
+                ]
+              },
+              "port": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "program": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "How an instrument reaches the desk: one stereo pair, or a fader per\nnamed piece. Rebuilds the synth, so it is a topology change.",
+            "required": [
+              "id",
+              "splits",
+              "op"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/InstrumentId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_instrument_splits"
+                ]
+              },
+              "splits": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/InstrumentSplit"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Put every one of an instrument's channels on the desk in one move.\n\nThe setup step a kit needs before anyone plays: six drums, six\nfaders, named and patched, ready to pan. Adds only what is missing,\nso pressing it twice is safe and pressing it after adding a split\ndoes the obvious thing rather than doubling the desk.",
+            "required": [
+              "id",
+              "op"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/InstrumentId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "add_instrument_strips"
+                ]
+              }
+            }
           }
         ],
         "description": "A mutation of the mixer document. The API-facing command enum: REST\nhandlers and the WS `set` op both reduce to this."
@@ -2218,6 +3084,13 @@
             "items": {
               "$ref": "#/components/schemas/FxState"
             }
+          },
+          "instruments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InstrumentState"
+            },
+            "description": "Declared after the other arrays and before `master` on purpose:\n`toml` serializes in declaration order and refuses a value after a\ntable, so a scalar section between the arrays-of-tables would make\nevery manifest unwritable."
           },
           "master": {
             "$ref": "#/components/schemas/MasterState"
@@ -2249,6 +3122,18 @@
           "stream"
         ]
       },
+      "NewInstrument": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "NewSession": {
         "type": "object",
         "required": [
@@ -2277,6 +3162,63 @@
           }
         },
         "additionalProperties": false
+      },
+      "OutputLayout": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "One stereo pair — a piano, a pad, anything whose stereo image is\nthe point.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "stereo_mix"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The General MIDI drum map as named faders: Kick, Snare, Toms,\nHiHat, Cymbals, Percussion.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "gm_drums"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Whatever splits the caller names.",
+            "required": [
+              "splits",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "custom"
+                ]
+              },
+              "splits": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/InstrumentSplit"
+                }
+              }
+            }
+          }
+        ],
+        "description": "How an instrument reaches the desk."
       },
       "ProfileReport": {
         "type": "object",
@@ -2860,6 +3802,47 @@
           }
         }
       },
+      "SoundfontInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "path",
+          "bytes",
+          "origin"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "Library id — the file name, which is also what an instrument stores."
+          },
+          "origin": {
+            "$ref": "#/components/schemas/SoundfontOrigin"
+          },
+          "path": {
+            "type": "string"
+          },
+          "volume": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Volume label for a removable file, so the console can say *which*\nstick it wants back."
+          }
+        }
+      },
+      "SoundfontOrigin": {
+        "type": "string",
+        "description": "Where a file came from. Drives what the console offers to do with it.",
+        "enum": [
+          "internal",
+          "removable"
+        ]
+      },
       "StateDelta": {
         "oneOf": [
           {
@@ -3293,6 +4276,95 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "required": [
+              "instrument",
+              "kind"
+            ],
+            "properties": {
+              "instrument": {
+                "$ref": "#/components/schemas/InstrumentState"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "instrument_added"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Carries the strips it unpatched, so a client's mirror does not need\nto re-derive which channels just went quiet.",
+            "required": [
+              "id",
+              "unpatched",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/InstrumentId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "instrument_removed"
+                ]
+              },
+              "unpatched": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/StripId"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Both instrument edits report the whole instrument rather than the\nfields that moved: it is small, and a client that misses one field\nof a preset change would render a lie about what is playing.",
+            "required": [
+              "instrument",
+              "kind"
+            ],
+            "properties": {
+              "instrument": {
+                "$ref": "#/components/schemas/InstrumentState"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "instrument_changed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The strips \"add all channels\" created. A structural change, so the\ndaemon broadcasts a snapshot too; the delta carries the list because\nthe console wants to say what it just did.",
+            "required": [
+              "id",
+              "added",
+              "kind"
+            ],
+            "properties": {
+              "added": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/StripState"
+                }
+              },
+              "id": {
+                "$ref": "#/components/schemas/InstrumentId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "instrument_strips_added"
+                ]
+              }
+            }
           }
         ],
         "description": "What a successful `apply` changed — the WS `state_changed` payload.\nSemantically complete per change: a client patches its mirror from the\ndelta alone. Structural changes broadcast a full snapshot instead."
@@ -3453,6 +4525,13 @@
             "type": "number",
             "format": "double"
           },
+          "midi_tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TakeMidiTrackDto"
+            },
+            "description": "MIDI sidecars beside the audio, one per instrument that was armed.\nEmpty for every take without one, which is most of them."
+          },
           "sample_rate": {
             "type": "integer",
             "format": "int32",
@@ -3473,6 +4552,27 @@
             "items": {
               "$ref": "#/components/schemas/TakeTrackDto"
             }
+          }
+        }
+      },
+      "TakeMidiTrackDto": {
+        "type": "object",
+        "required": [
+          "file",
+          "name",
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "file": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
           }
         }
       },

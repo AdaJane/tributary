@@ -3,20 +3,40 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
 use trib_core::{
-    FaderTarget, InputAssign, MasterState, MixCommand, MixError, StateDelta, StripId, StripState,
+    FaderTarget, InputAssign, InstrumentId, MasterState, MixCommand, MixError, StateDelta, StripId,
+    StripState,
 };
 use utoipa::ToSchema;
 
 use super::{ApiError, AppState};
 
-/// A device-qualified patch target: which device (by OS name, `null` = the
-/// system default input) and which of its channels.
+/// What to patch a strip to: either a device (by OS name, `null` = the
+/// system default input) or a virtual instrument, plus a channel within it.
+///
+/// `channel` is shared by both because it means the same thing either way,
+/// and naming both `device` and `instrument` is refused rather than
+/// silently resolved — a patch that quietly picks the wrong source reads as
+/// a silent strip with no explanation.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InputAssignBody {
     #[serde(default)]
     pub device: Option<String>,
+    #[serde(default)]
+    pub instrument: Option<InstrumentId>,
     pub channel: u16,
+}
+
+impl InputAssignBody {
+    fn into_assign(self) -> Result<InputAssign, ApiError> {
+        match (self.instrument, self.device) {
+            (Some(_), Some(_)) => Err(ApiError::Invalid(
+                "patch names both a device and an instrument".into(),
+            )),
+            (Some(instrument), None) => Ok(InputAssign::instrument(instrument, self.channel)),
+            (None, device) => Ok(InputAssign::device(device, self.channel)),
+        }
+    }
 }
 
 /// Any subset of a strip's controls. Absent fields stay put; `input` is
@@ -58,7 +78,7 @@ pub struct NewStrip {
     pub name: Option<String>,
 }
 
-fn map_mix_err(e: MixError) -> ApiError {
+pub fn map_mix_err(e: MixError) -> ApiError {
     match e {
         MixError::UnknownTarget(_) => ApiError::NotFound,
         MixError::OutOfRange { .. } | MixError::BadName(_) => ApiError::Invalid(e.to_string()),
@@ -66,7 +86,7 @@ fn map_mix_err(e: MixError) -> ApiError {
     }
 }
 
-fn patch_commands(id: StripId, patch: StripPatch) -> Vec<MixCommand> {
+fn patch_commands(id: StripId, patch: StripPatch) -> Result<Vec<MixCommand>, ApiError> {
     let target = FaderTarget::Strip { id };
     let mut commands = Vec::new();
     if let Some(name) = patch.name {
@@ -91,15 +111,10 @@ fn patch_commands(id: StripId, patch: StripPatch) -> Vec<MixCommand> {
         commands.push(MixCommand::SetEqEnabled { strip: id, enabled });
     }
     if let Some(input) = patch.input {
-        commands.push(MixCommand::SetInput {
-            strip: id,
-            input: input.map(|body| InputAssign {
-                device: body.device,
-                device_channel: body.channel,
-            }),
-        });
+        let input = input.map(InputAssignBody::into_assign).transpose()?;
+        commands.push(MixCommand::SetInput { strip: id, input });
     }
-    commands
+    Ok(commands)
 }
 
 #[cfg(test)]
@@ -113,7 +128,7 @@ mod tests {
 
         let unpatch: StripPatch = serde_json::from_str(r#"{"input":null}"#).unwrap();
         assert_eq!(
-            patch_commands(StripId(0), unpatch).as_slice(),
+            patch_commands(StripId(0), unpatch).unwrap().as_slice(),
             [MixCommand::SetInput {
                 strip: StripId(0),
                 input: None
@@ -125,23 +140,53 @@ mod tests {
         let MixCommand::SetInput {
             input: Some(assign),
             ..
-        } = patch_commands(StripId(0), named).remove(0)
+        } = patch_commands(StripId(0), named).unwrap().remove(0)
         else {
             panic!("expected a SetInput");
         };
-        assert_eq!(assign.device.as_deref(), Some("dock"));
-        assert_eq!(assign.device_channel, 1);
+        assert_eq!(assign.device_name(), Some(Some("dock")));
+        assert_eq!(assign.channel(), 1);
 
         let default_device: StripPatch =
             serde_json::from_str(r#"{"input":{"channel":0}}"#).unwrap();
         let MixCommand::SetInput {
             input: Some(assign),
             ..
-        } = patch_commands(StripId(0), default_device).remove(0)
+        } = patch_commands(StripId(0), default_device)
+            .unwrap()
+            .remove(0)
         else {
             panic!("expected a SetInput");
         };
-        assert_eq!(assign.device, None, "no device = the system default");
+        assert_eq!(
+            assign.device_name(),
+            Some(None),
+            "no device = the system default"
+        );
+    }
+
+    #[test]
+    fn an_instrument_patch_body_becomes_an_instrument_assign() {
+        let body: StripPatch =
+            serde_json::from_str(r#"{"input":{"instrument":2,"channel":1}}"#).unwrap();
+        let MixCommand::SetInput {
+            input: Some(assign),
+            ..
+        } = patch_commands(StripId(0), body).unwrap().remove(0)
+        else {
+            panic!("expected a SetInput");
+        };
+        assert_eq!(assign.instrument_id(), Some(InstrumentId(2)));
+        assert_eq!(assign.channel(), 1);
+    }
+
+    #[test]
+    fn a_patch_body_naming_both_a_device_and_an_instrument_is_refused() {
+        let body: StripPatch =
+            serde_json::from_str(r#"{"input":{"device":"dock","instrument":2,"channel":0}}"#)
+                .unwrap();
+        let err = patch_commands(StripId(0), body).unwrap_err();
+        assert!(matches!(err, ApiError::Invalid(_)), "{err:?}");
     }
 }
 
@@ -209,7 +254,7 @@ pub async fn update_strip(
     Json(patch): Json<StripPatch>,
 ) -> Result<Json<StripState>, ApiError> {
     let id = StripId(id);
-    let commands = patch_commands(id, patch);
+    let commands = patch_commands(id, patch)?;
     if commands.is_empty() {
         return Err(ApiError::Invalid("empty patch".into()));
     }

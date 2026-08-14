@@ -216,6 +216,10 @@ mod tests {
                 params: FxParams::default_reverb(),
                 return_level_db: -6.0,
             }],
+            // The signal graph knows nothing about instruments: they are an
+            // input source, so they enter the graph through a strip's patch
+            // like any device, never as a node of their own.
+            instruments: Vec::new(),
             master: MasterState::default(),
         }
     }

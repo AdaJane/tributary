@@ -6,6 +6,7 @@
  */
 import type { DeviceReport } from '../../state/devices';
 import type { StripState } from '../../ws/messages';
+import { inputSource } from './input-source';
 import { deviceLetters } from './linked-inputs';
 
 export type SectionStatus = 'open' | 'available' | 'failed' | 'absent';
@@ -70,7 +71,7 @@ export function silencedReason(section: PatchbaySection): string | null {
   return null;
 }
 
-export type SourceKind = 'default' | 'mic' | 'webcam' | 'usb' | 'line';
+export type SourceKind = 'default' | 'mic' | 'webcam' | 'usb' | 'line' | 'instrument';
 
 /** Guess a glyph from the source's print — supplementary only (the title
  * stays the identity), so a wrong guess costs nothing but style. */
@@ -93,13 +94,12 @@ function switchable(device: DeviceReport): boolean {
 }
 
 function patchedMax(strips: readonly StripState[], device: string | null): number {
-  return strips.reduce(
-    (max, s) =>
-      s.input && (s.input.device ?? null) === device
-        ? Math.max(max, s.input.device_channel)
-        : max,
-    -1,
-  );
+  return strips.reduce((max, s) => {
+    const source = inputSource(s.input);
+    return source?.kind === 'device' && source.device === device
+      ? Math.max(max, source.channel)
+      : max;
+  }, -1);
 }
 
 /** Group the device document into modal sections: the default box first

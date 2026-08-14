@@ -5,6 +5,7 @@
 use trib_dsp::Coefficients;
 
 use crate::compiled::CompiledGraph;
+use crate::instrument::InstrumentRack;
 use crate::playback::PlaybackSet;
 use crate::record::RecordSet;
 
@@ -41,6 +42,14 @@ pub enum EngineCommand {
     /// audio thread installs it at a block boundary and retires the old one.
     SwapGraph {
         graph: Box<CompiledGraph>,
+    },
+    /// A freshly built instrument rack. Parsing a SoundFont costs hundreds
+    /// of milliseconds and hundreds of megabytes, so it happens on the
+    /// instrument host thread; the audio thread only moves the box — and
+    /// silences the outgoing rack's held notes, which would otherwise
+    /// sound forever with nothing left to release them.
+    SwapRack {
+        rack: Box<InstrumentRack>,
     },
     /// Begin tapping a take. Built control-side; the audio thread only
     /// moves it into place.
@@ -92,6 +101,9 @@ pub enum Retired {
     Graph(Box<CompiledGraph>),
     Record(Box<RecordSet>),
     Playback(Box<PlaybackSet>),
+    /// A replaced rack. Freeing it can free hundreds of megabytes of
+    /// sample data, which is precisely why it does not happen here.
+    Rack(Box<InstrumentRack>),
 }
 
 /// Command ring depth. Far above any real gesture rate; a full ring means

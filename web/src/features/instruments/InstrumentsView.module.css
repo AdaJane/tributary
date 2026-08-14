@@ -1,0 +1,257 @@
+.page {
+  height: 100%;
+  overflow-y: auto;
+  background: var(--surface-console);
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  max-width: 680px;
+  margin: 0 auto;
+  padding: var(--s5) var(--s4);
+}
+
+.rackHead {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+}
+
+.empty {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+/* A rack unit: its own slab inside the panel, so a six-drum kit reads as
+   one machine rather than six loose rows. */
+.unit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3);
+  margin-bottom: var(--s3);
+  background: var(--surface-section);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-2);
+}
+
+.unitHead {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.slot {
+  font-family: var(--font-label);
+  font-size: var(--text-sm);
+  letter-spacing: var(--track-print);
+  color: var(--text-label);
+  padding: 0 var(--s1);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-1);
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  margin-left: auto;
+  font-family: var(--font-label);
+  font-size: var(--text-xs);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.statusDot {
+  width: var(--btn-led-size);
+  height: var(--btn-led-size);
+  border-radius: var(--radius-round);
+  background: var(--led-green-off);
+}
+
+.status[data-status='live'] {
+  color: var(--led-green-on);
+}
+.status[data-status='live'] .statusDot {
+  background: var(--led-green-on);
+  box-shadow: var(--glow-green);
+}
+.status[data-status='failed'] {
+  color: var(--led-red-on);
+}
+.status[data-status='failed'] .statusDot {
+  background: var(--led-red-on);
+  box-shadow: var(--glow-red);
+}
+.status[data-status='missing'] {
+  color: var(--led-amber-on);
+}
+.status[data-status='missing'] .statusDot {
+  background: var(--led-amber-on);
+  box-shadow: var(--glow-amber);
+}
+
+.remove {
+  padding: 0 var(--s1);
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-family: var(--font-label);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.remove:hover {
+  color: var(--led-red-on);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+.rowLabel {
+  min-width: 74px;
+  font-family: var(--font-label);
+  font-size: var(--text-xs);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-label);
+}
+
+.rowBody {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+/* An unbounded, machine-supplied list — a soundfont can carry hundreds of
+   presets, so this is a select, not a row of piano keys. */
+.select {
+  height: var(--select-h);
+  padding: 0 var(--s1);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-1);
+  box-shadow: var(--depth-inset);
+  color: var(--text-value);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+}
+
+.number {
+  width: 60px;
+  height: var(--select-h);
+  padding: 0 var(--s1);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-1);
+  box-shadow: var(--depth-inset);
+  color: var(--text-value);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-value);
+}
+
+.hint {
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+/* A blocked control keeps its reason beside it, never hidden. */
+.blocked {
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.unitActions {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  margin-top: var(--s1);
+}
+
+.feeds {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.silence {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--led-amber-on);
+}
+
+.ports,
+.files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.port,
+.file {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+.portName,
+.fileName {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-value);
+}
+
+.group {
+  margin-bottom: var(--s3);
+}
+
+.groupTitle {
+  margin: 0 0 var(--s1);
+  font-family: var(--font-label);
+  font-size: var(--text-xs);
+  letter-spacing: var(--track-print);
+  text-transform: uppercase;
+  color: var(--text-label);
+}
+
+.uploadRow {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  margin-top: var(--s2);
+}
+
+.hiddenInput {
+  display: none;
+}
+
+.path {
+  margin: var(--s2) 0 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}

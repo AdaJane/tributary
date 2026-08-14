@@ -248,9 +248,23 @@ pub struct TakeInfo {
     pub format: crate::format::RecordFormat,
     pub damaged: bool,
     pub tracks: Vec<TakeTrackInfo>,
+    /// MIDI sidecars, one per instrument that was armed. Absent in every
+    /// take cut before instruments existed.
+    #[serde(default)]
+    pub midi_tracks: Vec<TakeMidiTrackInfo>,
     /// Not in the manifest — derived from the directory name.
     #[serde(skip)]
     pub take: u32,
+}
+
+/// One MIDI sidecar of a take.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TakeMidiTrackInfo {
+    pub file: String,
+    pub name: String,
+    pub events: u64,
+    #[serde(default)]
+    pub dropped_events: u64,
 }
 
 /// All finished takes, newest first. A take without a readable manifest
@@ -745,18 +759,22 @@ mod tests {
 
         let (_, manifest) = load_latest(root.path()).unwrap();
         let input = manifest.mixer.strips[0].input.as_ref().unwrap();
-        assert_eq!(input.device, None, "absent field = system default input");
-        assert_eq!(input.device_channel, 3);
+        assert_eq!(
+            input.device_name(),
+            Some(None),
+            "absent field = system default input"
+        );
+        assert_eq!(input.channel(), 3);
     }
 
     #[test]
     fn a_named_device_patch_round_trips_through_the_manifest() {
         let root = tempfile::tempdir().unwrap();
         let mut mixer = state();
-        mixer.strips[0].input = Some(trib_core::InputAssign {
-            device: Some("ThinkPad Thunderbolt 4 Dock USB".into()),
-            device_channel: 1,
-        });
+        mixer.strips[0].input = Some(trib_core::InputAssign::device(
+            Some("ThinkPad Thunderbolt 4 Dock USB".into()),
+            1,
+        ));
         create_project(root.path(), "multi", &mixer).unwrap();
         let (_, manifest) = load_latest(root.path()).unwrap();
         assert_eq!(manifest.mixer, mixer);

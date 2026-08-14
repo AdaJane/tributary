@@ -155,10 +155,7 @@ mod tests {
     #[test]
     fn fake_stream_produces_meter_blocks_and_stops_on_drop() {
         let mut strip = StripState::new(StripId(0), "Ch 1".into());
-        strip.input = Some(InputAssign {
-            device: None,
-            device_channel: 0,
-        });
+        strip.input = Some(InputAssign::device(None, 0));
         let state = MixerState {
             strips: vec![strip],
             ..MixerState::default()

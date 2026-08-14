@@ -54,7 +54,8 @@ Surfaces `--surface-{app,console,strip,section,control,inset}`; borders
 ### Component
 
 Knob (`--knob-*`, 270° sweep, detent up), fader (`--fader-*`, 200px throw),
-LED (`--led-size` 8px), buttons (`--btn-*`), tape (`--tape-*`), strip/master
+LED (`--led-size` 8px), buttons (`--btn-*`), select (`--select-h` 32px),
+tape (`--tape-*`), strip/master
 widths (`--strip-w`, `--master-w`). `@media (pointer: coarse)` bumps sizes to
 44px-class targets; desktop dense mode guarantees ≥24px visual + ≥32px hit
 area (WCAG 2.2 minimum) via padding overlays.
@@ -159,6 +160,31 @@ disabled** unless noted.
 - Hit area ≥32px via a vertical-only `::before` overlay (no horizontal
   overhang — caps must not poach a neighbor's clicks).
 
+### Panel / InlineError / Waiting (rear-panel kit)
+
+- `Panel` is the card every rear-panel room is built from: `--surface-strip`,
+  `--depth-raised`, a print header row (`--font-label`, uppercase,
+  `--track-print`) with an optional right-aligned `badge` slot for a lamp or
+  a count. Lifted out of SetupView when Instruments needed the same recipe —
+  a panel card is a design fact, and a second copy of it in another
+  stylesheet is drift waiting to happen.
+- `InlineError`: red LED dot + sentence, `role="status"`, printed **inside
+  the panel that failed**. Never a toast, never at the top of the page.
+- `Waiting`: the body before the daemon has answered — "waiting for the
+  daemon…", deliberately not a spinner, because nothing is spinning.
+
+### SelectField (unbounded picker)
+
+- A native `<select>` on `--surface-inset` + `--depth-inset`, `--select-h`
+  tall. For lists the machine supplies and the user cannot be expected to
+  scan: soundfont presets (hundreds), MIDI ports, MIDI channels.
+- `SegmentedControl` stops working past about five options; this is what
+  replaces it, and the two are not interchangeable — a fixed short set of
+  choices is still piano keys.
+- A value that is not in the list renders **blank and lies**, so the option
+  list always appends the current value with `(not connected)` when the
+  daemon no longer offers it.
+
 ### TextField (inset field)
 - An inset machine-text well: `--surface-inset` + `--depth-inset`,
   `--font-mono`, `--btn-h` height — for machine text (paths), never names
@@ -203,6 +229,26 @@ disabled** unless noted.
   what the tape stripe marks. Footer: hint text + Refresh + Disconnect
   (disabled when unpatched).
 
+- **Instruments are sections too, and are never lettered.** They render
+  after the hardware boxes with the same geometry, but where a letter chip
+  would go they print a slot — `INST 3`. Lettering them would collide in
+  print (box `I` against slot `I1`) and, worse, adding an instrument would
+  re-letter the stage boxes, changing the colour and print of the link tape
+  on two strips under the user's hands. `deviceLetters` therefore never
+  sees an instrument. The glyph is a drawn piano keyboard (`SourceIcon`),
+  and the tiles are the instrument's channels, named as the strips would be
+  ("Kit Kick", "Rhodes L").
+- **A removed instrument leaves a ghost section.** If a strip is still
+  patched to an instrument the rack no longer holds, `groupPatchbay`
+  synthesizes a section for it — status `missing`, "this instrument was
+  removed — patch this channel somewhere else". Without it the strip's
+  INPUT button prints `INST 3.1` with nothing anywhere to explain the
+  silence, which is exactly the failure this modal exists to prevent.
+- Instrument silence uses the same amber lead as a silenced device:
+  `Silent at the source: no soundfont chosen — fix it in Instruments`. One
+  ordered table of reasons, first true wins, rendered bare in the rack and
+  suffixed with the door in the patchbay.
+
 ### Link tape (shared inputs)
 - Strips fed by the same jack wear a matching strip of colored tape across
   their top edge (torn clip-path ends, `--depth-raised`, `--font-tape`
@@ -233,7 +279,10 @@ fader · FX RETURN / MONITOR / PHONES knobs. `--master-w` wide,
 ### ViewPager — Console ↔ Tracks
 - The two rooms stack SPATIALLY: Tracks above, Console below. A slide
   transition (`--dur-3`) moves between them; both stay mounted so the
-  console's live feeds never pause. The inactive page is `inert`.
+  console's live feeds never pause. The inactive page is `inert`. Note the
+  limit of that promise: a full-page tab (Setup, Instruments, Bench) renders
+  INSTEAD of the pager, so both rooms unmount while one is open — the stores
+  survive, the components do not.
 - Edge pills navigate: "View Tracks ⌃" top-center of the console,
   "View Console ⌄" bottom-center of Tracks — chevrons point where you'll go.
 - Touch: pull DOWN on the console to reveal Tracks (shade-style), push UP
@@ -275,7 +324,8 @@ fader · FX RETURN / MONITOR / PHONES knobs. `--master-w` wide,
   center. All viewport math is pure `timeline.ts`.
 - **Lane**: `--lane-h` row = header column (`--lane-header-w`, strip name
   via `strip_id` with filename fallback, master = `--surface-section`,
-  DAMAGED chip when samples were silence-padded, playback SOLO — green
+  DAMAGED chip when samples were silence-padded, a green MIDI chip when a
+  sidecar was recorded beside the track, playback SOLO — green
   `solo` PushButton variant — and MUTE) + waveform canvas
   (`--surface-inset`). Waveform = per-px min/max columns
   (`waveform-path.ts`) in `--wave-ink` over a `--wave-ink-dim` center
@@ -384,6 +434,61 @@ drive status must never be hidden.
 - **Locked while recording**: the destination tiles + custom field disable
   with an amber hint line; format and rate stay live (they bind at the
   NEXT record start). The daemon enforces the same rule with a 409.
+
+### InstrumentsView — the rack
+
+The other rear-panel room, and a sibling of SetupView in every structural
+way: a third top-level tab rendered INSTEAD of the ViewPager, one centered
+680px column of always-open `Panel` cards, immediate-apply-but-awaited per
+control, refusals printed inline.
+
+Panel order is **INSTRUMENT RACK · MIDI INPUTS · SOUNDFONTS** — frequency
+first, like Session at the top of Setup, and it gives the page a downward
+repair gradient: a rack unit that says "no soundfont chosen" sends you to
+the panel below it, one that says nothing is arriving sends you to the one
+below that. Reading order is repair order.
+
+- **A rack unit** is a `--surface-section` slab: `TapeLabel` name (the
+  user's word, so it goes on tape) · `INST n` slot chip · status lamp ·
+  two-click `SURE?` remove. Then rows of machine text — soundfont,
+  preset, MIDI in + channel, outputs, voices — all `SelectField` or
+  `SegmentedControl`, never tape. Filenames, presets and paths are machine
+  text by MASTER's own rule.
+- **Locked while recording is per control, matching the daemon's 409s
+  exactly.** Soundfont, outputs, voices, Add and Remove disable with
+  `stop recording first` beside them; preset, MIDI input and channel stay
+  live, because changing sound mid-take is normal playing and a keyboardist
+  on the wrong channel has to be able to fix it. The rule a user can hold:
+  *changing the sound stops the tape, changing the patch doesn't.*
+- **Outputs** is a two-option `SegmentedControl` — Stereo mix / Drum splits
+  — with a live consequence line under it saying what the desk will get
+  ("6 mono channels: Kick, Snare, Toms, HiHat, Cymbals, Percussion").
+- **Add all channels to mixer** is the setup move: one named, patched strip
+  per output, in one press. Adds only what is missing, so a second press
+  costs nothing and levels already set survive. Its blocked reasons print
+  beside it — `stop recording first`, `the console is full`.
+- **Test note** sits beside it: the cheap half of "why is this silent?",
+  bisecting a dead keyboard from a dead instrument with no live MIDI at
+  all.
+- The read-only tie-back line names where assignment lives:
+  `feeding Kick · Snare`, or `not patched — patch it from a channel's
+  INPUT button`.
+- **Two empty states, never merged**: "No instruments yet — add one above."
+  versus "No soundfonts on this appliance — load one below before adding an
+  instrument."
+- **Soundfonts** group by source with a visible header — Internal first,
+  then one per drive — and every file is always rendered. A file on
+  somebody's stick is theirs: its Remove is disabled with `lives on
+  "STICK" — remove it there`, and the other blocked reasons (`in use by
+  Rhodes`, `stop recording first`) print the same way.
+- **Upload** uses `XMLHttpRequest`, and that is a deliberate deviation from
+  the app's `$api` client: `xhr.upload.onprogress` is the only progress
+  source that works on a plain-HTTP origin, and the appliance's origin is
+  permanently insecure-context. A streamed `fetch` body requires a secure
+  context, so "modernising" it would silently lose both progress and
+  cancellation. Progress is honestly two-phase — byte counts while sending,
+  then **"Checking the file…"** while the daemon writes and parses, because
+  a bar frozen at 100% is the moment people decide the box has hung.
 
 ## Interaction + accessibility rules
 

@@ -3,10 +3,12 @@ import { useEffect } from 'react';
 import { $api } from '../../api/client';
 import { loadDevices, useDevices } from '../../state/devices';
 import { useMixer } from '../../state/mixer';
+import type { StripState } from '../../ws/messages';
 import styles from './ConsoleView.module.css';
 import { ChannelStrip } from './ChannelStrip';
 import { groupPatchbay } from './devices';
-import { deviceLetters, jackKey, sharedInputGroups } from './linked-inputs';
+import { inputSource, sourceKey } from './input-source';
+import { deviceLetters, sharedInputGroups } from './linked-inputs';
 import { MasterSection } from './MasterSection';
 import { useMeterFeed } from './useMeterFeed';
 import { useMixerFeed } from './useMixerFeed';
@@ -42,6 +44,12 @@ export function ConsoleView() {
       .map((s) => s.device as string),
   );
   const links = sharedInputGroups(strips, letters);
+  // A strip wears link tape when something else shares whatever feeds it —
+  // an instrument channel just as much as a jack.
+  const linkFor = (input: StripState['input']) => {
+    const source = inputSource(input);
+    return source === null ? undefined : links.get(sourceKey(source));
+  };
 
   return (
     <div className={styles.console}>
@@ -50,11 +58,7 @@ export function ConsoleView() {
           <ChannelStrip
             key={strip.id}
             strip={strip}
-            link={
-              strip.input
-                ? links.get(jackKey(strip.input.device ?? null, strip.input.device_channel))
-                : undefined
-            }
+            link={linkFor(strip.input)}
           />
         ))}
         <button

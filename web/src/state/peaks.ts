@@ -15,6 +15,8 @@ export interface TrackMeta {
   stripId: number | null;
   /** Samples were dropped and padded with silence in this track. */
   damaged: boolean;
+  /** A MIDI sidecar was recorded alongside this lane's instrument. */
+  midi: boolean;
 }
 
 /** Redraw throttle for live-growing lanes. */

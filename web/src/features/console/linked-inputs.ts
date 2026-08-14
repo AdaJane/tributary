@@ -5,10 +5,12 @@
  */
 import type { CapColor } from '../../design/Knob';
 import type { StripState } from '../../ws/messages';
+import { inputSource, sourceKey } from './input-source';
+import type { InputSource } from './input-source';
 
 /** Stable string identity for a jack. `device` null = system default. */
 export function jackKey(device: string | null, channel: number): string {
-  return `${device ?? ''}#${channel}`;
+  return sourceKey({ kind: 'device', device, channel });
 }
 
 /**
@@ -36,6 +38,26 @@ export function jackLabel(
   return `${letter}${channel + 1}`;
 }
 
+/**
+ * What a strip's INPUT button prints, whatever it is patched to.
+ *
+ * Instruments print `INST 3.1` — the rack slot and the channel within it —
+ * rather than borrowing a stage-box letter. Lettering them would collide
+ * (box `I` against `I1`) and, worse, adding one would re-letter the stage
+ * boxes and change the colour and print of the tape on two strips under
+ * the user's hands.
+ */
+export function sourceLabel(
+  source: InputSource | null,
+  letters: Map<string | null, string>,
+): string {
+  if (source === null) return '—';
+  if (source.kind === 'instrument') {
+    return `INST ${source.instrument + 1}.${source.channel + 1}`;
+  }
+  return jackLabel(source.device, source.channel, letters);
+}
+
 /** Stripe palette keyed by jack identity (hashed), so a link keeps its
  * color no matter which strips join or leave it. */
 const STRIPE_COLORS: readonly CapColor[] = ['yellow', 'blue', 'green', 'red', 'grey', 'white'];
@@ -51,8 +73,7 @@ export function stripeColor(key: string): CapColor {
 
 export interface InputLink {
   key: string;
-  device: string | null;
-  channel: number;
+  source: InputSource;
   color: CapColor;
   /** Print label for the tape ("IN 3", "B2"). */
   label: string;
@@ -64,25 +85,23 @@ export function sharedInputGroups(
   strips: readonly StripState[],
   letters: Map<string | null, string>,
 ): Map<string, InputLink> {
-  const byKey = new Map<string, { device: string | null; channel: number; ids: number[] }>();
+  const byKey = new Map<string, { source: InputSource; ids: number[] }>();
   for (const strip of strips) {
-    if (!strip.input) continue;
-    const device = strip.input.device ?? null;
-    const channel = strip.input.device_channel;
-    const key = jackKey(device, channel);
-    const entry = byKey.get(key) ?? { device, channel, ids: [] };
+    const source = inputSource(strip.input);
+    if (source === null) continue;
+    const key = sourceKey(source);
+    const entry = byKey.get(key) ?? { source, ids: [] };
     entry.ids.push(strip.id);
     byKey.set(key, entry);
   }
   const links = new Map<string, InputLink>();
-  for (const [key, { device, channel, ids }] of byKey) {
+  for (const [key, { source, ids }] of byKey) {
     if (ids.length >= 2) {
       links.set(key, {
         key,
-        device,
-        channel,
+        source,
         color: stripeColor(key),
-        label: jackLabel(device, channel, letters),
+        label: sourceLabel(source, letters),
         stripIds: ids,
       });
     }

@@ -10,6 +10,7 @@ pub struct Settings {
     pub server: Server,
     pub audio: Audio,
     pub projects: Projects,
+    pub soundfonts: Soundfonts,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -60,6 +61,34 @@ impl Default for Projects {
     }
 }
 
+/// Where SoundFont files live, and how big one may be.
+///
+/// Deliberately its own root rather than a sibling of `recording.toml`:
+/// that one resolves beside the config file, which packaging installs as
+/// `/etc/tributary/` conf-files, and hundreds of megabytes of samples do
+/// not belong in `/etc`. It is also NOT under the recording destination —
+/// that moves to whatever USB stick is mounted, and an instrument would
+/// lose its soundfont every time the destination changed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Soundfonts {
+    pub root: PathBuf,
+    /// Ceiling on an uploaded file. `rustysynth` holds all sample data
+    /// resident, so this is a memory budget wearing a disk-shaped hat: a
+    /// 148 MB General MIDI set is an OOM kill on a Pi Zero 2 W, not a slow
+    /// load.
+    pub max_bytes: u64,
+}
+
+impl Default for Soundfonts {
+    fn default() -> Self {
+        Soundfonts {
+            root: "soundfonts".into(),
+            max_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
 /// The engine rates the DSP is validated for — one whitelist for boot
 /// config and the recording prefs API alike.
 pub const SAMPLE_RATES: [u32; 3] = [44_100, 48_000, 96_000];
@@ -105,6 +134,11 @@ impl Settings {
         if !block.is_power_of_two() || !(32..=2048).contains(&block) {
             return Err(SettingsError::Invalid(
                 "audio.block_size must be a power of two in 32..=2048".into(),
+            ));
+        }
+        if self.soundfonts.max_bytes == 0 {
+            return Err(SettingsError::Invalid(
+                "soundfonts.max_bytes must be greater than zero".into(),
             ));
         }
         Ok(())

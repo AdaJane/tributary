@@ -183,11 +183,14 @@ describe('InputPickerModal', () => {
       />,
     );
     await user.click(await screen.findByRole('option', { name: 'B1 on dock, free' }));
-    expect(onPatch).toHaveBeenCalledWith({ device: 'dock', channel: 0 });
+    // The modal hands back a discriminated source, not a bare jack: an
+    // instrument channel and a device channel are both patches, and the
+    // caller must not have to guess which one it was handed.
+    expect(onPatch).toHaveBeenCalledWith({ kind: 'device', device: 'dock', channel: 0 });
     await user.click(
       screen.getByRole('option', { name: 'IN 1 on System default input, in use by Kick' }),
     );
-    expect(onPatch).toHaveBeenCalledWith({ device: null, channel: 0 });
+    expect(onPatch).toHaveBeenCalledWith({ kind: 'device', device: null, channel: 0 });
   });
 
   it('a dead patch past the device stays visible and marked', async () => {

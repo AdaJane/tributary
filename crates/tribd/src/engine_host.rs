@@ -186,6 +186,13 @@ pub enum ControlMsg {
     InputSlotsChanged {
         slots: trib_engine::InputSlots,
     },
+    /// From the instrument host: a rack has finished loading. Handed
+    /// straight to the engine — unlike a slot map it needs no recompile,
+    /// because instrument patches resolve by position and the positions
+    /// come from the document the host was given.
+    InstrumentRackChanged {
+        rack: Box<trib_engine::InstrumentRack>,
+    },
     RecordingSettings {
         reply: oneshot::Sender<RecordingSettingsDto>,
     },
@@ -421,6 +428,13 @@ impl ControlHandle {
             .blocking_send(ControlMsg::InputSlotsChanged { slots });
     }
 
+    /// Called from the instrument host thread once a rack has loaded.
+    pub fn instrument_rack_changed_blocking(&self, rack: Box<trib_engine::InstrumentRack>) {
+        let _ = self
+            .tx
+            .blocking_send(ControlMsg::InstrumentRackChanged { rack });
+    }
+
     pub async fn recording_settings(&self) -> RecordingSettingsDto {
         let (reply, response) = oneshot::channel();
         self.tx
@@ -505,6 +519,7 @@ pub fn spawn(
     project_created_at: u64,
     recording: RecordingHost,
     devices: Option<crate::device_host::DeviceHandle>,
+    instruments: Option<crate::instrument_host::InstrumentHandle>,
 ) -> ControlHandle {
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(control_loop(
@@ -518,6 +533,7 @@ pub fn spawn(
         project_created_at,
         recording,
         devices,
+        instruments,
         tx.clone(),
         rx,
     ));
@@ -733,12 +749,18 @@ impl TransportCtl {
 
 /// The device identities the console references — what the orchestrator
 /// must keep open. `None` = the system default input.
+///
+/// Instrument patches are skipped rather than represented here: the device
+/// orchestrator opens streams, reconciles renames and allocates frame
+/// slots, and an instrument has none of those. Its lifecycle belongs to the
+/// instrument host.
 fn wanted_devices(state: &MixerState) -> std::collections::BTreeSet<Option<String>> {
     state
         .strips
         .iter()
         .filter_map(|s| s.input.as_ref())
-        .map(|a| a.device.clone())
+        .filter_map(|a| a.device_name())
+        .map(|device| device.map(str::to_owned))
         .collect()
 }
 
@@ -747,13 +769,6 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("system clock after 1970")
         .as_secs()
-}
-
-fn file_slug(name: &str) -> String {
-    name.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect()
 }
 
 fn publish_transport(hub: &Hub, ctl: &TransportCtl) {
@@ -775,6 +790,7 @@ async fn control_loop(
     mut project_created_at: u64,
     mut recording: RecordingHost,
     devices: Option<crate::device_host::DeviceHandle>,
+    instruments: Option<crate::instrument_host::InstrumentHandle>,
     self_tx: mpsc::Sender<ControlMsg>,
     mut rx: mpsc::Receiver<ControlMsg>,
 ) {
@@ -795,6 +811,12 @@ async fn control_loop(
     if let Some(devices) = &devices {
         devices.wanted_changed(last_wanted.clone());
     }
+    // Same for the rack: the loaded session may already carry instruments,
+    // and they must be loading before anyone presses a key.
+    let mut last_instruments = state.instruments.clone();
+    if let Some(instruments) = &instruments {
+        instruments.instruments_changed(last_instruments.clone());
+    }
     let mut save_generation: u64 = 0;
     // Borrowing thirteen loop locals at a call site is unreadable and
     // borrow-checks badly if hoisted into a variable, so the bundle is
@@ -812,6 +834,8 @@ async fn control_loop(
                 input_slots: &input_slots,
                 last_wanted: &mut last_wanted,
                 devices: &devices,
+                last_instruments: &mut last_instruments,
+                instruments: &instruments,
                 project: &mut project,
                 project_created_at: &mut project_created_at,
                 save_generation: &mut save_generation,
@@ -842,6 +866,16 @@ async fn control_loop(
                         last_wanted = wanted.clone();
                         if let Some(devices) = &devices {
                             devices.wanted_changed(wanted);
+                        }
+                    }
+                    // The rack is rebuilt from the document itself rather
+                    // than from a diff: what the host must load is exactly
+                    // what the console says, and comparing whole documents
+                    // is cheaper than deciding which field mattered.
+                    if state.instruments != last_instruments {
+                        last_instruments = state.instruments.clone();
+                        if let Some(instruments) = &instruments {
+                            instruments.instruments_changed(last_instruments.clone());
                         }
                     }
                     match need {
@@ -1107,6 +1141,14 @@ async fn control_loop(
                     // No MixerSnapshot: the document didn't change, only
                     // where its patches physically land.
                 }
+            }
+            ControlMsg::InstrumentRackChanged { rack } => {
+                // Safe to install mid-take, unlike a slot map: the rack
+                // replaces synthesisers, not record taps, and the take
+                // keeps writing whatever they produce. A player who fixes
+                // a wrong preset halfway through a song should hear the
+                // fix, not wait for the tape to stop.
+                push(&mut cmd_tx, EngineCommand::SwapRack { rack });
             }
             ControlMsg::SelectTake { take, reply } => {
                 let result = 'select: {
@@ -1392,6 +1434,8 @@ async fn control_loop(
                                 input_slots: &input_slots,
                                 last_wanted: &mut last_wanted,
                                 devices: &devices,
+                                last_instruments: &mut last_instruments,
+                                instruments: &instruments,
                                 project: &mut project,
                                 project_created_at: &mut project_created_at,
                                 save_generation: &mut save_generation,
@@ -1474,6 +1518,8 @@ struct SwapCtx<'a> {
     input_slots: &'a trib_engine::InputSlots,
     last_wanted: &'a mut std::collections::BTreeSet<Option<String>>,
     devices: &'a Option<crate::device_host::DeviceHandle>,
+    last_instruments: &'a mut Vec<trib_core::InstrumentState>,
+    instruments: &'a Option<crate::instrument_host::InstrumentHandle>,
     project: &'a mut Project,
     project_created_at: &'a mut u64,
     save_generation: &'a mut u64,
@@ -1514,6 +1560,13 @@ fn adopt_project(cx: SwapCtx<'_>, new_project: Project, manifest: ProjectManifes
             if let Some(devices) = cx.devices {
                 devices.wanted_changed(wanted);
             }
+        }
+        // The incoming session brings its own rack. Told unconditionally
+        // rather than on a diff: an empty document must still reach the
+        // host, or the previous session's instruments keep sounding.
+        *cx.last_instruments = cx.state.instruments.clone();
+        if let Some(instruments) = cx.instruments {
+            instruments.instruments_changed(cx.last_instruments.clone());
         }
         let compiled = compile(
             cx.state,
@@ -1783,7 +1836,7 @@ fn start_recording(
                 file: format!(
                     "ch{:02}-{}.{}",
                     strip.id.0 + 1,
-                    file_slug(&strip.name),
+                    trib_project::file_slug(&strip.name),
                     format.extension()
                 ),
                 channels: 1,
@@ -1813,6 +1866,87 @@ fn start_recording(
         ix
     });
 
+    // The notes, beside the audio. Only worth a ring when an armed strip
+    // is actually fed by an instrument: a session of microphones should
+    // not carry an empty `.mid` around.
+    let instrument_slots: Vec<(u16, String)> = {
+        let mut base = 0u16;
+        state
+            .instruments
+            .iter()
+            .flat_map(|inst| {
+                let names = inst.channel_names();
+                let slots: Vec<(u16, String)> = (0..inst.channels_slots())
+                    .map(|slot| {
+                        (
+                            base + slot as u16,
+                            // A split's own name; a stereo instrument's is
+                            // just the instrument.
+                            if inst.splits.is_empty() {
+                                inst.name.clone()
+                            } else {
+                                names
+                                    .get(slot)
+                                    .cloned()
+                                    .unwrap_or_else(|| inst.name.clone())
+                            },
+                        )
+                    })
+                    .collect();
+                base += inst.channels_slots() as u16;
+                slots
+            })
+            .collect()
+    };
+    let armed_instruments: std::collections::BTreeSet<u16> = state
+        .strips
+        .iter()
+        .filter(|strip| strip.record_arm)
+        .filter_map(|strip| strip.input.as_ref())
+        .filter_map(|assign| {
+            let id = assign.instrument_id()?;
+            let position = state.instruments.iter().position(|i| i.id == id)?;
+            let base: usize = state.instruments[..position]
+                .iter()
+                .map(|i| i.channels_slots())
+                .sum();
+            // A stereo instrument is one slot; a split kit's channel index
+            // IS its slot.
+            let slot = if state.instruments[position].splits.is_empty() {
+                base
+            } else {
+                base + assign.channel() as usize
+            };
+            u16::try_from(slot).ok()
+        })
+        .collect();
+    let midi_sink = (!armed_instruments.is_empty()).then(|| {
+        let (tx, rx) = RingBuffer::new(trib_engine::MIDI_CAPTURE_CAPACITY);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let capture = Box::new(trib_engine::MidiCapture {
+            tx,
+            dropped: dropped.clone(),
+            start_sample: 0,
+        });
+        let voices = instrument_slots
+            .iter()
+            .filter(|(slot, _)| armed_instruments.contains(slot))
+            .map(|(slot, name)| (*slot, name.clone()))
+            .collect();
+        (
+            capture,
+            trib_project::MidiSink {
+                rx,
+                dropped,
+                voices,
+            },
+        )
+    });
+    let (midi_capture, midi_sink) = match midi_sink {
+        Some((capture, sink)) => (Some(capture), Some(sink)),
+        None => (None, None),
+    };
+
     // The writer taps freshly closed peak bins into a channel; a forwarder
     // fans them onto the Waveform WS channel — lanes grow in real time.
     let (peaks_tx, mut peaks_rx) = mpsc::unbounded_channel::<trib_project::PeakBatch>();
@@ -1840,6 +1974,7 @@ fn start_recording(
         started_at_unix,
         format,
         sinks,
+        midi_sink,
         Some(tap),
     )
     .map_err(|e| TransportError::Io(e.to_string()))?;
@@ -1850,6 +1985,7 @@ fn start_recording(
                 strip_tracks,
                 master_track,
                 tracks,
+                midi: midi_capture,
             }),
         },
     );
@@ -2035,13 +2171,21 @@ fn param_commands(params: &ParamMap, delta: &StateDelta, sample_rate: u32) -> Ve
         StateDelta::Renamed { .. } => vec![],
         // Arm flags only matter at the next record start.
         StateDelta::RecordArm { .. } | StateDelta::RecordArmAll { .. } => vec![],
+        // A performance edit is a ParamOnly change, but it does not land in
+        // the graph's parameter table at all — it retunes a synth, which
+        // the instrument host owns. It reaches the rack through the rebuild
+        // the host performs, not through this dispatch.
+        StateDelta::InstrumentChanged { .. } => vec![],
         // Topology deltas never reach here.
         StateDelta::Input { .. }
         | StateDelta::StripAdded { .. }
         | StateDelta::StripRemoved { .. }
         | StateDelta::Route { .. }
         | StateDelta::BusAdded { .. }
-        | StateDelta::BusRemoved { .. } => {
+        | StateDelta::BusRemoved { .. }
+        | StateDelta::InstrumentAdded { .. }
+        | StateDelta::InstrumentRemoved { .. }
+        | StateDelta::InstrumentStripsAdded { .. } => {
             vec![]
         }
     }
@@ -2140,6 +2284,7 @@ mod tests {
             project,
             0,
             recording,
+            None,
             None,
         );
         (control, watch_rx)

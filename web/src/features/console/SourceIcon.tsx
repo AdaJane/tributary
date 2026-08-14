@@ -42,6 +42,15 @@ const GLYPHS: Record<SourceKind, ReactNode> = {
       <rect x="8" y="13" width="8" height="8" rx="1" />
     </>
   ),
+  // Three white keys and two black: the one source the box makes itself.
+  // Hand-drawn like the socket, because the patchbay draws hardware.
+  instrument: (
+    <>
+      <rect x="3" y="6" width="18" height="12" rx="1" />
+      <path d="M9 6v12M15 6v12" />
+      <path d="M7.5 6v6h3V6M13.5 6v6h3V6" />
+    </>
+  ),
 };
 
 export function SourceIcon({ kind }: { kind: SourceKind }) {
