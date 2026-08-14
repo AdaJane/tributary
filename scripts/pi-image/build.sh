@@ -64,6 +64,51 @@ readonly AP_SSID_PREFIX="Tributary"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly HERE
+
+# --- The release image's sudoers promise: "this image grants no sudo beyond
+# the format helper". A pure function over a directory so a dev box can
+# exercise it (test-helpers.sh) with no root, no image and no 15-minute
+# build — the gap that let a broken version of this check reach a tag.
+# Echoes `ok`, or the first offending file and line.
+#
+# Content, not filenames. The base ships Defaults-only drop-ins (env_keep,
+# timestamp_type) whose names drift with every base bump, and a `Defaults`
+# line grants nobody anything. What a release must never carry is a user
+# spec — precisely the shape a stray DEV_SSH_KEY leaves behind.
+# 020_tributary-format is the one deliberate grant, and verify() matches its
+# contents exactly, so it is skipped here rather than re-checked loosely.
+sudoers_grants() {
+    local f spec
+    # A path this function never read must not answer "no grants" — that is
+    # the same silent-green failure the filename allowlist had.
+    if [ ! -d "$1" ]; then
+        echo "$1: not a directory"
+        return 0
+    fi
+    for f in "$1"/*; do
+        [ -e "$f" ] || continue
+        case "${f##*/}" in 020_tributary-format) continue ;; esac
+        # `#include`/`@include` are directives, not comments: they pull in a
+        # file this loop never sees, so they can hide a grant entirely.
+        if grep -qE '^[[:space:]]*[#@]include' "$f"; then
+            echo "${f##*/}: include directive"
+            return 0
+        fi
+        spec="$(grep -vE '^[[:space:]]*(#|$)' "$f" \
+            | grep -vE '^[[:space:]]*Defaults' | head -1 || true)"
+        if [ -n "$spec" ]; then
+            echo "${f##*/}: $spec"
+            return 0
+        fi
+    done
+    echo ok
+}
+# Fixture mode, ahead of the usage check below so it needs no build args.
+if [ "${1:-}" = --print-sudoers-check ]; then
+    sudoers_grants "${2:?usage: build.sh --print-sudoers-check <dir>}"
+    exit 0
+fi
+
 readonly BINARY="${1:?usage: build.sh <aarch64-tribd> <out.img.xz> [--no-compress]}"
 readonly OUT="${2:?usage: build.sh <aarch64-tribd> <out.img.xz> [--no-compress]}"
 if [ "${3:-}" = "--no-compress" ]; then readonly COMPRESS=no; else readonly COMPRESS=yes; fi
@@ -513,18 +558,14 @@ else
     if [ -e "$ROOT/etc/ssh/sshd_config.d/10-tributary-dev.conf" ]; then
         fail "verify: dev sshd config in a non-dev image"
     fi
-    # An allowlist, not a glob for the dev rule. The appliance now ships one
-    # NOPASSWD entry of its own (the format helper), so a check that only
-    # looked for `010_*-nopasswd` would stay green while the promise it
-    # encodes — "no passwordless sudo here" — quietly stopped being true.
-    # Enumerating is the only form that keeps meaning as the image grows.
-    for f in "$ROOT"/etc/sudoers.d/*; do
-        [ -e "$f" ] || continue
-        case "${f##*/}" in
-        README | 020_tributary-format) ;;
-        *) fail "verify: unexpected sudoers drop-in in a release image: ${f##*/}" ;;
-        esac
-    done
+    # Not a glob for the dev rule: a check that only looked for
+    # `010_*-nopasswd` would stay green while the promise it encodes quietly
+    # stopped being true. sudoers_grants() judges every drop-in by content,
+    # so the promise keeps its meaning across a base bump that renames or
+    # adds one — an allowlist of filenames would only keep its wording.
+    SUDOERS_VERDICT="$(sudoers_grants "$ROOT/etc/sudoers.d")"
+    [ "$SUDOERS_VERDICT" = ok ] \
+        || fail "verify: sudoers drop-in grants privileges in a release image — $SUDOERS_VERDICT"
     # Baked host keys are fine for a one-off dev image and wrong for a
     # release: every card flashed from it would share an identity.
     if compgen -G "$ROOT/etc/ssh/ssh_host_*_key" >/dev/null; then

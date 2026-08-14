@@ -12,6 +12,7 @@ readonly HERE
 readonly AP="$HERE/ap-prepare.sh"
 readonly USB="$HERE/usb-mount.sh"
 readonly FMT="$HERE/format-drive.sh"
+readonly BUILD="$HERE/build.sh"
 
 pass=0
 fail=0
@@ -152,6 +153,56 @@ check "ssid/from-serial" "Tributary-3C4D" "$(ssid "$TMP/cpuinfo" "$TMP/machine-i
 check "ssid/uppercased" "Tributary-3C4D" "$(ssid "$TMP/cpuinfo" "$TMP/missing")"
 check "ssid/machine-id-fallback" "Tributary-BE99" "$(ssid "$TMP/empty" "$TMP/machine-id")"
 check_fails "ssid/neither-source" ssid "$TMP/empty" "$TMP/missing"
+
+# ------------------------------------------------- build.sh release sudoers
+
+sud() { "$BUILD" --print-sudoers-check "$1"; }
+
+# The four Defaults-only drop-ins Raspberry Pi OS Lite trixie ships, verbatim.
+# They grant nobody anything, so a release image carrying them is still an
+# image with no login account — and their names are the base's business, not
+# ours. A filename allowlist failed here and blocked a release.
+mkdir -p "$TMP/sud-base"
+echo 'Defaults env_keep += "NO_AT_BRIDGE"' > "$TMP/sud-base/010_at-export"
+echo 'Defaults env_keep += "DPKG_DEB_THREADS_MAX"' > "$TMP/sud-base/010_dpkg-threads"
+echo 'Defaults timestamp_type=global' > "$TMP/sud-base/010_global-tty"
+echo 'Defaults env_keep += "http_proxy HTTP_PROXY"' > "$TMP/sud-base/010_proxy"
+printf '# sudo reads every file here.\n#\n# Comments only.\n' > "$TMP/sud-base/README"
+check "sudoers/base-defaults-only" ok "$(sud "$TMP/sud-base")"
+
+# The appliance's own grant is deliberate, and verify() matches its text
+# exactly elsewhere — so this loop must not also flag it as a user spec.
+mkdir -p "$TMP/sud-fmt"
+cp "$HERE/tributary-format.sudoers" "$TMP/sud-fmt/020_tributary-format"
+check "sudoers/format-helper-allowed" ok "$(sud "$TMP/sud-fmt")"
+
+# The regression this check exists for: a stray DEV_SSH_KEY leaving a login
+# account and passwordless sudo in a tagged release image.
+mkdir -p "$TMP/sud-dev"
+cp "$TMP/sud-base/010_proxy" "$TMP/sud-dev/010_proxy"
+echo 'dev ALL=(ALL) NOPASSWD:ALL' > "$TMP/sud-dev/010_dev-nopasswd"
+check "sudoers/dev-rule-caught" \
+    "010_dev-nopasswd: dev ALL=(ALL) NOPASSWD:ALL" "$(sud "$TMP/sud-dev")"
+
+# `#include` is a directive, not a comment: it pulls in a file this scan
+# never opens, so treating it as a comment would leave a hole the width of
+# the whole check.
+mkdir -p "$TMP/sud-inc"
+printf '# helpful preamble\n@includedir /etc/sudoers.extra\n' > "$TMP/sud-inc/030_extra"
+check "sudoers/include-caught" "030_extra: include directive" "$(sud "$TMP/sud-inc")"
+mkdir -p "$TMP/sud-inc-hash"
+printf '#includedir /etc/sudoers.extra\n' > "$TMP/sud-inc-hash/030_extra"
+check "sudoers/hash-include-caught" \
+    "030_extra: include directive" "$(sud "$TMP/sud-inc-hash")"
+
+# An empty directory is the no-drop-ins case, not an error.
+mkdir -p "$TMP/sud-empty"
+check "sudoers/empty-dir" ok "$(sud "$TMP/sud-empty")"
+
+# ...but a path that was never read must not answer "no grants". A mistyped
+# path silently passing forever is the failure the allowlist already had.
+check "sudoers/missing-dir-is-not-ok" \
+    "$TMP/sud-absent: not a directory" "$(sud "$TMP/sud-absent")"
 
 # ------------------------------------------------------------------ summary
 
