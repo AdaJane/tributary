@@ -7,7 +7,10 @@ use crate::fx::FxParams;
 use crate::id::{BusId, FxId, InstrumentId, StripId};
 use crate::instrument::{InstrumentSplit, InstrumentState};
 use crate::mix::MixerState;
-use crate::output::{MAX_OUTPUT_PATCHES, OutputJack, OutputPatch, OutputSource};
+use crate::output::{
+    MAX_MIDI_ROUTES, MAX_OUTPUT_PATCHES, MidiRoute, MidiSource, OutputJack, OutputPatch,
+    OutputSource,
+};
 use crate::strip::{InputAssign, RouteTarget, SendState, SendTap, StripState};
 
 /// Longest accepted strip/bus name — it has to fit on the tape.
@@ -192,6 +195,17 @@ pub enum MixCommand {
         jack: OutputJack,
         tap: SendTap,
     },
+    /// Upsert one MIDI route. Keyed on (port, source), so pressing the
+    /// same button twice is one route — the `AddInstrumentStrips` idiom.
+    /// Several DIFFERENT sources may name one port; that is the merge.
+    SetMidiRoute {
+        route: MidiRoute,
+    },
+    /// Remove one MIDI route by the same key.
+    ClearMidiRoute {
+        port: String,
+        source: MidiSource,
+    },
 }
 
 impl MixCommand {
@@ -240,7 +254,14 @@ impl MixCommand {
             | MixCommand::SetRecordArm { .. }
             | MixCommand::SetRecordArmAll { .. }
             | MixCommand::SetInstrumentPerformance { .. }
-            | MixCommand::SetOutputTap { .. } => false,
+            | MixCommand::SetOutputTap { .. }
+            // MIDI routing is not "cheap" — it does not exist in the graph
+            // at all. Nothing about it touches a record tap, a smoother or
+            // an FX tail; the control task's whole job is to hand the new
+            // list to the instrument host, which is what it already does
+            // for the rack.
+            | MixCommand::SetMidiRoute { .. }
+            | MixCommand::ClearMidiRoute { .. } => false,
         }
     }
 }
@@ -342,6 +363,9 @@ pub enum StateDelta {
     /// to re-derive which channels just went quiet.
     InstrumentRemoved {
         id: InstrumentId,
+        /// The MIDI output ports that stopped echoing it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unrouted_ports: Vec<String>,
         unpatched: Vec<StripId>,
     },
     /// Both instrument edits report the whole instrument rather than the
@@ -369,6 +393,13 @@ pub enum StateDelta {
     OutputTap {
         jack: OutputJack,
         tap: SendTap,
+    },
+    MidiRouted {
+        route: MidiRoute,
+    },
+    MidiUnrouted {
+        port: String,
+        source: MidiSource,
     },
 }
 
@@ -719,7 +750,25 @@ pub fn apply(state: &MixerState, command: MixCommand) -> Result<Applied, MixErro
                     unpatched.push(strip.id);
                 }
             }
-            (StateDelta::InstrumentRemoved { id, unpatched }, Topology)
+            // ...and so do the routes that were echoing it. Reported for
+            // the same reason: "removing Rhodes also stopped feeding the
+            // Juno" is a sentence the console wants to be able to say.
+            let unrouted_ports: Vec<String> = next
+                .midi_routes
+                .iter()
+                .filter(|r| r.source == MidiSource::Instrument { id })
+                .map(|r| r.port.clone())
+                .collect();
+            next.midi_routes
+                .retain(|r| r.source != MidiSource::Instrument { id });
+            (
+                StateDelta::InstrumentRemoved {
+                    id,
+                    unrouted_ports,
+                    unpatched,
+                },
+                Topology,
+            )
         }
         MixCommand::SetInstrumentVoice {
             id,
@@ -875,6 +924,50 @@ pub fn apply(state: &MixerState, command: MixCommand) -> Result<Applied, MixErro
             patch.tap = tap;
             (StateDelta::OutputTap { jack, tap }, ParamOnly)
         }
+        MixCommand::SetMidiRoute { route } => {
+            let port = check_name(&route.port)?;
+            if let Some(channel) = route.channel
+                && channel > 15
+            {
+                return Err(MixError::OutOfRange {
+                    field: "midi_channel",
+                    value: f32::from(channel),
+                });
+            }
+            match &route.source {
+                MidiSource::Instrument { id } => {
+                    if next.instrument(*id).is_none() {
+                        return Err(MixError::UnknownTarget(id.to_string()));
+                    }
+                }
+                MidiSource::Port { name } | MidiSource::Take { name } => {
+                    check_name(name)?;
+                }
+            }
+            let route = MidiRoute { port, ..route };
+            match next
+                .midi_routes
+                .iter()
+                .position(|r| r.is(&route.port, &route.source))
+            {
+                Some(at) => next.midi_routes[at] = route.clone(),
+                None => {
+                    if next.midi_routes.len() >= MAX_MIDI_ROUTES {
+                        return Err(MixError::Unsupported("the MIDI patch bay is full"));
+                    }
+                    next.midi_routes.push(route.clone());
+                }
+            }
+            (StateDelta::MidiRouted { route }, ParamOnly)
+        }
+        MixCommand::ClearMidiRoute { port, source } => {
+            let before = next.midi_routes.len();
+            next.midi_routes.retain(|r| !r.is(&port, &source));
+            if next.midi_routes.len() == before {
+                return Err(MixError::UnknownTarget(port));
+            }
+            (StateDelta::MidiUnrouted { port, source }, ParamOnly)
+        }
     };
     Ok((next, delta, need))
 }
@@ -960,6 +1053,210 @@ mod tests {
 
     fn out_patch(source: OutputSource, source_channel: u16, channel: u16) -> OutputPatch {
         OutputPatch::new(source, source_channel, jack(channel))
+    }
+
+    fn route(port: &str, source: MidiSource) -> MidiRoute {
+        MidiRoute {
+            port: port.into(),
+            channel: None,
+            source,
+        }
+    }
+
+    fn with_instrument() -> MixerState {
+        let mut state = state();
+        state
+            .instruments
+            .push(InstrumentState::new(InstrumentId(0), "Rhodes".into()));
+        state
+    }
+
+    #[test]
+    fn the_same_midi_route_twice_is_one_route() {
+        let source = MidiSource::Instrument {
+            id: InstrumentId(0),
+        };
+        let (state, ..) = apply(
+            &with_instrument(),
+            MixCommand::SetMidiRoute {
+                route: route("Juno", source.clone()),
+            },
+        )
+        .unwrap();
+        let (state, _, need) = apply(
+            &state,
+            MixCommand::SetMidiRoute {
+                route: MidiRoute {
+                    channel: Some(9),
+                    ..route("Juno", source.clone())
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(state.midi_routes.len(), 1, "the key is (port, source)");
+        assert_eq!(
+            state.midi_routes[0].channel,
+            Some(9),
+            "the channel is what you edit"
+        );
+        assert_eq!(need, ReconcileNeed::ParamOnly);
+    }
+
+    #[test]
+    fn two_different_sources_may_merge_onto_one_midi_port() {
+        // The patch bay's one-feed-per-output rule deliberately does NOT
+        // apply here: MIDI events interleave where audio would have to be
+        // summed, so a merge is a real thing rather than a mixer.
+        let mut state = with_instrument();
+        state
+            .instruments
+            .push(InstrumentState::new(InstrumentId(1), "Kit".into()));
+        let (state, ..) = apply(
+            &state,
+            MixCommand::SetMidiRoute {
+                route: route(
+                    "Juno",
+                    MidiSource::Instrument {
+                        id: InstrumentId(0),
+                    },
+                ),
+            },
+        )
+        .unwrap();
+        let (state, ..) = apply(
+            &state,
+            MixCommand::SetMidiRoute {
+                route: route(
+                    "Juno",
+                    MidiSource::Instrument {
+                        id: InstrumentId(1),
+                    },
+                ),
+            },
+        )
+        .unwrap();
+        assert_eq!(state.midi_routes.len(), 2);
+    }
+
+    #[test]
+    fn a_midi_route_on_channel_sixteen_is_refused() {
+        // MIDI channels are 0..=15 on the wire and 1..=16 in print; the
+        // wire number is what a route carries.
+        assert!(matches!(
+            apply(
+                &with_instrument(),
+                MixCommand::SetMidiRoute {
+                    route: MidiRoute {
+                        channel: Some(16),
+                        ..route(
+                            "Juno",
+                            MidiSource::Instrument {
+                                id: InstrumentId(0)
+                            }
+                        )
+                    },
+                },
+            ),
+            Err(MixError::OutOfRange {
+                field: "midi_channel",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_route_echoing_an_instrument_that_is_not_there_is_refused() {
+        assert!(matches!(
+            apply(
+                &state(),
+                MixCommand::SetMidiRoute {
+                    route: route(
+                        "Juno",
+                        MidiSource::Instrument {
+                            id: InstrumentId(7)
+                        }
+                    ),
+                },
+            ),
+            Err(MixError::UnknownTarget(_))
+        ));
+    }
+
+    #[test]
+    fn removing_an_instrument_stops_echoing_it_and_names_the_ports_that_went_quiet() {
+        let (state, ..) = apply(
+            &with_instrument(),
+            MixCommand::SetMidiRoute {
+                route: route(
+                    "Juno",
+                    MidiSource::Instrument {
+                        id: InstrumentId(0),
+                    },
+                ),
+            },
+        )
+        .unwrap();
+        let (next, delta, _) = apply(
+            &state,
+            MixCommand::RemoveInstrument {
+                id: InstrumentId(0),
+            },
+        )
+        .unwrap();
+        assert!(next.midi_routes.is_empty());
+        assert_eq!(
+            delta,
+            StateDelta::InstrumentRemoved {
+                id: InstrumentId(0),
+                unrouted_ports: vec!["Juno".to_owned()],
+                unpatched: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_route_to_a_port_that_is_not_there_stays_in_the_document() {
+        // Doctrine from the input side: a port whose name changed is
+        // reported absent rather than guessed at. Nothing in the reducer
+        // knows which ports exist, and that is deliberate — healing here
+        // would delete a route because a keyboard was unplugged.
+        let (state, ..) = apply(
+            &with_instrument(),
+            MixCommand::SetMidiRoute {
+                route: route(
+                    "a keyboard nobody plugged in",
+                    MidiSource::Port {
+                        name: "nanoKEY2".into(),
+                    },
+                ),
+            },
+        )
+        .unwrap();
+        assert_eq!(state.midi_routes.len(), 1);
+    }
+
+    #[test]
+    fn a_take_route_names_the_sidecar_rather_than_a_take_number() {
+        // A take number is transport state; a route lives in project.toml
+        // and has to name something that survives the next take.
+        let (state, ..) = apply(
+            &state(),
+            MixCommand::SetMidiRoute {
+                route: route(
+                    "Juno",
+                    MidiSource::Take {
+                        name: "Kit Kick".into(),
+                    },
+                ),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.midi_routes[0].source,
+            MidiSource::Take {
+                name: "Kit Kick".into()
+            }
+        );
     }
 
     #[test]
@@ -1235,6 +1532,17 @@ mod tests {
             MixCommand::SetOutputTap {
                 jack: jack(1),
                 tap: SendTap::PostFader,
+            },
+            MixCommand::SetMidiRoute {
+                route: MidiRoute {
+                    port: "Juno".into(),
+                    channel: None,
+                    source: MidiSource::Instrument { id },
+                },
+            },
+            MixCommand::ClearMidiRoute {
+                port: "Juno".into(),
+                source: MidiSource::Instrument { id },
             },
         ]
     }
@@ -1602,6 +1910,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<MixCommand>(&json).unwrap(), voice);
 
         let removed = StateDelta::InstrumentRemoved {
+            unrouted_ports: Vec::new(),
             id: InstrumentId(1),
             unpatched: vec![StripId(0), StripId(2)],
         };

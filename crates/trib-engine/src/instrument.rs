@@ -519,6 +519,59 @@ mod tests {
     // `assert_no_alloc::AllocDisabler` for this crate's test binary, and a
     // second one is a compile error.
 
+    #[test]
+    fn the_index_binding_agrees_with_the_documents_own_rule() {
+        // Two derivations of ONE rule: the rack matches by resolved port
+        // INDEX because no String may reach the audio thread, and the MIDI
+        // echo matches by port NAME because it works from the document.
+        // They must answer identically, or an external synth would play
+        // notes the SoundFont did not — which is precisely the failure an
+        // echo exists to avoid.
+        use trib_core::{InstrumentId, InstrumentState};
+
+        let ports = ["nanoKEY2", "Juno"];
+        for (doc_port, doc_channel) in [
+            (None, None),
+            (None, Some(3)),
+            (Some("nanoKEY2"), None),
+            (Some("nanoKEY2"), Some(3)),
+            (Some("Juno"), Some(0)),
+            (Some("absent"), None),
+        ] {
+            let state = InstrumentState {
+                port: doc_port.map(str::to_owned),
+                midi_channel: doc_channel,
+                ..InstrumentState::new(InstrumentId(0), "x".into())
+            };
+            // What the control side resolves for the rack.
+            let binding = MidiBinding {
+                port: doc_port.and_then(|name| {
+                    ports
+                        .iter()
+                        .position(|p| *p == name)
+                        .and_then(|i| u8::try_from(i).ok())
+                }),
+                channel: doc_channel,
+            };
+            for (index, name) in ports.iter().enumerate() {
+                for channel in [0u8, 3, 15] {
+                    let event = MidiEvent {
+                        port: index as u8,
+                        channel,
+                        status: 0x90,
+                        data1: 60,
+                        data2: 100,
+                    };
+                    assert_eq!(
+                        binding.accepts(&event),
+                        state.accepts(name, channel),
+                        "{doc_port:?}/{doc_channel:?} vs {name}/{channel}"
+                    );
+                }
+            }
+        }
+    }
+
     const SR: u32 = 48_000;
 
     fn soundfont() -> Arc<SoundFont> {

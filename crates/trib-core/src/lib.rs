@@ -33,7 +33,10 @@ pub use instrument::{
 };
 pub use meter::{CLIP_DB, MeterKey};
 pub use mix::{MasterState, MixerState};
-pub use output::{MAX_OUTPUT_PATCHES, OutputJack, OutputPatch, OutputSource};
+pub use output::{
+    MAX_MIDI_ROUTES, MAX_OUTPUT_PATCHES, MidiRoute, MidiSource, OutputJack, OutputPatch,
+    OutputSource,
+};
 pub use strip::{InputAssign, RouteTarget, SendState, SendTap, StripState};
 
 /// A wire/enum value that no variant matches.

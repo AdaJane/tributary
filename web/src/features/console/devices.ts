@@ -71,7 +71,14 @@ export function silencedReason(section: PatchbaySection): string | null {
   return null;
 }
 
-export type SourceKind = 'default' | 'mic' | 'webcam' | 'usb' | 'line' | 'instrument';
+export type SourceKind =
+  | 'default'
+  | 'mic'
+  | 'webcam'
+  | 'usb'
+  | 'line'
+  | 'instrument'
+  | 'midi';
 
 /** Guess a glyph from the source's print — supplementary only (the title
  * stays the identity), so a wrong guess costs nothing but style. */

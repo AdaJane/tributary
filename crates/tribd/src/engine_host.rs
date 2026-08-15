@@ -186,6 +186,10 @@ pub enum ControlMsg {
     InputSlotsChanged {
         slots: trib_engine::InputSlots,
     },
+    /// The selected take's MIDI sidecar names.
+    TakeMidiTracks {
+        reply: oneshot::Sender<Vec<String>>,
+    },
     /// From the device orchestrator: output devices opened/closed, so
     /// direct-out patches resolve differently now.
     ///
@@ -241,6 +245,25 @@ impl ControlHandle {
             .await
             .expect("control task outlives its callers");
         response.await.expect("control task replies")
+    }
+
+    /// The MIDI sidecar names the SELECTED take carries.
+    ///
+    /// From the transport rather than the document, because which take is
+    /// selected is transport state — the console needs it to offer a
+    /// take-playback route a list of real tracks rather than a free-text
+    /// box.
+    pub async fn take_midi_tracks(&self) -> Vec<String> {
+        let (reply, response) = oneshot::channel();
+        if self
+            .tx
+            .send(ControlMsg::TakeMidiTracks { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        response.await.unwrap_or_default()
     }
 
     pub async fn snapshot(&self) -> MixerState {
@@ -537,6 +560,10 @@ pub fn spawn(
     recording: RecordingHost,
     devices: Option<crate::device_host::DeviceHandle>,
     instruments: Option<crate::instrument_host::InstrumentHandle>,
+    // MIDI OUT, shared with the instrument host: the take feeders write to
+    // the same connections the echo does, so a merge onto one port works
+    // whichever half opened it.
+    midi_out: Option<std::sync::Arc<crate::midi_out::OutPorts>>,
 ) -> ControlHandle {
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(control_loop(
@@ -551,6 +578,7 @@ pub fn spawn(
         recording,
         devices,
         instruments,
+        midi_out,
         tx.clone(),
         rx,
     ));
@@ -575,6 +603,12 @@ struct PlaybackSession {
     ticker: tokio::task::JoinHandle<()>,
     /// Dropping the session stops the feeder thread.
     _feeder: FeederHandle,
+    /// One per `MidiSource::Take` route, streaming a sidecar out to
+    /// hardware against this session's playhead. Dropping them stops the
+    /// threads AND silences the ports — so stop, seek, take-switch and
+    /// session-swap all release held notes for free, because every one of
+    /// those paths already drops the session.
+    _midi_feeders: Vec<crate::midi_feed::MidiFeederHandle>,
 }
 
 /// Map monotone frames-played onto the take timeline, folding loop passes.
@@ -607,6 +641,10 @@ struct SelectedTake {
     format: trib_project::RecordFormat,
     total_frames: u64,
     tracks: Vec<TakeTrackInfo>,
+    /// The take's MIDI sidecars. Carried here so a `MidiSource::Take`
+    /// route can find its file without re-reading `take.toml` between two
+    /// notes.
+    midi_tracks: Vec<trib_project::TakeMidiTrackInfo>,
 }
 
 /// Pure over a manifest, so the shape is testable without disk.
@@ -617,6 +655,7 @@ fn take_summary(info: trib_project::TakeInfo) -> SelectedTake {
         format: info.format,
         total_frames: info.tracks.iter().map(|t| t.frames).max().unwrap_or(0),
         tracks: info.tracks,
+        midi_tracks: info.midi_tracks,
     }
 }
 
@@ -820,6 +859,7 @@ async fn control_loop(
     mut recording: RecordingHost,
     devices: Option<crate::device_host::DeviceHandle>,
     instruments: Option<crate::instrument_host::InstrumentHandle>,
+    midi_out: Option<std::sync::Arc<crate::midi_out::OutPorts>>,
     self_tx: mpsc::Sender<ControlMsg>,
     mut rx: mpsc::Receiver<ControlMsg>,
 ) {
@@ -849,6 +889,10 @@ async fn control_loop(
     // Same for the rack: the loaded session may already carry instruments,
     // and they must be loading before anyone presses a key.
     let mut last_instruments = state.instruments.clone();
+    let mut last_routes = state.midi_routes.clone();
+    if let Some(instruments) = &instruments {
+        instruments.routes_changed(last_routes.clone());
+    }
     if let Some(instruments) = &instruments {
         instruments.instruments_changed(last_instruments.clone());
     }
@@ -872,6 +916,7 @@ async fn control_loop(
                 last_wanted_outputs: &mut last_wanted_outputs,
                 devices: &devices,
                 last_instruments: &mut last_instruments,
+                last_routes: &mut last_routes,
                 instruments: &instruments,
                 project: &mut project,
                 project_created_at: &mut project_created_at,
@@ -928,6 +973,14 @@ async fn control_loop(
                             last_instruments = state.instruments.clone();
                             if let Some(instruments) = &instruments {
                                 instruments.instruments_changed(last_instruments.clone());
+                            }
+                        }
+                        // Its own diff, so editing a route never reloads a
+                        // soundfont.
+                        if state.midi_routes != last_routes {
+                            last_routes = state.midi_routes.clone();
+                            if let Some(instruments) = &instruments {
+                                instruments.routes_changed(last_routes.clone());
                             }
                         }
                         match need {
@@ -988,6 +1041,14 @@ async fn control_loop(
             }
             ControlMsg::Snapshot { reply } => {
                 let _ = reply.send(state.clone());
+            }
+            ControlMsg::TakeMidiTracks { reply } => {
+                let names = ctl
+                    .selected
+                    .as_ref()
+                    .map(|take| take.midi_tracks.iter().map(|t| t.name.clone()).collect())
+                    .unwrap_or_default();
+                let _ = reply.send(names);
             }
             ControlMsg::RecordStart { reply } => {
                 // Tape wins: review mode never blocks a take. Stop playback
@@ -1053,7 +1114,16 @@ async fn control_loop(
                 let _ = reply.send(ctl.dto());
             }
             ControlMsg::Play { reply } => {
-                let result = start_playback(&mut ctl, &project, &mut cmd_tx, &hub, &self_tx).await;
+                let result = start_playback(
+                    &mut ctl,
+                    &project,
+                    &mut cmd_tx,
+                    &hub,
+                    &self_tx,
+                    &state.midi_routes,
+                    &midi_out,
+                )
+                .await;
                 let _ = reply.send(result);
             }
             ControlMsg::PlayStop { reply } => {
@@ -1079,7 +1149,16 @@ async fn control_loop(
                         stop_playback(&mut ctl, &mut cmd_tx, &hub);
                         let total = ctl.selected.as_ref().map_or(0, |s| s.total_frames);
                         ctl.stopped_position = frames.min(total);
-                        start_playback(&mut ctl, &project, &mut cmd_tx, &hub, &self_tx).await
+                        start_playback(
+                            &mut ctl,
+                            &project,
+                            &mut cmd_tx,
+                            &hub,
+                            &self_tx,
+                            &state.midi_routes,
+                            &midi_out,
+                        )
+                        .await
                     }
                 };
                 let _ = reply.send(result);
@@ -1111,7 +1190,16 @@ async fn control_loop(
                         // The one seek path: rebuild the session under the
                         // new region from the mapped current position.
                         stop_playback(&mut ctl, &mut cmd_tx, &hub);
-                        start_playback(&mut ctl, &project, &mut cmd_tx, &hub, &self_tx).await
+                        start_playback(
+                            &mut ctl,
+                            &project,
+                            &mut cmd_tx,
+                            &hub,
+                            &self_tx,
+                            &state.midi_routes,
+                            &midi_out,
+                        )
+                        .await
                     } else {
                         publish_transport(&hub, &ctl);
                         Ok(ctl.dto())
@@ -1530,6 +1618,7 @@ async fn control_loop(
                                 last_wanted_outputs: &mut last_wanted_outputs,
                                 devices: &devices,
                                 last_instruments: &mut last_instruments,
+                                last_routes: &mut last_routes,
                                 instruments: &instruments,
                                 project: &mut project,
                                 project_created_at: &mut project_created_at,
@@ -1616,6 +1705,7 @@ struct SwapCtx<'a> {
     last_wanted_outputs: &'a mut std::collections::BTreeSet<Option<String>>,
     devices: &'a Option<crate::device_host::DeviceHandle>,
     last_instruments: &'a mut Vec<trib_core::InstrumentState>,
+    last_routes: &'a mut Vec<trib_core::MidiRoute>,
     instruments: &'a Option<crate::instrument_host::InstrumentHandle>,
     project: &'a mut Project,
     project_created_at: &'a mut u64,
@@ -1669,6 +1759,10 @@ fn adopt_project(cx: SwapCtx<'_>, new_project: Project, manifest: ProjectManifes
         // rather than on a diff: an empty document must still reach the
         // host, or the previous session's instruments keep sounding.
         *cx.last_instruments = cx.state.instruments.clone();
+        *cx.last_routes = cx.state.midi_routes.clone();
+        if let Some(instruments) = cx.instruments {
+            instruments.routes_changed(cx.last_routes.clone());
+        }
         if let Some(instruments) = cx.instruments {
             instruments.instruments_changed(cx.last_instruments.clone());
         }
@@ -1755,12 +1849,15 @@ fn stop_playback(ctl: &mut TransportCtl, cmd_tx: &mut Producer<EngineCommand>, h
 }
 
 /// Open the latest take, prime the rings off the async runtime, and roll.
+#[allow(clippy::too_many_arguments)]
 async fn start_playback(
     ctl: &mut TransportCtl,
     project: &Project,
     cmd_tx: &mut Producer<EngineCommand>,
     hub: &Hub,
     self_tx: &mpsc::Sender<ControlMsg>,
+    routes: &[trib_core::MidiRoute],
+    out_ports: &Option<std::sync::Arc<crate::midi_out::OutPorts>>,
 ) -> Result<TransportDto, TransportError> {
     match ctl.state {
         TransportState::Recording(_) => {
@@ -1826,6 +1923,20 @@ async fn start_playback(
     let shared = set.shared.clone();
     push(cmd_tx, EngineCommand::StartPlayback { set: Box::new(set) });
 
+    // The take's MIDI, out to hardware. Sidecars are read HERE, before
+    // playback starts — opening a file is not something to do between two
+    // notes — and a route naming a sidecar this take does not carry simply
+    // gets no feeder, which is what the report explains.
+    let midi_feeders = spawn_midi_feeders(
+        routes,
+        out_ports,
+        project,
+        &latest,
+        &shared,
+        start_frame,
+        ctl.loop_region,
+    );
+
     ctl.generation += 1;
     // Stream clients flush their buffers on a generation change, so a seek
     // never splices two sessions together.
@@ -1844,9 +1955,10 @@ async fn start_playback(
         generation: ctl.generation,
         start_frame,
         loop_region: ctl.loop_region,
-        shared,
+        shared: shared.clone(),
         ticker,
         _feeder: feeder,
+        _midi_feeders: midi_feeders,
     });
     let dto = ctl.dto();
     hub.publish(
@@ -1854,6 +1966,55 @@ async fn start_playback(
         &ServerMessage::Transport { state: dto.clone() },
     );
     Ok(dto)
+}
+
+/// One feeder per `MidiSource::Take` route whose sidecar this take has.
+///
+/// A route naming a sidecar the take does not carry gets no feeder and no
+/// error: the take simply has no such track, which the report says in
+/// words rather than by failing to play.
+#[allow(clippy::too_many_arguments)]
+fn spawn_midi_feeders(
+    routes: &[trib_core::MidiRoute],
+    out_ports: &Option<std::sync::Arc<crate::midi_out::OutPorts>>,
+    project: &Project,
+    take: &SelectedTake,
+    shared: &Arc<PlaybackShared>,
+    start_frame: u64,
+    loop_region: Option<LoopRegionDto>,
+) -> Vec<crate::midi_feed::MidiFeederHandle> {
+    let Some(ports) = out_ports else {
+        return Vec::new();
+    };
+    let dir = project.takes_dir().join(format!("take-{:03}", take.take));
+    routes
+        .iter()
+        .filter_map(|route| {
+            let trib_core::MidiSource::Take { name } = &route.source else {
+                return None;
+            };
+            let track = take.midi_tracks.iter().find(|t| &t.name == name)?;
+            let path = dir.join(&track.file);
+            let events = match trib_project::read_midi_sidecar(&path, take.sample_rate) {
+                Ok(events) => events,
+                Err(e) => {
+                    tracing::warn!(file = %path.display(), %e, "take MIDI would not play");
+                    return None;
+                }
+            };
+            Some(crate::midi_feed::spawn(
+                crate::midi_feed::MidiPlayback {
+                    events,
+                    port: route.port.clone(),
+                    channel: route.channel,
+                    shared: shared.clone(),
+                    start_frame,
+                    loop_region: loop_region.map(|l| (l.start_frames, l.end_frames)),
+                },
+                ports.clone(),
+            ))
+        })
+        .collect()
 }
 
 /// Publish the playhead from real frames at the pump rate; hand the finish
@@ -2294,7 +2455,12 @@ fn param_commands(params: &ParamMap, delta: &StateDelta, sample_rate: u32) -> Ve
         // Patching and unpatching change the graph's shape and arrive via
         // a recompile; only the tap moves on its own.
         | StateDelta::OutputPatched { .. }
-        | StateDelta::OutputUnpatched { .. } => {
+        | StateDelta::OutputUnpatched { .. }
+        // MIDI routing does not exist in the graph at all: the control
+        // task's whole job is to hand the new list to the instrument host,
+        // which owns the ports.
+        | StateDelta::MidiRouted { .. }
+        | StateDelta::MidiUnrouted { .. } => {
             vec![]
         }
         // A miss here is normal and not a lie: a patch aimed at a device
@@ -2406,6 +2572,7 @@ mod tests {
             project,
             0,
             recording,
+            None,
             None,
             None,
         );

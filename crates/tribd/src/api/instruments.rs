@@ -123,11 +123,11 @@ pub fn patch_commands(current: &InstrumentState, patch: InstrumentPatch) -> Vec<
 
 pub(crate) async fn document(state: &AppState) -> InstrumentsDto {
     let snapshot = state.control.snapshot().await;
-    let (reports, midi_ports) = state.instruments.report().await;
+    let midi = state.instruments.report().await;
     InstrumentsDto {
         instruments: snapshot.instruments.clone(),
-        reports,
-        midi_ports,
+        reports: midi.instruments,
+        midi_ports: midi.inputs,
         soundfonts: state.instruments.library().await,
         soundfont_dir: state.soundfont_dir.clone(),
         max_upload_bytes: state.max_soundfont_bytes,

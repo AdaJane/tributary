@@ -10,7 +10,10 @@ mod reader;
 mod writer;
 
 pub use format::RecordFormat;
-pub use midi::{MidiSink, MidiTrackReport, TICKS_PER_SECOND, build_smf, tick_of};
+pub use midi::{
+    MidiReadError, MidiSink, MidiTrackReport, SidecarEvent, TICKS_PER_SECOND, build_smf,
+    read_midi_sidecar, tick_of,
+};
 pub use peaks::{
     PEAK_SAMPLES_PER_BIN, PeakAccum, compute_from_audio, read_or_compute, read_sidecar,
 };

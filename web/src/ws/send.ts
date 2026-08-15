@@ -87,6 +87,13 @@ export function paramKey(delta: StateDelta): string {
     case 'output_unpatched':
     case 'output_tap':
       return `out:${delta.jack.device ?? ''}#${delta.jack.channel}`;
+    // A MIDI route's identity is (port, source) — the channel is what you
+    // edit, so keying on it would give every channel change its own hot
+    // window and let two of them race.
+    case 'midi_routed':
+      return `midi:${delta.route.port}#${JSON.stringify(delta.route.source)}`;
+    case 'midi_unrouted':
+      return `midi:${delta.port}#${JSON.stringify(delta.source)}`;
   }
 }
 

@@ -14,6 +14,16 @@ function sameJack(
   return (patch.device ?? null) === device && patch.channel === channel;
 }
 
+/** A MIDI route's identity is (port, source) — never the channel, which is
+ * the field you edit. */
+function sameRoute(
+  route: { port: string; source: unknown },
+  port: string,
+  source: unknown,
+): boolean {
+  return route.port === port && JSON.stringify(route.source) === JSON.stringify(source);
+}
+
 export function mergeDelta(state: MixerState, delta: StateDelta): MixerState {
   const strip = (id: number, patch: (s: MixerState['strips'][number]) => void): MixerState => {
     const strips = state.strips.map((s) => {
@@ -206,6 +216,22 @@ export function mergeDelta(state: MixerState, delta: StateDelta): MixerState {
           sameJack(o, delta.jack.device ?? null, delta.jack.channel)
             ? { ...o, tap: delta.tap }
             : o,
+        ),
+      };
+    // An upsert, not an append: routing an existing (port, source) again is
+    // how its channel changes, and appending would leave the old one
+    // sending the old channel alongside it.
+    case 'midi_routed': {
+      const others = (state.midi_routes ?? []).filter(
+        (r) => !sameRoute(r, delta.route.port, delta.route.source),
+      );
+      return { ...state, midi_routes: [...others, delta.route] };
+    }
+    case 'midi_unrouted':
+      return {
+        ...state,
+        midi_routes: (state.midi_routes ?? []).filter(
+          (r) => !sameRoute(r, delta.port, delta.source),
         ),
       };
   }

@@ -11,7 +11,10 @@ mod format;
 mod hub;
 mod instrument_host;
 mod meter_pump;
+mod midi_echo;
+mod midi_feed;
 mod midi_in;
+mod midi_out;
 mod midi_ports;
 mod monitor_pump;
 mod mount_watch;
@@ -223,6 +226,11 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     let (project_watch_tx, project_watch_rx) =
         tokio::sync::watch::channel(Arc::new(project.clone()));
     let monitor_generation = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    // One set of MIDI output connections, shared by the instrument host
+    // (which echoes live playing) and the control task (which streams a
+    // take's sidecars). Two sets would mean a merge onto one port worked
+    // for one half and not the other.
+    let midi_out = Arc::new(midi_out::OutPorts::new());
     let control = engine_host::spawn(
         hub.clone(),
         engine_handle.cmd_tx,
@@ -246,6 +254,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         },
         Some(devices.clone()),
         Some(instruments.clone()),
+        Some(midi_out.clone()),
     );
     let supports_outputs = audio.supports_outputs();
     device_host::spawn(device_rx, audio, stream, control.clone());
@@ -256,6 +265,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             soundfont_root.clone(),
             sample_rate,
             engine_handle.midi_tx,
+            midi_out,
             Box::new(move |rack| control.instrument_rack_changed_blocking(rack)),
         );
     }

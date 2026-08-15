@@ -1,6 +1,7 @@
 pub mod destinations;
 pub mod devices;
 pub mod instruments;
+pub mod midi;
 pub mod outputs;
 pub mod recording;
 pub mod sessions;
@@ -165,6 +166,9 @@ fn api_router() -> OpenApiRouter<AppState> {
         .routes(routes!(outputs::list_outputs))
         .routes(routes!(outputs::refresh_outputs))
         .routes(routes!(outputs::patch_output))
+        .routes(routes!(midi::list_midi))
+        .routes(routes!(midi::refresh_midi))
+        .routes(routes!(midi::route_midi))
         .routes(routes!(
             instruments::list_instruments,
             instruments::create_instrument

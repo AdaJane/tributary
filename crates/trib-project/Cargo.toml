@@ -16,6 +16,7 @@ openapi = ["dep:utoipa"]
 trib-core.workspace = true
 flacenc.workspace = true
 hound.workspace = true
+midly.workspace = true
 rayon.workspace = true
 rtrb.workspace = true
 serde.workspace = true

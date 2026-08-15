@@ -17,8 +17,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 use rtrb::Producer;
 
@@ -81,16 +81,33 @@ pub struct MidiPortReport {
     pub absent: bool,
 }
 
+/// What the instrument host knows about MIDI, in one answer.
+///
+/// A named struct rather than a tuple: three parallel lists crossing a
+/// channel is where a reader stops being able to tell which is which.
+#[derive(Debug, Default, Clone)]
+pub struct MidiReport {
+    pub instruments: Vec<InstrumentReport>,
+    pub inputs: Vec<MidiPortReport>,
+    pub outputs: Vec<crate::midi_out::MidiOutPortReport>,
+}
+
 pub enum InstrumentMsg {
     /// The console changed: rebuild the rack from this document.
     InstrumentsChanged(Vec<InstrumentState>),
     Report {
-        reply: oneshot::Sender<(Vec<InstrumentReport>, Vec<MidiPortReport>)>,
+        reply: oneshot::Sender<MidiReport>,
     },
     /// Re-enumerate ports and retry anything that failed, then rebuild.
     Refresh {
-        reply: oneshot::Sender<(Vec<InstrumentReport>, Vec<MidiPortReport>)>,
+        reply: oneshot::Sender<MidiReport>,
     },
+    /// The MIDI routes changed.
+    ///
+    /// Its OWN message rather than a widened `InstrumentsChanged`: folding
+    /// them together would make editing a route reload a SoundFont, which
+    /// is hundreds of milliseconds and hundreds of megabytes.
+    RoutesChanged(Vec<trib_core::MidiRoute>),
     /// The soundfont library as it stands.
     Library {
         reply: oneshot::Sender<Vec<soundfonts::SoundfontInfo>>,
@@ -116,15 +133,19 @@ impl InstrumentHandle {
     }
 
     /// Sync and non-blocking (unbounded channel) — safe from async context.
+    pub fn routes_changed(&self, routes: Vec<trib_core::MidiRoute>) {
+        let _ = self.tx.send(InstrumentMsg::RoutesChanged(routes));
+    }
+
     pub fn instruments_changed(&self, instruments: Vec<InstrumentState>) {
         let _ = self.tx.send(InstrumentMsg::InstrumentsChanged(instruments));
     }
 
-    pub async fn report(&self) -> (Vec<InstrumentReport>, Vec<MidiPortReport>) {
+    pub async fn report(&self) -> MidiReport {
         self.request(|reply| InstrumentMsg::Report { reply }).await
     }
 
-    pub async fn refresh(&self) -> (Vec<InstrumentReport>, Vec<MidiPortReport>) {
+    pub async fn refresh(&self) -> MidiReport {
         self.request(|reply| InstrumentMsg::Refresh { reply }).await
     }
 
@@ -151,13 +172,11 @@ impl InstrumentHandle {
 
     async fn request(
         &self,
-        make: impl FnOnce(
-            oneshot::Sender<(Vec<InstrumentReport>, Vec<MidiPortReport>)>,
-        ) -> InstrumentMsg,
-    ) -> (Vec<InstrumentReport>, Vec<MidiPortReport>) {
+        make: impl FnOnce(oneshot::Sender<MidiReport>) -> InstrumentMsg,
+    ) -> MidiReport {
         let (reply, response) = oneshot::channel();
         if self.tx.send(make(reply)).is_err() {
-            return (Vec::new(), Vec::new());
+            return MidiReport::default();
         }
         response.await.unwrap_or_default()
     }
@@ -171,12 +190,13 @@ pub fn spawn(
     root: PathBuf,
     sample_rate: u32,
     midi_tx: Producer<MidiEvent>,
+    out: Arc<crate::midi_out::OutPorts>,
     rack_ready: RackReady,
 ) {
     std::thread::Builder::new()
         .name("trib-instruments".into())
         .spawn(move || {
-            Host::new(root, sample_rate, midi_tx, rack_ready).run(rx);
+            Host::new(root, sample_rate, midi_tx, out, rack_ready).run(rx);
         })
         .expect("instrument host thread spawns");
 }
@@ -204,7 +224,23 @@ struct Host {
     cache: HashMap<String, Arc<SoundFont>>,
     built: Vec<Built>,
     ports: crate::midi_in::Ports,
+    /// MIDI OUT. Owned here rather than on a thread of its own, because
+    /// "what MIDI is connected" would otherwise have two owners and drift.
+    out: Arc<crate::midi_out::OutPorts>,
+    /// What the echo closure reads. Shared with the midir input callbacks,
+    /// which run on their own threads per port.
+    echo: Arc<Mutex<EchoState>>,
+    routes: Vec<trib_core::MidiRoute>,
     rack_ready: RackReady,
+}
+
+/// The document the echo fans out against.
+#[derive(Debug, Default)]
+struct EchoState {
+    routes: Vec<trib_core::MidiRoute>,
+    instruments: Vec<InstrumentState>,
+    /// Input port index → name, the reverse of what `index_ports` built.
+    port_names: Vec<String>,
 }
 
 impl Host {
@@ -212,15 +248,41 @@ impl Host {
         root: PathBuf,
         sample_rate: u32,
         midi_tx: Producer<MidiEvent>,
+        out: Arc<crate::midi_out::OutPorts>,
         rack_ready: RackReady,
     ) -> Self {
+        let echo: Arc<Mutex<EchoState>> = Arc::default();
+        // The echo closure the midir input callbacks run. It reads the
+        // document under a lock the audio thread never touches, decides
+        // purely (`midi_echo::fan_out`), and writes to the ports.
+        let echo_fn: crate::midi_in::Echo = {
+            let echo = Arc::clone(&echo);
+            let out = Arc::clone(&out);
+            Arc::new(move |event| {
+                let state = echo.lock().expect("echo lock");
+                if state.routes.is_empty() {
+                    return;
+                }
+                for outgoing in crate::midi_echo::fan_out(
+                    &state.routes,
+                    &state.instruments,
+                    &state.port_names,
+                    event,
+                ) {
+                    out.send(&outgoing);
+                }
+            })
+        };
         Host {
             root,
             sample_rate,
             mounts: Vec::new(),
             cache: HashMap::new(),
             built: Vec::new(),
-            ports: crate::midi_in::Ports::new(midi_tx),
+            ports: crate::midi_in::Ports::new(midi_tx, echo_fn),
+            out,
+            echo,
+            routes: Vec::new(),
             rack_ready,
         }
     }
@@ -252,6 +314,8 @@ impl Host {
                 }
                 InstrumentMsg::Refresh { reply } => {
                     self.ports.refresh();
+                    self.out.refresh();
+                    self.out.bind(&self.routes);
                     self.rescan_mounts();
                     let document: Vec<InstrumentState> =
                         self.built.iter().map(|b| b.state.clone()).collect();
@@ -268,7 +332,15 @@ impl Host {
                     }
                     let _ = reply.send(exists);
                 }
-                InstrumentMsg::Panic => self.ports.panic(),
+                InstrumentMsg::RoutesChanged(routes) => self.set_routes(routes),
+                // One button, both directions. A hanging note on an
+                // EXTERNAL synth is the worse case — nothing else can stop
+                // it — so a panic that silenced only the rack would be a
+                // trap rather than a convenience.
+                InstrumentMsg::Panic => {
+                    self.ports.panic();
+                    self.out.panic();
+                }
             }
         }
     }
@@ -279,6 +351,13 @@ impl Host {
     /// engine learns that the last instrument went away.
     fn rebuild(&mut self, document: &[InstrumentState]) {
         self.ports.bind(document);
+        // The echo matches by port NAME and the rack by index, so the echo
+        // needs the same index→name table the rack was built from.
+        {
+            let mut echo = self.echo.lock().expect("echo lock");
+            echo.instruments = document.to_vec();
+            echo.port_names = crate::midi_in::index_ports(document);
+        }
         let mut instruments = Vec::with_capacity(document.len());
         let mut built = Vec::with_capacity(document.len());
 
@@ -427,7 +506,7 @@ impl Host {
         Ok(soundfont)
     }
 
-    fn report(&self) -> (Vec<InstrumentReport>, Vec<MidiPortReport>) {
+    fn report(&self) -> MidiReport {
         let instruments = self
             .built
             .iter()
@@ -445,7 +524,18 @@ impl Host {
             .iter()
             .filter_map(|b| b.state.port.as_deref())
             .collect();
-        (instruments, self.ports.report(&wanted))
+        MidiReport {
+            instruments,
+            inputs: self.ports.report(&wanted),
+            outputs: self.out.report(&self.routes),
+        }
+    }
+
+    /// Publish the routes to the ports and to the echo closure.
+    fn set_routes(&mut self, routes: Vec<trib_core::MidiRoute>) {
+        self.out.bind(&routes);
+        self.routes = routes.clone();
+        self.echo.lock().expect("echo lock").routes = routes;
     }
 }
 
@@ -464,7 +554,13 @@ mod tests {
 
     fn host(root: PathBuf) -> (Host, rtrb::Consumer<MidiEvent>) {
         let (tx, rx) = rtrb::RingBuffer::new(64);
-        let host = Host::new(root, 48_000, tx, Box::new(|_| {}));
+        let host = Host::new(
+            root,
+            48_000,
+            tx,
+            Arc::new(crate::midi_out::OutPorts::new()),
+            Box::new(|_| {}),
+        );
         (host, rx)
     }
 

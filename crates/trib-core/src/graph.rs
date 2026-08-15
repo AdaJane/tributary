@@ -221,6 +221,7 @@ mod tests {
             // like any device, never as a node of their own.
             instruments: Vec::new(),
             outputs: Vec::new(),
+            midi_routes: Vec::new(),
             master: MasterState::default(),
         }
     }

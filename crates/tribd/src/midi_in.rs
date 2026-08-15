@@ -17,6 +17,13 @@ use trib_engine::MidiEvent;
 
 use crate::instrument_host::MidiPortReport;
 
+/// Called for every event that arrives, on the port thread it arrived on.
+///
+/// This is where MIDI echo and thru happen. Deliberately NOT on the audio
+/// thread: an echo is a fan-out over the document, and putting it behind
+/// the render loop would add a block of latency to a cable that has none.
+pub type Echo = std::sync::Arc<dyn Fn(&MidiEvent) + Send + Sync>;
+
 /// A note the test button plays: middle C, medium velocity, brief.
 const TEST_KEY: u8 = 60;
 const TEST_VELOCITY: u8 = 96;
@@ -80,15 +87,17 @@ mod imp {
 
     pub struct Ports {
         writer: Writer,
+        echo: Echo,
         available: Vec<String>,
         /// Live connections, parallel to the indices `index_ports` assigns.
         connections: Vec<(String, Option<MidiInputConnection<()>>)>,
     }
 
     impl Ports {
-        pub fn new(tx: Producer<MidiEvent>) -> Self {
+        pub fn new(tx: Producer<MidiEvent>, echo: Echo) -> Self {
             let mut ports = Ports {
                 writer: Arc::new(Mutex::new(tx)),
+                echo,
                 available: Vec::new(),
                 connections: Vec::new(),
             };
@@ -143,6 +152,7 @@ mod imp {
                 .into_iter()
                 .find(|p| input.port_name(p).is_ok_and(|n| n == name))?;
             let writer = Arc::clone(&self.writer);
+            let echo = Arc::clone(&self.echo);
             match input.connect(
                 &port,
                 "tributary-in",
@@ -151,6 +161,10 @@ mod imp {
                         return;
                     };
                     let event = crate::midi_ports::normalize(event);
+                    // The NORMALIZED event, so an external synth is told
+                    // exactly what the rack played — a note-on at velocity
+                    // 0 has already become a note-off by here.
+                    (echo)(&event);
                     if let Ok(mut writer) = writer.lock() {
                         // A full ring means the audio thread stalled. The
                         // rack answers a drop with all-notes-off, so a lost
@@ -206,6 +220,10 @@ mod imp {
         }
 
         fn push(&self, event: MidiEvent) {
+            // Test notes and panics echo too: "is this thing making sound"
+            // has to answer for the external synth as well, and a panic
+            // that stopped only the internal one would be a trap.
+            (self.echo)(&event);
             if let Ok(mut writer) = self.writer.lock() {
                 let _ = writer.push(event);
             }
@@ -242,7 +260,7 @@ mod imp {
     }
 
     impl Ports {
-        pub fn new(tx: Producer<MidiEvent>) -> Self {
+        pub fn new(tx: Producer<MidiEvent>, _echo: Echo) -> Self {
             Ports {
                 writer: Some(tx),
                 bound: Vec::new(),

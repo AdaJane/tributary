@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "1.3.0"
+    "version": "1.4.0"
   },
   "paths": {
     "/api/v1/destinations": {
@@ -439,6 +439,76 @@
           },
           "422": {
             "description": "A value out of range"
+          }
+        }
+      }
+    },
+    "/api/v1/midi": {
+      "get": {
+        "summary": "The MIDI patch bay document.",
+        "operationId": "list_midi",
+        "responses": {
+          "200": {
+            "description": "MIDI routes joined with port state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MidiDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/midi/refresh": {
+      "post": {
+        "summary": "Re-enumerate MIDI ports both ways and retry anything that failed.",
+        "operationId": "refresh_midi",
+        "responses": {
+          "200": {
+            "description": "Ports re-enumerated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MidiDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/midi/routes": {
+      "put": {
+        "summary": "Add, change, or remove one MIDI route.",
+        "operationId": "route_midi",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MidiRouteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The MIDI patch bay after the change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MidiDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such instrument, or no such route"
+          },
+          "422": {
+            "description": "Out of range or badly named"
           }
         }
       }
@@ -2497,6 +2567,98 @@
         ],
         "description": "What a metered point on the console refers to."
       },
+      "MidiDto": {
+        "type": "object",
+        "description": "The MIDI patch bay in one read: routes, their state, and both\ndirections' ports.",
+        "required": [
+          "routes",
+          "reports",
+          "inputs",
+          "outputs",
+          "take_tracks"
+        ],
+        "properties": {
+          "inputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MidiPortReport"
+            }
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MidiOutPortReport"
+            }
+          },
+          "reports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MidiRouteReport"
+            },
+            "description": "Index-aligned with `routes`."
+          },
+          "routes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MidiRoute"
+            }
+          },
+          "take_tracks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Sidecar names the selected take carries, for the take-playback\npicker. A route names one of these rather than a take number,\nbecause a take number does not survive the next take."
+          }
+        }
+      },
+      "MidiOutPortReport": {
+        "type": "object",
+        "description": "One MIDI output port, joined with what the daemon knows about it.",
+        "required": [
+          "id",
+          "name",
+          "connected",
+          "absent",
+          "routes",
+          "sent",
+          "errors"
+        ],
+        "properties": {
+          "absent": {
+            "type": "boolean",
+            "description": "A route names it but the system does not offer it."
+          },
+          "connected": {
+            "type": "boolean"
+          },
+          "errors": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Writes the port refused. An interface that went away mid-song shows\nup here before it shows up as absent.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "The port's NAME — stable across a replug, unlike its client number."
+          },
+          "name": {
+            "type": "string"
+          },
+          "routes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Routes feeding it. More than one is a merge, which is legal here\nand worth drawing.",
+            "minimum": 0
+          },
+          "sent": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Messages sent since it opened.\n\nThe only thing that distinguishes \"wired and nobody is playing\"\nfrom \"wired wrong\" — an output port has no meter, so without a\ncounter a dead cable and a quiet keyboard look identical.",
+            "minimum": 0
+          }
+        }
+      },
       "MidiPortReport": {
         "type": "object",
         "required": [
@@ -2522,6 +2684,172 @@
             "type": "string"
           }
         }
+      },
+      "MidiRoute": {
+        "type": "object",
+        "description": "One MIDI output route.",
+        "required": [
+          "port",
+          "source"
+        ],
+        "properties": {
+          "channel": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "`None` = pass the source's own channel through. `Some(n)` = force\nevery message onto channel n, which is what a module listening on\none channel needs.",
+            "minimum": 0
+          },
+          "port": {
+            "type": "string",
+            "description": "The output port by NAME, never by ALSA client number: the kernel\nhands out a fresh number on every replug."
+          },
+          "source": {
+            "$ref": "#/components/schemas/MidiSource",
+            "description": "Declared last so the emitted TOML reads scalars-then-table."
+          }
+        }
+      },
+      "MidiRouteReport": {
+        "type": "object",
+        "description": "One route, joined with what the daemon knows about it.",
+        "required": [
+          "port",
+          "status"
+        ],
+        "properties": {
+          "port": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The daemon's own sentence. `None` when there is nothing to explain."
+          },
+          "status": {
+            "$ref": "#/components/schemas/MidiRouteStatus"
+          }
+        }
+      },
+      "MidiRouteRequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "route",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "route"
+                ]
+              },
+              "route": {
+                "$ref": "#/components/schemas/MidiRoute"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "port",
+              "source",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "unroute"
+                ]
+              },
+              "port": {
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/components/schemas/MidiSource"
+              }
+            }
+          }
+        ],
+        "description": "A change to one MIDI route."
+      },
+      "MidiRouteStatus": {
+        "type": "string",
+        "description": "Why one route is or is not carrying anything.",
+        "enum": [
+          "live",
+          "ready",
+          "missing"
+        ]
+      },
+      "MidiSource": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Echo a rack instrument: everything it receives goes out too, so an\nexternal synth plays the same part the SoundFont does.",
+            "required": [
+              "id",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/InstrumentId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "instrument"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Forward a MIDI INPUT port. Several routes may name one output —\nthat is the merge, and it is the one place the patch bay's\n\"one feed per output\" rule does not apply, because MIDI events\ninterleave where audio would have to be summed.",
+            "required": [
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "port"
+                ]
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Stream a take's `.mid` sidecar back out while it plays.\n\nNamed rather than numbered: the take number is *transport* state,\nand a route stored in `project.toml` has to name something that\nsurvives the next take. The sidecar's name is the only such handle,\nand it is already on the wire as `TakeMidiTrackDto.name`.",
+            "required": [
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "take"
+                ]
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "What is sent to a MIDI output port.\n\nA separate array from [`OutputPatch`] rather than one enum with both,\nbecause the two share no field but \"a name of a thing to send to\" — and\nthat name means an ALSA *PCM device* in one and an ALSA *sequencer\nport* in the other. Folding them together is the two-shapes-in-one-type\nfailure `InputAssign`'s hand-written `Deserialize` exists to prevent.\n\nTransport sync (MIDI clock, MTC) is deliberately absent: this project\nhas no tempo, no bar and no beat, so a clock it emitted would be a\nclaim it cannot support."
       },
       "MixCommand": {
         "oneOf": [
@@ -3196,6 +3524,48 @@
                 "$ref": "#/components/schemas/SendTap"
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "Upsert one MIDI route. Keyed on (port, source), so pressing the\nsame button twice is one route — the `AddInstrumentStrips` idiom.\nSeveral DIFFERENT sources may name one port; that is the merge.",
+            "required": [
+              "route",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set_midi_route"
+                ]
+              },
+              "route": {
+                "$ref": "#/components/schemas/MidiRoute"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Remove one MIDI route by the same key.",
+            "required": [
+              "port",
+              "source",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "clear_midi_route"
+                ]
+              },
+              "port": {
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/components/schemas/MidiSource"
+              }
+            }
           }
         ],
         "description": "A mutation of the mixer document. The API-facing command enum: REST\nhandlers and the WS `set` op both reduce to this."
@@ -3231,6 +3601,13 @@
           },
           "master": {
             "$ref": "#/components/schemas/MasterState"
+          },
+          "midi_routes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MidiRoute"
+            },
+            "description": "MIDI routes: instrument echo, thru/merge, and take playback. Same\nposition rule as its neighbours above."
           },
           "outputs": {
             "type": "array",
@@ -4819,6 +5196,13 @@
                 "items": {
                   "$ref": "#/components/schemas/StripId"
                 }
+              },
+              "unrouted_ports": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The MIDI output ports that stopped echoing it."
               }
             }
           },
@@ -4923,6 +5307,46 @@
               },
               "tap": {
                 "$ref": "#/components/schemas/SendTap"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "route",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "midi_routed"
+                ]
+              },
+              "route": {
+                "$ref": "#/components/schemas/MidiRoute"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "port",
+              "source",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "midi_unrouted"
+                ]
+              },
+              "port": {
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/components/schemas/MidiSource"
               }
             }
           }

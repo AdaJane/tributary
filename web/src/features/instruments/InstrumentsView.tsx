@@ -25,6 +25,7 @@ export function InstrumentsView() {
   const error = useInstruments((s) => s.error);
   const load = useInstruments((s) => s.load);
   const refresh = useInstruments((s) => s.refresh);
+  const panic = useInstruments((s) => s.panic);
   const phase = useTransport((s) => s.phase);
   const recording = phase === 'recording';
   const stripCount = useMixer((s) => s.state.strips.length);
@@ -39,11 +40,22 @@ export function InstrumentsView() {
         <Panel
           title="Instrument rack"
           badge={
-            <ActionButton
-              label="Refresh"
-              ariaLabel="Re-scan MIDI inputs and retry anything that failed to load"
-              onPress={() => void refresh()}
-            />
+            <>
+              <ActionButton
+                label="Refresh"
+                ariaLabel="Re-scan MIDI inputs and retry anything that failed to load"
+                onPress={() => void refresh()}
+              />
+              {/* One panic, both directions. A stuck note on an external
+                  synth is now this box's fault as much as an internal one,
+                  and a second button would leave the user guessing which
+                  half a hanging note came from. */}
+              <ActionButton
+                label="Panic"
+                ariaLabel="Silence every instrument, and send sustain-off then all-notes-off to every MIDI output"
+                onPress={() => void panic()}
+              />
+            </>
           }
         >
           {!loaded || doc === null ? (

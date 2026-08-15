@@ -4,7 +4,7 @@ use crate::bus::{BusKind, BusState};
 use crate::fx::FxState;
 use crate::id::{BusId, InstrumentId, StripId};
 use crate::instrument::InstrumentState;
-use crate::output::{OutputJack, OutputPatch, OutputSource};
+use crate::output::{MidiRoute, MidiSource, OutputJack, OutputPatch, OutputSource};
 use crate::strip::StripState;
 
 /// The master output section: one stereo fader and its own record arm.
@@ -43,6 +43,10 @@ pub struct MixerState {
     /// outputs existed carries no key at all.
     #[serde(default)]
     pub outputs: Vec<OutputPatch>,
+    /// MIDI routes: instrument echo, thru/merge, and take playback. Same
+    /// position rule as its neighbours above.
+    #[serde(default)]
+    pub midi_routes: Vec<MidiRoute>,
     pub master: MasterState,
 }
 
@@ -62,6 +66,11 @@ impl MixerState {
     /// The patch on a jack, if any. A jack holds at most one.
     pub fn output(&self, jack: &OutputJack) -> Option<&OutputPatch> {
         self.outputs.iter().find(|o| o.is(jack))
+    }
+
+    /// The route with this identity, if any.
+    pub fn midi_route(&self, port: &str, source: &MidiSource) -> Option<&MidiRoute> {
+        self.midi_routes.iter().find(|r| r.is(port, source))
     }
 
     /// How many channels a source offers, or `None` if it is not in the
@@ -132,6 +141,13 @@ mod tests {
                     channel: 2,
                 },
             )],
+            midi_routes: vec![MidiRoute {
+                port: "Juno".into(),
+                channel: Some(0),
+                source: MidiSource::Instrument {
+                    id: InstrumentId(0),
+                },
+            }],
             master: MasterState::default(),
         }
     }
@@ -161,6 +177,16 @@ mod tests {
         state.outputs.clear();
         let mut json = serde_json::to_value(&state).unwrap();
         json.as_object_mut().unwrap().remove("outputs");
+        let back: MixerState = serde_json::from_value(json).unwrap();
+        assert_eq!(back, state);
+    }
+
+    #[test]
+    fn a_document_written_before_midi_routes_still_loads() {
+        let mut state = fixture();
+        state.midi_routes.clear();
+        let mut json = serde_json::to_value(&state).unwrap();
+        json.as_object_mut().unwrap().remove("midi_routes");
         let back: MixerState = serde_json::from_value(json).unwrap();
         assert_eq!(back, state);
     }

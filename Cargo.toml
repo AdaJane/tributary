@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -42,6 +42,16 @@ midir = { version = "0.11", default-features = false }
 # a format-0 file and never parse one. `peaks.rs` sets the precedent for a
 # hand-rolled binary format here, and the writer is pinned by a byte-exact
 # test, which is most of what a dependency would have bought.
+# MIDI file PARSING for take playback. The writer in
+# `trib-project/src/midi.rs` stays hand-rolled — we emit exactly one shape
+# and a byte-exact test pins it — but reading is a different job: a bad
+# length prefix is a panic or an OOM, and a take directory copied from
+# another machine can hold a format-1 file this daemon never wrote. Every
+# other binary media format here already READS through a crate (hound for
+# WAV, symphonia for FLAC); this is that rule, not an exception to it.
+# Pairing our own reader with our own writer would also only ever have
+# round-tripped our own bugs.
+midly = { version = "0.5", default-features = false, features = ["std"] }
 hound = "3"
 toml = "0.9"
 flacenc = { version = "0.5", default-features = false }

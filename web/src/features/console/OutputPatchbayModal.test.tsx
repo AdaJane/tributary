@@ -2,8 +2,10 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { useMidi } from '../../state/midi';
 import { useMixer } from '../../state/mixer';
 import { useOutputs } from '../../state/outputs';
+import { useTransport } from '../../state/transport';
 import type { MixerState } from '../../ws/messages';
 import { OutputPatchbayModal } from './OutputPatchbayModal';
 
@@ -80,10 +82,27 @@ function setDocument(over: Record<string, unknown> = {}) {
   } as never);
 }
 
+function setMidi(over: Record<string, unknown> = {}) {
+  useMidi.setState({
+    document: {
+      routes: [],
+      reports: [],
+      inputs: [],
+      outputs: [],
+      take_tracks: [],
+      ...over,
+    },
+    loaded: true,
+    pending: false,
+  } as never);
+}
+
 describe('OutputPatchbayModal', () => {
   beforeEach(() => {
     useMixer.setState({ state: mixer(), loaded: true } as never);
+    useTransport.setState({ phase: 'stopped' } as never);
     setDocument();
+    setMidi();
   });
 
   it('offers the master and the buses as sources, which no strip-only door could reach', () => {
@@ -169,5 +188,128 @@ describe('OutputPatchbayModal', () => {
     render(<OutputPatchbayModal open onClose={() => {}} />);
     await user.click(screen.getByRole('option', { name: /OUT 1 on interface/ }));
     expect(screen.getByText(/the fader and mute do not affect this output/)).toBeTruthy();
+  });
+
+  it('refuses to re-patch while the tape rolls, and says why beside the control', async () => {
+    // A control that vanishes teaches nothing, and the daemon's 409 arrives
+    // only after the gesture — by which point the user has already been
+    // told "no" without being told anything.
+    useTransport.setState({ phase: 'recording' } as never);
+    const user = userEvent.setup();
+    render(<OutputPatchbayModal open onClose={() => {}} />);
+    await user.click(screen.getByRole('option', { name: /OUT 1 on interface/ }));
+    expect(screen.getByText(/would cut every reverb tail onto the tape/)).toBeTruthy();
+    expect(screen.getByLabelText('Source')).toHaveProperty('disabled', true);
+  });
+
+  describe('MIDI rows', () => {
+    const juno = {
+      id: 'Juno',
+      name: 'Juno',
+      connected: true,
+      absent: false,
+      routes: 1,
+      sent: 0,
+      errors: 0,
+    };
+    const echo = { kind: 'instrument', id: 0 };
+
+    function withRack() {
+      useMixer.setState({
+        state: { ...mixer(), instruments: [{ id: 0, name: 'Rhodes' }] },
+        loaded: true,
+      } as never);
+    }
+
+    it('draws a MIDI port under its own chip, never as an audio jack', () => {
+      // The two halves of the bay obey different rules — one feed against a
+      // merge — so they must not be confusable at a glance.
+      setMidi({ outputs: [juno] });
+      render(<OutputPatchbayModal open onClose={() => {}} />);
+      expect(screen.getByText('MIDI')).toBeTruthy();
+      expect(screen.getByRole('option', { name: 'Add a route to Juno' })).toBeTruthy();
+    });
+
+    it('offers MIDI sources only — a strip is never on the list', async () => {
+      // A direct out carries audio and a MIDI port carries events. Offering
+      // Kick here would be offering a conversion the box cannot do.
+      withRack();
+      setMidi({ outputs: [juno], inputs: [], take_tracks: [] });
+      const user = userEvent.setup();
+      render(<OutputPatchbayModal open onClose={() => {}} />);
+      await user.click(screen.getByRole('option', { name: 'Add a route to Juno' }));
+      const source = screen.getByLabelText('Source') as HTMLSelectElement;
+      const labels = [...source.options].map((o) => o.textContent);
+      expect(labels).toContain('Rhodes (echo)');
+      expect(labels).not.toContain('Kick');
+    });
+
+    it('shows the tap switch disabled with its reason, rather than hiding it', async () => {
+      withRack();
+      setMidi({ outputs: [juno] });
+      const user = userEvent.setup();
+      render(<OutputPatchbayModal open onClose={() => {}} />);
+      await user.click(screen.getByRole('option', { name: 'Add a route to Juno' }));
+      expect(screen.getByText(/MIDI carries notes, not a signal to tap/)).toBeTruthy();
+    });
+
+    it('puts two routes on one port, because MIDI merges where audio would sum', () => {
+      withRack();
+      setMidi({
+        outputs: [{ ...juno, routes: 2 }],
+        inputs: [{ id: 'nanoKEY2', name: 'nanoKEY2', connected: true, absent: false }],
+        routes: [
+          { port: 'Juno', channel: null, source: echo },
+          { port: 'Juno', channel: 9, source: { kind: 'port', name: 'nanoKEY2' } },
+        ],
+        reports: [
+          { port: 'Juno', status: 'live', reason: null },
+          { port: 'Juno', status: 'live', reason: null },
+        ],
+      });
+      render(<OutputPatchbayModal open onClose={() => {}} />);
+      expect(screen.getByRole('option', { name: /Rhodes \(echo\) to Juno, live/ })).toBeTruthy();
+      expect(screen.getByRole('option', { name: /nanoKEY2 \(thru\) to Juno, live/ })).toBeTruthy();
+      expect(screen.getByText('ch 10')).toBeTruthy();
+    });
+
+    it("blames the keyboard, not the port, when only the keyboard is gone", () => {
+      // Both ends can be missing and they are different problems. Sending
+      // somebody to check the wrong cable is the failure this prevents.
+      withRack();
+      setMidi({
+        outputs: [juno],
+        routes: [{ port: 'Juno', channel: null, source: { kind: 'port', name: 'nanoKEY2' } }],
+        reports: [
+          { port: 'Juno', status: 'ready', reason: 'its input “nanoKEY2” is not connected' },
+        ],
+      });
+      render(<OutputPatchbayModal open onClose={() => {}} />);
+      expect(screen.getByText(/its input “nanoKEY2” is not connected/)).toBeTruthy();
+      expect(screen.queryByText(/this MIDI port is not connected/)).toBeNull();
+    });
+
+    it('says nothing has been sent, because a MIDI port has no meter', () => {
+      withRack();
+      setMidi({
+        outputs: [juno],
+        routes: [{ port: 'Juno', channel: null, source: echo }],
+        reports: [{ port: 'Juno', status: 'live', reason: null }],
+      });
+      render(<OutputPatchbayModal open onClose={() => {}} />);
+      expect(screen.getByText('nothing sent yet')).toBeTruthy();
+    });
+
+    it('stays editable while the tape rolls, unlike a direct out', async () => {
+      // The whole reason MIDI routes are ParamOnly: no graph swap, so no
+      // reverb tail to cut, so no reason to refuse the gesture.
+      withRack();
+      useTransport.setState({ phase: 'recording' } as never);
+      setMidi({ outputs: [juno] });
+      const user = userEvent.setup();
+      render(<OutputPatchbayModal open onClose={() => {}} />);
+      await user.click(screen.getByRole('option', { name: 'Add a route to Juno' }));
+      expect(screen.getByLabelText('Source')).toHaveProperty('disabled', false);
+    });
   });
 });

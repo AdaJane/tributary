@@ -124,6 +124,21 @@ pub struct InstrumentState {
 }
 
 impl InstrumentState {
+    /// Whether this instrument listens to `port` on `channel`.
+    ///
+    /// The control-side statement of the rule the rack enforces by index:
+    /// `trib_engine`'s `MidiBinding::accepts` is this predicate after port
+    /// names have been resolved to `u8`s for the audio thread. Stated here
+    /// so the MIDI echo — which works from the document and never sees an
+    /// index — cannot disagree with what actually sounded. `trib-engine`
+    /// pins the two together with a test.
+    ///
+    /// An instrument bound to no port accepts nothing: silence with a
+    /// reason, rather than omni by accident.
+    pub fn accepts(&self, port: &str, channel: u8) -> bool {
+        self.port.as_deref() == Some(port) && self.midi_channel.is_none_or(|c| c == channel)
+    }
+
     /// A fresh instrument: named, but pointed at nothing. It renders
     /// silence until a soundfont and a port are chosen, and the report says
     /// which of the two is missing.

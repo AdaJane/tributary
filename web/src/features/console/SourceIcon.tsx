@@ -42,6 +42,22 @@ const GLYPHS: Record<SourceKind, ReactNode> = {
       <rect x="8" y="13" width="8" height="8" rx="1" />
     </>
   ),
+  // A 5-pin DIN, notch up. Deliberately unlike the quarter-inch plug and
+  // unlike the three-pin XLR socket the audio tiles draw: a MIDI row and
+  // an audio row must never be mistaken for one another, and the
+  // connector is how anyone standing at the back of the box tells them
+  // apart.
+  midi: (
+    <>
+      <circle cx="12" cy="12" r="9.5" />
+      <path d="M9.8 2.8v-1.3h4.4v1.3" />
+      <circle cx="6.5" cy="12" r="1.1" />
+      <circle cx="8.1" cy="15.9" r="1.1" />
+      <circle cx="12" cy="17.5" r="1.1" />
+      <circle cx="15.9" cy="15.9" r="1.1" />
+      <circle cx="17.5" cy="12" r="1.1" />
+    </>
+  ),
   // Three white keys and two black: the one source the box makes itself.
   // Hand-drawn like the socket, because the patchbay draws hardware.
   instrument: (

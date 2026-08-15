@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::id::{BusId, StripId};
+use crate::id::{BusId, InstrumentId, StripId};
 use crate::strip::SendTap;
 
 /// Output channels the patch bay may address — the sibling of the engine's
@@ -93,6 +93,83 @@ impl OutputPatch {
     /// Whether this patch owns `jack`, without cloning to find out.
     pub fn is(&self, jack: &OutputJack) -> bool {
         self.device == jack.device && self.channel == jack.channel
+    }
+}
+
+/// MIDI routes the console may hold.
+///
+/// The ceiling is not CPU: every route is walked by every MIDI input
+/// callback on the way out, so a document with thousands of them would put
+/// a linear scan between a key and its note.
+pub const MAX_MIDI_ROUTES: usize = 32;
+
+/// What is sent to a MIDI output port.
+///
+/// A separate array from [`OutputPatch`] rather than one enum with both,
+/// because the two share no field but "a name of a thing to send to" — and
+/// that name means an ALSA *PCM device* in one and an ALSA *sequencer
+/// port* in the other. Folding them together is the two-shapes-in-one-type
+/// failure `InputAssign`'s hand-written `Deserialize` exists to prevent.
+///
+/// Transport sync (MIDI clock, MTC) is deliberately absent: this project
+/// has no tempo, no bar and no beat, so a clock it emitted would be a
+/// claim it cannot support.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MidiSource {
+    /// Echo a rack instrument: everything it receives goes out too, so an
+    /// external synth plays the same part the SoundFont does.
+    Instrument { id: InstrumentId },
+    /// Forward a MIDI INPUT port. Several routes may name one output —
+    /// that is the merge, and it is the one place the patch bay's
+    /// "one feed per output" rule does not apply, because MIDI events
+    /// interleave where audio would have to be summed.
+    Port { name: String },
+    /// Stream a take's `.mid` sidecar back out while it plays.
+    ///
+    /// Named rather than numbered: the take number is *transport* state,
+    /// and a route stored in `project.toml` has to name something that
+    /// survives the next take. The sidecar's name is the only such handle,
+    /// and it is already on the wire as `TakeMidiTrackDto.name`.
+    Take { name: String },
+}
+
+/// One MIDI output route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct MidiRoute {
+    /// The output port by the name the sequencer prints, e.g.
+    /// `"Juno-6:Juno-6 MIDI 1 24:0"`.
+    ///
+    /// Known limitation, shared with `InstrumentState::port` and verified
+    /// against a live ALSA sequencer: **that name embeds the client
+    /// number**, which the kernel hands out afresh on every replug — so a
+    /// route stored today can name a port that will not exist after the
+    /// synth is unplugged and plugged back in. It fails visibly (the port
+    /// reports `absent` and the console says it is not connected) rather
+    /// than silently sending to the wrong device, because the new name
+    /// matches nothing. Fixing it means matching on the client-number-free
+    /// prefix on BOTH sides at once; doing it on one side only would let an
+    /// instrument and a route disagree about what a port is called.
+    pub port: String,
+    /// `None` = pass the source's own channel through. `Some(n)` = force
+    /// every message onto channel n, which is what a module listening on
+    /// one channel needs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u8>,
+    /// Declared last so the emitted TOML reads scalars-then-table.
+    pub source: MidiSource,
+}
+
+impl MidiRoute {
+    /// A route's identity: what it sends, and where.
+    ///
+    /// The channel is deliberately NOT part of it — that is the field you
+    /// edit, and an upsert keyed on it would leave the old route behind
+    /// every time somebody changed it.
+    pub fn is(&self, port: &str, source: &MidiSource) -> bool {
+        self.port == port && &self.source == source
     }
 }
 

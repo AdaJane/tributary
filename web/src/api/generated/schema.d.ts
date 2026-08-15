@@ -252,6 +252,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/midi": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The MIDI patch bay document. */
+        get: operations["list_midi"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/midi/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Re-enumerate MIDI ports both ways and retry anything that failed. */
+        post: operations["refresh_midi"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/midi/routes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Add, change, or remove one MIDI route. */
+        put: operations["route_midi"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/outputs": {
         parameters: {
             query?: never;
@@ -1247,6 +1298,53 @@ export interface components {
             /** @enum {string} */
             kind: "master";
         };
+        /**
+         * @description The MIDI patch bay in one read: routes, their state, and both
+         *     directions' ports.
+         */
+        MidiDto: {
+            inputs: components["schemas"]["MidiPortReport"][];
+            outputs: components["schemas"]["MidiOutPortReport"][];
+            /** @description Index-aligned with `routes`. */
+            reports: components["schemas"]["MidiRouteReport"][];
+            routes: components["schemas"]["MidiRoute"][];
+            /**
+             * @description Sidecar names the selected take carries, for the take-playback
+             *     picker. A route names one of these rather than a take number,
+             *     because a take number does not survive the next take.
+             */
+            take_tracks: string[];
+        };
+        /** @description One MIDI output port, joined with what the daemon knows about it. */
+        MidiOutPortReport: {
+            /** @description A route names it but the system does not offer it. */
+            absent: boolean;
+            connected: boolean;
+            /**
+             * Format: int64
+             * @description Writes the port refused. An interface that went away mid-song shows
+             *     up here before it shows up as absent.
+             */
+            errors: number;
+            /** @description The port's NAME — stable across a replug, unlike its client number. */
+            id: string;
+            name: string;
+            /**
+             * Format: int32
+             * @description Routes feeding it. More than one is a merge, which is legal here
+             *     and worth drawing.
+             */
+            routes: number;
+            /**
+             * Format: int64
+             * @description Messages sent since it opened.
+             *
+             *     The only thing that distinguishes "wired and nobody is playing"
+             *     from "wired wrong" — an output port has no meter, so without a
+             *     counter a dead cable and a quiet keyboard look identical.
+             */
+            sent: number;
+        };
         MidiPortReport: {
             /** @description An instrument references it but the system does not offer it. */
             absent: boolean;
@@ -1257,6 +1355,72 @@ export interface components {
              *     number, which the kernel hands out afresh every time.
              */
             id: string;
+            name: string;
+        };
+        /** @description One MIDI output route. */
+        MidiRoute: {
+            /**
+             * Format: int32
+             * @description `None` = pass the source's own channel through. `Some(n)` = force
+             *     every message onto channel n, which is what a module listening on
+             *     one channel needs.
+             */
+            channel?: number | null;
+            /**
+             * @description The output port by NAME, never by ALSA client number: the kernel
+             *     hands out a fresh number on every replug.
+             */
+            port: string;
+            /** @description Declared last so the emitted TOML reads scalars-then-table. */
+            source: components["schemas"]["MidiSource"];
+        };
+        /** @description One route, joined with what the daemon knows about it. */
+        MidiRouteReport: {
+            port: string;
+            /** @description The daemon's own sentence. `None` when there is nothing to explain. */
+            reason?: string | null;
+            status: components["schemas"]["MidiRouteStatus"];
+        };
+        /** @description A change to one MIDI route. */
+        MidiRouteRequest: {
+            /** @enum {string} */
+            op: "route";
+            route: components["schemas"]["MidiRoute"];
+        } | {
+            /** @enum {string} */
+            op: "unroute";
+            port: string;
+            source: components["schemas"]["MidiSource"];
+        };
+        /**
+         * @description Why one route is or is not carrying anything.
+         * @enum {string}
+         */
+        MidiRouteStatus: "live" | "ready" | "missing";
+        /**
+         * @description What is sent to a MIDI output port.
+         *
+         *     A separate array from [`OutputPatch`] rather than one enum with both,
+         *     because the two share no field but "a name of a thing to send to" — and
+         *     that name means an ALSA *PCM device* in one and an ALSA *sequencer
+         *     port* in the other. Folding them together is the two-shapes-in-one-type
+         *     failure `InputAssign`'s hand-written `Deserialize` exists to prevent.
+         *
+         *     Transport sync (MIDI clock, MTC) is deliberately absent: this project
+         *     has no tempo, no bar and no beat, so a clock it emitted would be a
+         *     claim it cannot support.
+         */
+        MidiSource: {
+            id: components["schemas"]["InstrumentId"];
+            /** @enum {string} */
+            kind: "instrument";
+        } | {
+            /** @enum {string} */
+            kind: "port";
+            name: string;
+        } | {
+            /** @enum {string} */
+            kind: "take";
             name: string;
         };
         /**
@@ -1417,6 +1581,15 @@ export interface components {
             /** @enum {string} */
             op: "set_output_tap";
             tap: components["schemas"]["SendTap"];
+        } | {
+            /** @enum {string} */
+            op: "set_midi_route";
+            route: components["schemas"]["MidiRoute"];
+        } | {
+            /** @enum {string} */
+            op: "clear_midi_route";
+            port: string;
+            source: components["schemas"]["MidiSource"];
         };
         /**
          * @description The whole console document: the single authoritative mix state the daemon
@@ -1433,6 +1606,11 @@ export interface components {
              */
             instruments?: components["schemas"]["InstrumentState"][];
             master: components["schemas"]["MasterState"];
+            /**
+             * @description MIDI routes: instrument echo, thru/merge, and take playback. Same
+             *     position rule as its neighbours above.
+             */
+            midi_routes?: components["schemas"]["MidiRoute"][];
             /**
              * @description The output patch bay. Same reason for the position as `instruments`
              *     above, and `default` for the same reason: a manifest written before
@@ -1970,6 +2148,8 @@ export interface components {
             /** @enum {string} */
             kind: "instrument_removed";
             unpatched: components["schemas"]["StripId"][];
+            /** @description The MIDI output ports that stopped echoing it. */
+            unrouted_ports?: string[];
         } | {
             instrument: components["schemas"]["InstrumentState"];
             /** @enum {string} */
@@ -1992,6 +2172,15 @@ export interface components {
             /** @enum {string} */
             kind: "output_tap";
             tap: components["schemas"]["SendTap"];
+        } | {
+            /** @enum {string} */
+            kind: "midi_routed";
+            route: components["schemas"]["MidiRoute"];
+        } | {
+            /** @enum {string} */
+            kind: "midi_unrouted";
+            port: string;
+            source: components["schemas"]["MidiSource"];
         };
         /**
          * Format: int32
@@ -2613,6 +2802,84 @@ export interface operations {
                 };
             };
             /** @description A value out of range */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_midi: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description MIDI routes joined with port state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MidiDto"];
+                };
+            };
+        };
+    };
+    refresh_midi: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ports re-enumerated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MidiDto"];
+                };
+            };
+        };
+    };
+    route_midi: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MidiRouteRequest"];
+            };
+        };
+        responses: {
+            /** @description The MIDI patch bay after the change */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MidiDto"];
+                };
+            };
+            /** @description No such instrument, or no such route */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Out of range or badly named */
             422: {
                 headers: {
                     [name: string]: unknown;

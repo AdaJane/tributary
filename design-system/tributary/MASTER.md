@@ -328,6 +328,49 @@ never have reached either.
   switch is a flag write and stays live: it is the one gesture a monitor
   engineer needs mid-song.
 
+#### MIDI rows — the same room, a different rule
+
+MIDI outputs live in the **same modal**, below a divider that states the
+rule that changes rather than merely marking that something did. They are
+not a second room: a user asking "where does this go out" should be asked
+one question, not made to guess which door.
+
+- **Rows, not tiles.** An audio output holds one feed because two would
+  have to be summed; a MIDI port takes any number, because events
+  interleave. That is the **merge**, and it is why the MIDI half grows
+  downward as a list while the audio half stays a fixed grid of jacks.
+- **A `MIDI` chip where the audio sections print `OUT`**, and a **5-pin DIN**
+  glyph against the quarter-inch plug and the three-pin XLR socket. Anyone
+  standing at the back of the box tells the two apart by connector, so the
+  console does too.
+- **Their own source list, and never a mixer channel.** Three answers, each
+  spelling its kind out — `Rhodes (echo)`, `nanoKEY2 (thru)`,
+  `Kit Kick (take)`. The suffix is load-bearing: `nanoKEY2` alone would not
+  say whether it means the keyboard playing now or a take recorded from it,
+  and those reach the same jack sounding different. Offering a strip here
+  would be offering a conversion the box cannot do.
+- **Channel is pass-through or forced**, printed one-based (`Ch 10`) as every
+  synth prints it, with a live consequence line.
+- **The tap switch renders disabled with its reason**, never hidden:
+  *"pre/post is a level tap — MIDI carries notes, not a signal to tap"*.
+  "Why does the vocal have a pre/post switch and the Juno not" is a fair
+  question with a real answer, and a control that vanishes teaches nothing.
+- **A route's identity is (port, source); the channel is what you edit.**
+  So re-pointing a row's source is not an edit — it is a different route,
+  and the room performs it as unroute-then-route, stopping if the first
+  fails.
+- **A MIDI port has no meter, so it gets a counter.** `nothing sent yet` is
+  the load-bearing state: without it a dead cable and a quiet keyboard look
+  identical. Refused writes print first, as an alert.
+- **Both ends can be missing, and they are different problems.** A route to
+  an absent port says the port is not connected; a thru whose keyboard is
+  unplugged blames the keyboard by name. Saying the wrong one sends somebody
+  to check the wrong cable.
+- **MIDI routes stay editable while the tape rolls** — the one place this
+  room's recording lock does not apply, because no graph swap is involved
+  and so there is no FX tail to cut. The divider says so, which is what
+  makes the audio half's refusal legible instead of arbitrary.
+
 ### ChannelStrip layout (top→bottom)
 INPUT · GAIN knob (red cap) · EQ section (HF blue, swept MID blue + freq
 green, LF blue) · AUX sends (yellow) · PAN (white) · LedMeter · Fader (input
@@ -542,6 +585,13 @@ below that. Reading order is repair order.
 - **Test note** sits beside it: the cheap half of "why is this silent?",
   bisecting a dead keyboard from a dead instrument with no live MIDI at
   all.
+- **PANIC sits beside Refresh on the rack panel, and covers both
+  directions** — it clears every internal voice *and* sends every MIDI
+  output sustain-off **then** all-notes-off, in that order. One button, not
+  two: once the box drives external gear, a hanging note has two possible
+  homes and the user should not have to guess which. The order is not
+  cosmetic — a synth holding CC 64 keeps sounding straight through CC 123,
+  so all-notes-off alone would look like a broken panic button.
 - The read-only tie-back line names where assignment lives:
   `feeding Kick · Snare`, or `not patched — patch it from a channel's
   INPUT button`.
