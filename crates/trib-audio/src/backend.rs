@@ -103,7 +103,7 @@ pub enum Scheduling {
 /// Probed once — none of it can change while the daemon runs — and
 /// reported rather than assumed, because a console that claims real-time
 /// scheduling it did not get will be blamed for xruns nobody can explain.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RealtimeStatus {
     pub scheduling: Scheduling,
     pub priority: Option<u32>,
@@ -121,6 +121,25 @@ impl RealtimeStatus {
             reason: None,
         }
     }
+}
+
+/// Whether the backend is actually making sound right now, and if not,
+/// why — read from the same place the audio thread writes it, so the
+/// console and the journal cannot disagree.
+///
+/// Shared-layer backends are always `running`: they open devices on
+/// demand and a failure is per device. The exclusive layer owns one card
+/// and is only running while that card is open; a boot with the interface
+/// unplugged, or a lost race for it, is `running: false` with the open
+/// error in `error` until the retry succeeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendStatus {
+    pub running: bool,
+    /// The card the exclusive layer holds, when it holds one.
+    pub card: Option<String>,
+    /// The most recent open failure, kept until the card comes up.
+    pub error: Option<String>,
+    pub realtime: RealtimeStatus,
 }
 
 /// A running audio stream. Dropping it stops the audio thread. The input
@@ -281,6 +300,27 @@ pub trait AudioBackend: Send + Sync {
     /// How the machine's real-time posture actually came out.
     fn realtime_status(&self) -> RealtimeStatus {
         RealtimeStatus::not_applicable()
+    }
+
+    /// Whether the backend is making sound, and why not if it is not.
+    /// The default is the shared-layer answer: always running, failures
+    /// are per device.
+    fn status(&self) -> BackendStatus {
+        BackendStatus {
+            running: true,
+            card: None,
+            error: None,
+            realtime: self.realtime_status(),
+        }
+    }
+
+    /// Bumped every time the backend's OWN device set changes — its card
+    /// coming up or going down — so the orchestrator can notice without
+    /// enumerating. Constant where devices only change by hotplug the
+    /// backend does not watch (the shared layer): there, Refresh is the
+    /// only way to look, by design.
+    fn generation(&self) -> u64 {
+        0
     }
 
     fn start(

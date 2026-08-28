@@ -2,6 +2,8 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { $api } from '../../api/client';
+import { useAudioStatus } from '../../state/audio';
 import { useDevices } from '../../state/devices';
 import type { StripState } from '../../ws/messages';
 import { InputPickerModal } from './InputPickerModal';
@@ -67,6 +69,35 @@ const console_ = [kick, snare, overhead];
 
 beforeEach(() => {
   useDevices.setState({ devices: [], loaded: false });
+  useAudioStatus.setState({ status: null });
+});
+
+describe('when the audio backend has no card', () => {
+  it('says so once, instead of showing an empty room', async () => {
+    vi.mocked($api.GET).mockImplementationOnce((async (path: string) =>
+      path === '/api/v1/audio'
+        ? {
+            data: {
+              layer: 'exclusive',
+              backend: 'alsa',
+              started: true,
+              running: false,
+              card: null,
+              error: 'hw:0 (Capture): No such file or directory',
+              realtime: { scheduling: 'fifo', priority: 10, memory_locked: true, reason: null },
+            },
+          }
+        : { data: undefined }) as never);
+    vi.mocked($api.POST).mockResolvedValueOnce({ data: [] } as never);
+    render(
+      <InputPickerModal strip={kick} strips={console_} open onClose={() => {}} onPatch={() => {}} />,
+    );
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(
+      'Real-time card not open: hw:0 (Capture): No such file or directory — retrying',
+    );
+    expect(screen.queryByText(/No input device detected/)).toBeNull();
+  });
 });
 
 describe('InputPickerModal', () => {

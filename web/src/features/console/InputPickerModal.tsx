@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { ActionButton } from "../../design/ActionButton";
 import { Modal } from "../../design/Modal";
+import { loadAudioStatus, useAudioStatus } from "../../state/audio";
 import {
   refreshDevices,
   setCardProfile,
@@ -15,6 +16,7 @@ import styles from "./InputPickerModal.module.css";
 import { SourceIcon } from "./SourceIcon";
 import {
   PRO_AUDIO_PROFILE,
+  backendAlert,
   groupPatchbay,
   silencedReason,
   sourceKind,
@@ -78,6 +80,7 @@ export function InputPickerModal({
     current?.kind === "device" ? current.device : undefined;
   const currentChannel = current?.kind === "device" ? current.channel : undefined;
   const devices = useDevices((s) => s.devices);
+  const audioStatus = useAudioStatus((s) => s.status);
   const instruments = useMixer((s) => s.state.instruments) ?? NO_INSTRUMENTS;
   const reports = useInstruments((s) => s.doc?.reports) ?? NO_REPORTS;
   const racks = instrumentSections(instruments, reports, strips);
@@ -87,8 +90,16 @@ export function InputPickerModal({
     message: string;
   } | null>(null);
 
+  // The backend's own state rides along with every enumeration: an empty
+  // device list means one thing when the card is open and another when it
+  // never was, and only the status read tells them apart.
+  const refresh = () => {
+    void refreshDevices();
+    void loadAudioStatus();
+  };
   useEffect(() => {
-    if (open) void refreshDevices();
+    if (open) refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const changeProfile = async (card: string, profile: string) => {
@@ -98,6 +109,7 @@ export function InputPickerModal({
   };
 
   const sections = groupPatchbay(devices, strips);
+  const backendDown = backendAlert(audioStatus);
   const anyProfiles = sections.some((s) => s.profiles.length > 0);
   const letters = deviceLetters(
     sections.filter((s) => s.device !== null).map((s) => s.device as string),
@@ -105,6 +117,11 @@ export function InputPickerModal({
 
   return (
     <Modal title={`Patch input — ${strip.name}`} open={open} onClose={onClose}>
+      {backendDown && (
+        <p className={styles.deviceError} role="alert">
+          {backendDown}
+        </p>
+      )}
       {sections.map((section) => {
         const silenced = silencedReason(section);
         return (
@@ -186,7 +203,7 @@ export function InputPickerModal({
                 {profileError.message}
               </p>
             )}
-            {section.jackCount === 0 && (
+            {section.jackCount === 0 && !backendDown && (
               <p className={styles.deviceHint}>
                 No input device detected. Plug one in and press Refresh.
               </p>
@@ -359,7 +376,7 @@ export function InputPickerModal({
         <ActionButton
           label="Refresh"
           ariaLabel="Rescan audio devices and retry failed ones"
-          onPress={() => void refreshDevices()}
+          onPress={refresh}
         />
         <ActionButton
           label="Disconnect"

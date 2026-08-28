@@ -4,6 +4,7 @@
  * default input" section (patched as `device: null`); every other device
  * gets its own lettered stage box.
  */
+import type { AudioStatusDto } from '../../state/audio';
 import type { DeviceReport } from '../../state/devices';
 import type { StripState } from '../../ws/messages';
 import { inputSource } from './input-source';
@@ -69,6 +70,22 @@ export function silencedReason(section: PatchbaySection): string | null {
     return `system input volume at ${volume}%`;
   }
   return null;
+}
+
+/** Why the whole patch bay is dark, or null when the backend is running.
+ *
+ * Distinct from any device's `error`: with the exclusive layer's card
+ * unopened there ARE no devices, and an empty room reads as "nothing
+ * plugged in". A backend that is retrying says so, so the fix ("plug it
+ * in", "free the card") is not mistaken for a daemon that needs a
+ * restart. */
+export function backendAlert(status: AudioStatusDto | null): string | null {
+  if (status === null || status.running) return null;
+  const why = status.error ?? 'no reason given';
+  if (status.layer === 'exclusive' && status.started) {
+    return `Real-time card not open: ${why} — retrying`;
+  }
+  return `Audio backend not running: ${why}`;
 }
 
 export type SourceKind =

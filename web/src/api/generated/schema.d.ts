@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/api/v1/audio": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The audio backend's state: started, running, which card, and why not. */
+        get: operations["get_audio"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/destinations": {
         parameters: {
             query?: never;
@@ -760,6 +777,33 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * @description Which device layer owns the audio hardware.
+         * @enum {string}
+         */
+        AudioLayer: "shared" | "exclusive";
+        /** @description The audio backend's own state, apart from any device. */
+        AudioStatusDto: {
+            /** @description The backend's own name for itself. */
+            backend: string;
+            /** @description The card the exclusive layer holds, when it holds one. */
+            card?: string | null;
+            /** @description Why it is not running, when it is not. */
+            error?: string | null;
+            /** @description Which device layer the daemon was configured to run. */
+            layer: components["schemas"]["AudioLayer"];
+            realtime: components["schemas"]["RealtimeDto"];
+            /**
+             * @description Whether it is making sound right now. The exclusive layer is
+             *     running only while its card is open; it keeps retrying while not.
+             */
+            running: boolean;
+            /**
+             * @description Whether the backend's thread came up at boot at all. False is a
+             *     daemon-level failure that only a restart changes.
+             */
+            started: boolean;
+        };
+        /**
          * Format: int32
          * @description A group or aux bus.
          */
@@ -1367,8 +1411,19 @@ export interface components {
              */
             channel?: number | null;
             /**
-             * @description The output port by NAME, never by ALSA client number: the kernel
-             *     hands out a fresh number on every replug.
+             * @description The output port by the name the sequencer prints, e.g.
+             *     `"Juno-6:Juno-6 MIDI 1 24:0"`.
+             *
+             *     Known limitation, shared with `InstrumentState::port` and verified
+             *     against a live ALSA sequencer: **that name embeds the client
+             *     number**, which the kernel hands out afresh on every replug — so a
+             *     route stored today can name a port that will not exist after the
+             *     synth is unplugged and plugged back in. It fails visibly (the port
+             *     reports `absent` and the console says it is not connected) rather
+             *     than silently sending to the wrong device, because the new name
+             *     matches nothing. Fixing it means matching on the client-number-free
+             *     prefix on BOTH sides at once; doing it on one side only would let an
+             *     instrument and a route disagree about what a port is called.
              */
             port: string;
             /** @description Declared last so the emitted TOML reads scalars-then-table. */
@@ -1831,6 +1886,15 @@ export interface components {
             /** @description `pro-audio` — what a change request names. */
             name: string;
         };
+        /** @description What the machine granted the audio thread. */
+        RealtimeDto: {
+            memory_locked: boolean;
+            /** Format: int32 */
+            priority?: number | null;
+            /** @description Why it is not better than this, in a sentence someone can act on. */
+            reason?: string | null;
+            scheduling: components["schemas"]["SchedulingDto"];
+        };
         /**
          * @description What the take writer puts on disk. Bit depth folds into the variant so
          *     illegal combinations (float FLAC) are unrepresentable.
@@ -1874,6 +1938,8 @@ export interface components {
             /** @enum {string} */
             kind: "bus";
         };
+        /** @enum {string} */
+        SchedulingDto: "fifo" | "other" | "not_applicable";
         SeekBody: {
             /** Format: int64 */
             position_frames: number;
@@ -2351,6 +2417,26 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get_audio: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Audio backend state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AudioStatusDto"];
+                };
+            };
+        };
+    };
     list_destinations: {
         parameters: {
             query?: never;

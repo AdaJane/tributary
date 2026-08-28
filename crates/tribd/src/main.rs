@@ -204,11 +204,15 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             // No fallback to the shared layer. An appliance that quietly
             // fell back would run at several times the latency with nobody
             // able to tell; saying so and running without audio is the
-            // honest failure, and the console reports it.
+            // honest failure. This branch is now the backend refusing to
+            // spawn its thread at all — a card that will not open is the
+            // backend's own business (it retries) and lands in `/audio`,
+            // not here.
             tracing::error!(%e, "audio backend failed to start; running without audio");
             None
         }
     };
+    let audio_started = stream.is_some();
     // The orchestrator owns the stream handle from here: input devices
     // open on demand (when patched) and close when unpatched. Audio stops
     // when its channel closes at shutdown and the thread drops the handle.
@@ -257,7 +261,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         Some(midi_out.clone()),
     );
     let supports_outputs = audio.supports_outputs();
-    device_host::spawn(device_rx, audio, stream, control.clone());
+    device_host::spawn(device_rx, audio.clone(), stream, control.clone());
     {
         let control = control.clone();
         instrument_host::spawn(
@@ -298,6 +302,9 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         supports_outputs,
         monitor_tx,
         devices,
+        audio,
+        audio_layer: settings.audio.layer,
+        audio_started,
         instruments,
         soundfont_dir: soundfont_root.to_string_lossy().into_owned(),
         max_soundfont_bytes: settings.soundfonts.max_bytes,

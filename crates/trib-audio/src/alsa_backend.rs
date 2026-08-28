@@ -34,9 +34,10 @@ use rustix::io::Errno;
 use trib_engine::{GraphEngine, MAX_INPUT_CHANNELS, MAX_OUTPUT_CHANNELS, MONITOR_CHANNELS};
 
 use crate::backend::{
-    AudioBackend, AudioError, InputDeviceInfo, InputStreamStatus, OpenInput, OpenOutput,
-    OutputDeviceInfo, OutputStreamStatus, RealtimeStatus, StreamConfig, StreamHandle,
+    AudioBackend, AudioError, BackendStatus, InputDeviceInfo, InputStreamStatus, OpenInput,
+    OpenOutput, OutputDeviceInfo, OutputStreamStatus, RealtimeStatus, StreamConfig, StreamHandle,
 };
+use crate::probe::choose_card;
 use crate::realtime;
 
 /// Periods in the ring. Three is the smallest that tolerates one late
@@ -120,36 +121,69 @@ struct Duplex {
 }
 
 pub struct AlsaBackend {
-    /// The card to take. `None` = probe.
+    /// The card to take, e.g. `hw:1`. `None` = the first card that opens
+    /// duplex at the engine rate, in ALSA index order.
     device: Option<String>,
-    /// Filled in once the thread has opened the card, so enumeration can
-    /// report what was actually negotiated rather than what was asked for.
-    opened: Arc<Mutex<Option<OpenedCard>>>,
+    /// What the audio thread actually holds, written by that thread on
+    /// every open and death, so enumeration reports what was negotiated
+    /// rather than what was asked for — and reports NOTHING while the
+    /// card is down.
+    health: Arc<Mutex<CardHealth>>,
     status: Arc<Mutex<RealtimeStatus>>,
     shared: Arc<RtShared>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct OpenedCard {
     name: String,
     in_channels: u16,
     out_channels: u16,
 }
 
+/// The card's state as one value, so "open" and "why not" can never
+/// disagree: coming up clears the error, going down clears the card.
+///
+/// `generation` moves on every transition. The orchestrator reads it to
+/// learn that the device set changed without enumerating on a timer.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct CardHealth {
+    opened: Option<OpenedCard>,
+    last_error: Option<String>,
+    generation: u64,
+}
+
+impl CardHealth {
+    fn came_up(&mut self, card: OpenedCard) {
+        self.opened = Some(card);
+        self.last_error = None;
+        self.generation += 1;
+    }
+
+    fn went_down(&mut self, why: String) {
+        self.opened = None;
+        self.last_error = Some(why);
+        self.generation += 1;
+    }
+}
+
 impl AlsaBackend {
     pub fn new(device: Option<String>) -> Self {
         AlsaBackend {
             device,
-            opened: Arc::new(Mutex::new(None)),
+            health: Arc::new(Mutex::new(CardHealth::default())),
             status: Arc::new(Mutex::new(RealtimeStatus::not_applicable())),
             shared: Arc::new(RtShared::default()),
         }
+    }
+
+    fn opened(&self) -> Option<OpenedCard> {
+        self.health.lock().expect("card health lock").opened.clone()
     }
 }
 
 struct AlsaStream {
     shared: Arc<RtShared>,
-    opened: Arc<Mutex<Option<OpenedCard>>>,
+    health: Arc<Mutex<CardHealth>>,
     /// Which slice of the engine plane the card's playback takes, and
     /// which slice of the input frame its capture fills. Read by the RT
     /// thread every block; written by the orchestrator.
@@ -168,7 +202,7 @@ struct Routing {
 
 impl StreamHandle for AlsaStream {
     fn open_input(&self, req: OpenInput) -> Result<(), AudioError> {
-        let card = self.opened.lock().expect("opened card lock").clone();
+        let card = self.health.lock().expect("card health lock").opened.clone();
         let Some(card) = card else {
             return Err(AudioError::Device("the card is not open".into()));
         };
@@ -187,7 +221,7 @@ impl StreamHandle for AlsaStream {
     }
 
     fn input_status(&self) -> Vec<InputStreamStatus> {
-        let card = self.opened.lock().expect("opened card lock").clone();
+        let card = self.health.lock().expect("card health lock").opened.clone();
         let routing = *self.routing.lock().expect("routing lock");
         card.filter(|_| routing.input_open)
             .map(|card| InputStreamStatus {
@@ -203,7 +237,7 @@ impl StreamHandle for AlsaStream {
     }
 
     fn open_output(&self, req: OpenOutput) -> Result<(), AudioError> {
-        let card = self.opened.lock().expect("opened card lock").clone();
+        let card = self.health.lock().expect("card health lock").opened.clone();
         let Some(card) = card else {
             return Err(AudioError::Device("the card is not open".into()));
         };
@@ -222,7 +256,7 @@ impl StreamHandle for AlsaStream {
     }
 
     fn output_status(&self) -> Vec<OutputStreamStatus> {
-        let card = self.opened.lock().expect("opened card lock").clone();
+        let card = self.health.lock().expect("card health lock").opened.clone();
         let routing = *self.routing.lock().expect("routing lock");
         card.filter(|_| routing.output_open)
             .map(|card| OutputStreamStatus {
@@ -263,9 +297,7 @@ impl AudioBackend for AlsaBackend {
     }
 
     fn input_devices(&self) -> Vec<InputDeviceInfo> {
-        self.opened
-            .lock()
-            .expect("opened card lock")
+        self.opened()
             .iter()
             .map(|card| InputDeviceInfo {
                 name: card.name.clone(),
@@ -289,9 +321,7 @@ impl AudioBackend for AlsaBackend {
     }
 
     fn output_devices(&self) -> Vec<OutputDeviceInfo> {
-        self.opened
-            .lock()
-            .expect("opened card lock")
+        self.opened()
             .iter()
             .map(|card| OutputDeviceInfo {
                 name: card.name.clone(),
@@ -315,6 +345,20 @@ impl AudioBackend for AlsaBackend {
         self.status.lock().expect("rt status lock").clone()
     }
 
+    fn status(&self) -> BackendStatus {
+        let health = self.health.lock().expect("card health lock").clone();
+        BackendStatus {
+            running: health.opened.is_some(),
+            card: health.opened.map(|card| card.name),
+            error: health.last_error,
+            realtime: self.realtime_status(),
+        }
+    }
+
+    fn generation(&self) -> u64 {
+        self.health.lock().expect("card health lock").generation
+    }
+
     fn start(
         &self,
         config: &StreamConfig,
@@ -322,29 +366,42 @@ impl AudioBackend for AlsaBackend {
     ) -> Result<Box<dyn StreamHandle>, AudioError> {
         let config = *config;
         let wanted = self.device.clone();
-        // Opened here, on the caller's thread, so a card that will not
-        // open is a boot error the daemon can report rather than a silent
-        // degradation nobody notices.
-        let duplex = open_duplex(wanted.as_deref(), &config)?;
-        let name = duplex_name(wanted.as_deref());
-        *self.opened.lock().expect("opened card lock") = Some(OpenedCard {
-            name: name.clone(),
-            in_channels: duplex.in_channels,
-            out_channels: duplex.out_channels,
-        });
-        tracing::info!(
-            card = %name,
-            rate = config.sample_rate,
-            period = duplex.period,
-            format = ?duplex.format,
-            inputs = duplex.in_channels,
-            outputs = duplex.out_channels,
-            "real-time card open, capture and playback linked on one clock"
-        );
+        // Opened here, on the caller's thread, so the boot line names the
+        // card while the daemon is still saying what it found. A card that
+        // will not open is NOT a boot error: the thread starts on the
+        // timer clock and retries, because on an appliance the interface
+        // may be plugged in after boot, or PipeWire may have been probing
+        // it at the exact moment we asked. Silence-until-restart was the
+        // failure this replaces; the console reports the state meanwhile.
+        let duplex = match open_card(wanted.as_deref(), &config) {
+            Ok((name, duplex)) => {
+                self.health
+                    .lock()
+                    .expect("card health lock")
+                    .came_up(opened_card(&name, &duplex));
+                log_card_open(&name, &config, &duplex);
+                Some(duplex)
+            }
+            Err(e) => {
+                tracing::error!(
+                    %e,
+                    "real-time card failed to open; metering and recording run on the timer \
+                     clock, retrying every {} s",
+                    REOPEN_AFTER.as_secs()
+                );
+                self.health
+                    .lock()
+                    .expect("card health lock")
+                    .went_down(e.to_string());
+                self.shared.degraded.store(true, Ordering::Relaxed);
+                None
+            }
+        };
 
         let routing = Arc::new(Mutex::new(Routing::default()));
         let shared = self.shared.clone();
         let status = self.status.clone();
+        let health = self.health.clone();
         let thread_routing = routing.clone();
         let thread = std::thread::Builder::new()
             .name("trib-alsa-audio".into())
@@ -358,21 +415,72 @@ impl AudioBackend for AlsaBackend {
                     ),
                 }
                 *status.lock().expect("rt status lock") = granted;
-                run(config, engine, duplex, thread_routing, shared);
+                run(
+                    config,
+                    engine,
+                    duplex,
+                    wanted.as_deref(),
+                    thread_routing,
+                    shared,
+                    health,
+                );
             })
             .map_err(|e| AudioError::Stream(e.to_string()))?;
 
         Ok(Box::new(AlsaStream {
             shared: self.shared.clone(),
-            opened: self.opened.clone(),
+            health: self.health.clone(),
             routing,
             thread: Some(thread),
         }))
     }
 }
 
-fn duplex_name(wanted: Option<&str>) -> String {
-    wanted.unwrap_or("hw:0").to_owned()
+fn opened_card(name: &str, duplex: &Duplex) -> OpenedCard {
+    OpenedCard {
+        name: name.to_owned(),
+        in_channels: duplex.in_channels,
+        out_channels: duplex.out_channels,
+    }
+}
+
+fn log_card_open(name: &str, config: &StreamConfig, duplex: &Duplex) {
+    tracing::info!(
+        card = %name,
+        model = card_model(name).as_deref().unwrap_or("?"),
+        rate = config.sample_rate,
+        period = duplex.period,
+        format = ?duplex.format,
+        inputs = duplex.in_channels,
+        outputs = duplex.out_channels,
+        "real-time card open, capture and playback linked on one clock"
+    );
+}
+
+/// The kernel's name for a `hw:N` card ("UMC1820"), for the journal —
+/// `hw:0` alone says nothing about whether the right interface was taken.
+fn card_model(name: &str) -> Option<String> {
+    let index = name.strip_prefix("hw:")?.split(',').next()?.parse().ok()?;
+    alsa::Card::new(index).get_name().ok()
+}
+
+/// Every card the kernel has, as `hw:N`, in index order.
+fn alsa_cards() -> Vec<String> {
+    alsa::card::Iter::new()
+        .filter_map(Result::ok)
+        .map(|card| format!("hw:{}", card.get_index()))
+        .collect()
+}
+
+/// Open the configured card, or — with none configured — the first card
+/// that opens duplex at the engine rate.
+fn open_card(wanted: Option<&str>, config: &StreamConfig) -> Result<(String, Duplex), AudioError> {
+    match wanted {
+        Some(name) => open_duplex(name, config).map(|duplex| (name.to_owned(), duplex)),
+        None => {
+            choose_card(alsa_cards(), |name| open_duplex(name, config)).map_err(AudioError::Device)
+        }
+    }
 }
 
 /// Configure one direction of the card.
@@ -430,11 +538,9 @@ fn configure(
 }
 
 /// Open one card duplex and link the two directions onto one clock.
-fn open_duplex(wanted: Option<&str>, config: &StreamConfig) -> Result<Duplex, AudioError> {
-    let name = duplex_name(wanted);
+fn open_duplex(name: &str, config: &StreamConfig) -> Result<Duplex, AudioError> {
     let open = |dir: Direction| {
-        PCM::new(&name, dir, false)
-            .map_err(|e| AudioError::Device(format!("{name} ({dir:?}): {e}")))
+        PCM::new(name, dir, false).map_err(|e| AudioError::Device(format!("{name} ({dir:?}): {e}")))
     };
     let capture = open(Direction::Capture)?;
     let playback = open(Direction::Playback)?;
@@ -496,14 +602,16 @@ enum Exit {
     Dead(String),
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     config: StreamConfig,
     mut engine: GraphEngine,
-    duplex: Duplex,
+    mut duplex: Option<Duplex>,
+    wanted: Option<&str>,
     routing: Arc<Mutex<Routing>>,
     shared: Arc<RtShared>,
+    health: Arc<Mutex<CardHealth>>,
 ) {
-    let mut duplex = Some(duplex);
     let mut input = vec![0.0f32; config.block_size * MAX_INPUT_CHANNELS];
     let mut output = trib_engine::output_buffer(config.block_size);
     let mut scratch_in = vec![0i32; config.block_size * MAX_INPUT_CHANNELS];
@@ -534,6 +642,7 @@ fn run(
                              the timer clock; retrying the card"
                         );
                         shared.degraded.store(true, Ordering::Relaxed);
+                        health.lock().expect("card health lock").went_down(why);
                     }
                 }
             }
@@ -559,9 +668,28 @@ fn run(
                 if shared.stop.load(Ordering::Relaxed) {
                     break;
                 }
-                match open_duplex(None, &config) {
-                    Ok(card) => {
-                        tracing::info!("the real-time card came back");
+                match open_card(wanted, &config) {
+                    Ok((name, card)) => {
+                        let opened = opened_card(&name, &card);
+                        let mut health = health.lock().expect("card health lock");
+                        // A card of a different width must not be fed
+                        // through the slots the orchestrator sized for
+                        // the old one: drop the routing and let it re-open
+                        // at the new width (it watches `generation`).
+                        if let Some(before) = &health.opened
+                            && (before.in_channels, before.out_channels)
+                                != (opened.in_channels, opened.out_channels)
+                        {
+                            tracing::warn!(
+                                card = %name,
+                                "the card came back a different width; patches re-open at \
+                                 the new width"
+                            );
+                            *routing.lock().expect("routing lock") = Routing::default();
+                        }
+                        log_card_open(&name, &config, &card);
+                        tracing::info!(card = %name, "the real-time card came back");
+                        health.came_up(opened);
                         duplex = Some(card);
                     }
                     Err(e) => tracing::debug!(%e, "card still gone; will retry"),
@@ -597,15 +725,21 @@ fn run_device(
     let period = card.period;
     let in_frame = period * usize::from(card.in_channels);
     let out_frame = period * usize::from(card.out_channels);
-    if card.capture.state() != State::Running {
-        let _ = card.capture.start();
-    }
 
     let mut worst = 0u32;
     let mut window = Instant::now();
     loop {
         if shared.stop.load(Ordering::Relaxed) {
             return Exit::Shutdown;
+        }
+        // Here rather than once before the loop, because recovery leaves
+        // the pair prepared and stopped, and every restart needs the same
+        // priming as the first.
+        if let Err(errno) = start_linked(card, &io_out32, &io_out16, out32, out16) {
+            match recover(card, errno, shared) {
+                Ok(()) => continue,
+                Err(why) => return Exit::Dead(why),
+            }
         }
         let read = match card.format {
             SampleFormat::S32 => io_in32
@@ -723,7 +857,65 @@ fn run_device(
     }
 }
 
-/// Try to bring the card back. `Err` means it is not coming back.
+fn errno(e: alsa::Error) -> Errno {
+    Errno::from_raw_os_error(e.errno())
+}
+
+/// Bring the prepared, linked pair up without an instant underrun.
+///
+/// The two PCMs are linked, so starting capture starts playback too — and
+/// a playback ring that starts EMPTY underruns on its first period, which
+/// XRUNs both directions, which the read side reports as `EPIPE`, which
+/// recovery answers by starting again, empty. Measured on this machine:
+/// ~400,000 xruns per second of exactly that, with the engine never
+/// rendering a block. So playback is primed with [`PERIODS`] periods of
+/// silence first; the last write crosses its start threshold and starts
+/// both directions with a full ring. A no-op while already running.
+fn start_linked(
+    card: &Duplex,
+    io_out32: &Result<alsa::pcm::IO<'_, i32>, alsa::Error>,
+    io_out16: &Result<alsa::pcm::IO<'_, i16>, alsa::Error>,
+    out32: &mut [i32],
+    out16: &mut [i16],
+) -> Result<(), Errno> {
+    if card.capture.state() == State::Running {
+        return Ok(());
+    }
+    // After an xrun the playback side may still be in the XRUN state;
+    // writing to it would only report the xrun again.
+    if !matches!(card.playback.state(), State::Prepared | State::Running) {
+        card.playback.prepare().map_err(errno)?;
+    }
+    let frames = card.period * usize::from(card.out_channels);
+    for _ in 0..PERIODS {
+        match card.format {
+            SampleFormat::S32 => {
+                out32[..frames].fill(0);
+                io_out32
+                    .as_ref()
+                    .map_err(|e| errno(alsa::Error::new("io", e.errno())))?
+                    .writei(&out32[..frames])
+                    .map_err(errno)?;
+            }
+            SampleFormat::S16 => {
+                out16[..frames].fill(0);
+                io_out16
+                    .as_ref()
+                    .map_err(|e| errno(alsa::Error::new("io", e.errno())))?
+                    .writei(&out16[..frames])
+                    .map_err(errno)?;
+            }
+        }
+    }
+    if card.capture.state() != State::Running {
+        card.capture.start().map_err(errno)?;
+    }
+    Ok(())
+}
+
+/// Try to bring the card back. `Err` means it is not coming back. On
+/// `Ok` the pair is prepared and stopped; the loop head starts it again,
+/// primed.
 fn recover(card: &Duplex, errno: Errno, shared: &Arc<RtShared>) -> Result<(), String> {
     match errno {
         // An xrun: recoverable in place, costs one block, never the take.
@@ -734,7 +926,6 @@ fn recover(card: &Duplex, errno: Errno, shared: &Arc<RtShared>) -> Result<(), St
                 .try_recover(alsa::Error::unsupported("xrun"), true)
                 .or_else(|_| card.capture.prepare())
                 .map_err(|e| format!("xrun recovery failed: {e}"))?;
-            let _ = card.capture.start();
             Ok(())
         }
         // Suspended (a laptop lid, a USB power event): resume, then
@@ -796,6 +987,88 @@ mod tests {
         assert_eq!(to_s16(0.0), 0);
         assert_eq!(from_s32(0), 0.0);
         assert_eq!(from_s16(0), 0.0);
+    }
+
+    #[test]
+    fn card_health_never_holds_a_card_and_an_error_at_once() {
+        let card = OpenedCard {
+            name: "hw:1".into(),
+            in_channels: 10,
+            out_channels: 12,
+        };
+        let mut health = CardHealth::default();
+        assert_eq!(health.generation, 0);
+
+        health.went_down("hw:0 (Capture): No such file or directory".into());
+        assert!(health.opened.is_none());
+        assert!(
+            health
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("hw:0"))
+        );
+        assert_eq!(health.generation, 1);
+
+        health.came_up(card.clone());
+        assert_eq!(health.opened.as_ref(), Some(&card));
+        assert!(
+            health.last_error.is_none(),
+            "coming up clears the reason it was down"
+        );
+        assert_eq!(health.generation, 2);
+
+        health.went_down("EPIPE".into());
+        assert!(health.opened.is_none(), "going down clears the card");
+        assert_eq!(
+            health.generation, 3,
+            "every transition moves the generation"
+        );
+    }
+
+    /// Needs libasound (CI installs it) but no hardware: `hw:99` does not
+    /// exist anywhere, so the open fails deterministically.
+    #[test]
+    fn a_card_that_will_not_open_is_not_a_boot_error() {
+        use trib_core::MixerState;
+        use trib_engine::{InputSlots, OutputSlots, compile, engine_pair};
+
+        let compiled = compile(
+            &MixerState::default(),
+            48_000,
+            256,
+            &InputSlots::default(),
+            &OutputSlots::with_monitor(),
+        );
+        let (_handle, engine) = engine_pair(compiled.graph);
+        let backend = AlsaBackend::new(Some("hw:99".into()));
+        let stream = backend
+            .start(
+                &StreamConfig {
+                    sample_rate: 48_000,
+                    block_size: 256,
+                },
+                engine,
+            )
+            .expect("a missing card starts the timer clock, it does not refuse to start");
+
+        assert!(
+            backend.input_devices().is_empty(),
+            "nothing to patch while the card is down"
+        );
+        assert!(backend.output_devices().is_empty());
+        let status = backend.status();
+        assert!(!status.running);
+        assert_eq!(status.card, None);
+        assert!(
+            status.error.as_deref().is_some_and(|e| e.contains("hw:99")),
+            "the reason names the card: {status:?}"
+        );
+        assert_eq!(
+            backend.generation(),
+            1,
+            "the failed boot open is a transition"
+        );
+        drop(stream);
     }
 
     #[test]

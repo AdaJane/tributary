@@ -17,6 +17,12 @@ bind = "0.0.0.0:80"
 # path. Nothing else on this box can make a sound, which is the point.
 #
 # `device` is unset, so the daemon takes the first card that opens duplex
-# at the engine rate. Set it ("hw:1") if more than one interface is ever
-# plugged in — the real-time backend owns exactly one.
+# at the engine rate, and keeps trying every few seconds until one does —
+# plug the interface in whenever. Set it ("hw:1") if more than one
+# interface is ever plugged in — the real-time backend owns exactly one.
+#
+# The image keeps PipeWire off USB interfaces so it cannot hold the card
+# (/etc/wireplumber/wireplumber.conf.d/99-tributary-fence.conf). Switching
+# this to "shared" needs that file deleted, or PipeWire never sees the
+# interface either.
 layer = "exclusive"

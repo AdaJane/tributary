@@ -5,6 +5,7 @@ import { InlineError } from '../../design/Panel';
 import { Modal } from '../../design/Modal';
 import { SegmentedControl } from '../../design/SegmentedControl';
 import { SelectField } from '../../design/SelectField';
+import { loadAudioStatus, useAudioStatus } from '../../state/audio';
 import { useMixer } from '../../state/mixer';
 import {
   midiInPorts,
@@ -49,6 +50,7 @@ import {
   outputSilencedReason,
 } from './output-devices';
 import type { OutputSection } from './output-devices';
+import { backendAlert } from './devices';
 import { patchAt } from './output-patch';
 import type { OutputSource, PatchTap } from './output-patch';
 import { sourceChannelName, sourceOptions, tapConsequence } from './output-sources';
@@ -117,6 +119,7 @@ export function OutputPatchbayModal({
   const inPorts = useMidi(midiInPorts);
   const takeTracks = useMidi(midiTakeTracks);
   const midiPending = useMidi((s) => s.pending);
+  const audioStatus = useAudioStatus((s) => s.status);
   const [selected, setSelected] = useState<Selected | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -126,6 +129,7 @@ export function OutputPatchbayModal({
     if (open) {
       void refreshOutputs();
       void refreshMidi();
+      void loadAudioStatus();
     }
   }, [open]);
   useEffect(() => {
@@ -136,6 +140,7 @@ export function OutputPatchbayModal({
   }, [open]);
 
   const sections = groupOutputBay(devices, patches);
+  const backendDown = backendAlert(audioStatus);
   const midiSections = groupMidiBay(routes, reports, outPorts);
   const instruments = mixer.instruments ?? NO_INSTRUMENTS;
   const options = sourceOptions(mixer);
@@ -224,7 +229,12 @@ export function OutputPatchbayModal({
           plays; nothing else can be routed out.
         </p>
       )}
-      {sections.length === 0 && supported && (
+      {backendDown && (
+        <p className={styles.deviceError} role="alert">
+          {backendDown}
+        </p>
+      )}
+      {sections.length === 0 && supported && !backendDown && (
         <p className={styles.empty}>
           No audio output device detected. Plug one in and press Refresh.
         </p>

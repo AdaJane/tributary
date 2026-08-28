@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod destinations;
 pub mod devices;
 pub mod instruments;
@@ -54,8 +55,17 @@ pub struct AppState {
     pub supports_outputs: bool,
     /// Monitor-stream fan-out: `/ws/monitor` sockets subscribe here.
     pub monitor_tx: tokio::sync::broadcast::Sender<axum::body::Bytes>,
-    /// The device orchestrator — the only path to the audio backend.
+    /// The device orchestrator — the only path to the audio backend's
+    /// DEVICES. The backend itself is below, for its own status.
     pub devices: crate::device_host::DeviceHandle,
+    /// The audio backend, for `/audio`: its own state (which card, why
+    /// not) is read straight off it — that read never blocks and never
+    /// enumerates, so it needs no orchestrator round trip.
+    pub audio: Arc<dyn trib_audio::AudioBackend>,
+    pub audio_layer: crate::settings::AudioLayer,
+    /// Whether `start()` returned a stream at boot. It cannot change while
+    /// the daemon runs, which is why it lives here and not on the backend.
+    pub audio_started: bool,
     /// The instrument orchestrator — MIDI ports and the SoundFont library.
     pub instruments: crate::instrument_host::InstrumentHandle,
     /// Where uploads land. Resolved once at boot, so handlers never
@@ -160,6 +170,7 @@ fn api_router() -> OpenApiRouter<AppState> {
         .routes(routes!(transport::set_monitor))
         .routes(routes!(takes::list_takes))
         .routes(routes!(takes::take_peaks))
+        .routes(routes!(audio::get_audio))
         .routes(routes!(devices::list_devices))
         .routes(routes!(devices::refresh_devices))
         .routes(routes!(devices::set_card_profile))

@@ -296,7 +296,10 @@ the path. That removes the prefill, the resampling and the drift between
 capture and playback — but the number it lands on depends on the interface
 and has not been measured on hardware yet, so this README does not quote
 one. `GET /api/v1/outputs` reports the worst engine block per second and
-the xrun count; those are the numbers to judge it by.
+the xrun count; those are the numbers to judge it by. The card need not be
+there at boot: the daemon runs on a timer clock and retries every few
+seconds until it opens, and `GET /api/v1/audio` says whether it holds one
+and why not — the patch bays print that line when it does not.
 
 ## Layout
 

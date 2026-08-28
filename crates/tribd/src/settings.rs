@@ -2,7 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -32,7 +33,7 @@ impl Default for Server {
 }
 
 /// Which device layer owns the audio hardware.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioLayer {
     /// PipeWire/PulseAudio alongside everything else on the machine.
@@ -54,7 +55,8 @@ pub struct Audio {
     pub sample_rate: u32,
     pub block_size: usize,
     pub layer: AudioLayer,
-    /// The card the exclusive layer takes ("hw:1"). None = probe.
+    /// The card the exclusive layer takes ("hw:1"). None = the first
+    /// card that opens duplex at the engine rate, in ALSA index order.
     pub device: Option<String>,
 }
 

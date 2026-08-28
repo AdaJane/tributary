@@ -361,7 +361,7 @@ chmod 644 "$ROOT/etc/security/limits.d/95-tributary-audio.conf"
 #    PipeWire too, whose data thread defaults to rt.prio 88. Left alone it
 #    would preempt the audio thread at 10 and undo the whole exercise.
 #    Lowering PipeWire is the right half to move: on this box it is fenced
-#    off the real-time card and is not in the signal path at all.
+#    off the USB interface (step 2b below) and is not in the signal path.
 mkdir -p "$ROOT/etc/pipewire/pipewire.conf.d"
 cat > "$ROOT/etc/pipewire/pipewire.conf.d/99-tributary.conf" <<'EOF'
 # Ladder: USB IRQ threads (~50) > tribd engine (10) > PipeWire (5).
@@ -385,6 +385,28 @@ context.modules = [
 ]
 EOF
 chmod 644 "$ROOT/etc/pipewire/pipewire.conf.d/99-tributary.conf"
+
+# 2b. The fence. tribd's exclusive layer takes the interface as a raw hw:
+#     card; WirePlumber probes every ALSA card it sees and holds the PCM
+#     while it does, so whoever comes second gets EBUSY — at boot that is a
+#     coin toss, and the first v1.4 appliance run lost it. Disabling USB
+#     audio cards in WirePlumber removes the race outright. Onboard HDMI
+#     and headphone cards stay with PipeWire: they have no capture PCM, so
+#     the daemon's probe skips them on its own. This is only right because
+#     the image ships `layer = "exclusive"`; a Pi flipped to "shared" needs
+#     this file deleted, and tribd.toml says so beside the setting.
+mkdir -p "$ROOT/etc/wireplumber/wireplumber.conf.d"
+cat > "$ROOT/etc/wireplumber/wireplumber.conf.d/99-tributary-fence.conf" <<'EOF'
+# Keep PipeWire off USB audio interfaces: tribd owns them as raw hw: cards.
+# Delete this file if /home/tributary/config/tribd.toml sets layer = "shared".
+monitor.alsa.rules = [
+  {
+    matches = [ { device.name = "~alsa_card.usb-.*" } ]
+    actions = { update-props = { device.disabled = true } }
+  }
+]
+EOF
+chmod 644 "$ROOT/etc/wireplumber/wireplumber.conf.d/99-tributary-fence.conf"
 
 # 3. The CPU governor. Raspberry Pi OS defaults to `ondemand`, which
 #    samples every 10-20 ms; a 256-frame period at 48 kHz is 5.33 ms, so a
@@ -607,6 +629,14 @@ PW_CONF="$ROOT/etc/pipewire/pipewire.conf.d/99-tributary.conf"
 v test -f "$PW_CONF"
 v grep -qE '^[[:space:]]*rt\.prio[[:space:]]*=[[:space:]]*5$' "$PW_CONF"
 v grep -q 'allowed-rates' "$PW_CONF"
+
+# The fence: assert the PROMISE (USB cards disabled), not the file alone.
+# Without it the exclusive backend and WirePlumber race for the interface
+# at every boot.
+WP_FENCE="$ROOT/etc/wireplumber/wireplumber.conf.d/99-tributary-fence.conf"
+v test -f "$WP_FENCE"
+v grep -q 'alsa_card.usb-' "$WP_FENCE"
+v grep -qE 'device\.disabled[[:space:]]*=[[:space:]]*true' "$WP_FENCE"
 
 v test -x "$ROOT/usr/local/lib/tributary/cpu-governor.sh"
 v test -f "$ROOT/etc/systemd/system/tributary-performance.service"

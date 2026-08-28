@@ -7,9 +7,27 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "1.4.0"
+    "version": "1.5.1"
   },
   "paths": {
+    "/api/v1/audio": {
+      "get": {
+        "summary": "The audio backend's state: started, running, which card, and why not.",
+        "operationId": "get_audio",
+        "responses": {
+          "200": {
+            "description": "Audio backend state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioStatusDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/destinations": {
       "get": {
         "operationId": "list_destinations",
@@ -1380,6 +1398,60 @@
   },
   "components": {
     "schemas": {
+      "AudioLayer": {
+        "type": "string",
+        "description": "Which device layer owns the audio hardware.",
+        "enum": [
+          "shared",
+          "exclusive"
+        ]
+      },
+      "AudioStatusDto": {
+        "type": "object",
+        "description": "The audio backend's own state, apart from any device.",
+        "required": [
+          "layer",
+          "backend",
+          "started",
+          "running",
+          "realtime"
+        ],
+        "properties": {
+          "backend": {
+            "type": "string",
+            "description": "The backend's own name for itself."
+          },
+          "card": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The card the exclusive layer holds, when it holds one."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it is not running, when it is not."
+          },
+          "layer": {
+            "$ref": "#/components/schemas/AudioLayer",
+            "description": "Which device layer the daemon was configured to run."
+          },
+          "realtime": {
+            "$ref": "#/components/schemas/RealtimeDto"
+          },
+          "running": {
+            "type": "boolean",
+            "description": "Whether it is making sound right now. The exclusive layer is\nrunning only while its card is open; it keeps retrying while not."
+          },
+          "started": {
+            "type": "boolean",
+            "description": "Whether the backend's thread came up at boot at all. False is a\ndaemon-level failure that only a restart changes."
+          }
+        }
+      },
       "BusId": {
         "type": "integer",
         "format": "int32",
@@ -2704,7 +2776,7 @@
           },
           "port": {
             "type": "string",
-            "description": "The output port by NAME, never by ALSA client number: the kernel\nhands out a fresh number on every replug."
+            "description": "The output port by the name the sequencer prints, e.g.\n`\"Juno-6:Juno-6 MIDI 1 24:0\"`.\n\nKnown limitation, shared with `InstrumentState::port` and verified\nagainst a live ALSA sequencer: **that name embeds the client\nnumber**, which the kernel hands out afresh on every replug — so a\nroute stored today can name a port that will not exist after the\nsynth is unplugged and plugged back in. It fails visibly (the port\nreports `absent` and the console says it is not connected) rather\nthan silently sending to the wrong device, because the new name\nmatches nothing. Fixing it means matching on the client-number-free\nprefix on BOTH sides at once; doing it on one side only would let an\ninstrument and a route disagree about what a port is called."
           },
           "source": {
             "$ref": "#/components/schemas/MidiSource",
@@ -4103,6 +4175,37 @@
           }
         }
       },
+      "RealtimeDto": {
+        "type": "object",
+        "description": "What the machine granted the audio thread.",
+        "required": [
+          "scheduling",
+          "memory_locked"
+        ],
+        "properties": {
+          "memory_locked": {
+            "type": "boolean"
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it is not better than this, in a sentence someone can act on."
+          },
+          "scheduling": {
+            "$ref": "#/components/schemas/SchedulingDto"
+          }
+        }
+      },
       "RecordFormat": {
         "type": "string",
         "description": "What the take writer puts on disk. Bit depth folds into the variant so\nillegal combinations (float FLAC) are unrepresentable.",
@@ -4213,6 +4316,14 @@
           }
         ],
         "description": "Where a strip's main (post-fader, post-pan) signal goes."
+      },
+      "SchedulingDto": {
+        "type": "string",
+        "enum": [
+          "fifo",
+          "other",
+          "not_applicable"
+        ]
       },
       "SeekBody": {
         "type": "object",

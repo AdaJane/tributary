@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 
 import { $api } from '../../api/client';
+import { loadAudioStatus } from '../../state/audio';
 import { loadDevices, useDevices } from '../../state/devices';
 import { loadOutputs } from '../../state/outputs';
 import { useMixer } from '../../state/mixer';
@@ -31,6 +32,8 @@ export function ConsoleView() {
     // The same for outputs, so every OUT button can print its patch
     // before anyone opens the room.
     void loadOutputs();
+    // And the backend itself, so a dark patch bay can say why at once.
+    void loadAudioStatus();
   }, []);
 
   if (!loaded) {

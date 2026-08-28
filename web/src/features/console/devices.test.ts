@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import type { DeviceReport } from '../../state/devices';
 import type { StripState } from '../../ws/messages';
-import { groupPatchbay, silencedReason, sourceKind } from './devices';
+import type { AudioStatusDto } from '../../state/audio';
+import { backendAlert, groupPatchbay, silencedReason, sourceKind } from './devices';
 
 const dev = (
   name: string,
@@ -225,5 +226,46 @@ describe('silencedReason', () => {
     );
     expect(defaultSection.device).toBeNull();
     expect(silencedReason(defaultSection)).toBe('muted in the system mixer');
+  });
+});
+
+describe('backendAlert', () => {
+  const status = (over: Partial<AudioStatusDto> = {}): AudioStatusDto => ({
+    layer: 'exclusive',
+    backend: 'alsa',
+    started: true,
+    running: true,
+    card: 'hw:1',
+    error: null,
+    realtime: { scheduling: 'fifo', priority: 10, memory_locked: true, reason: null },
+    ...over,
+  });
+
+  it('is silent while the backend is running, and before the first read', () => {
+    expect(backendAlert(status())).toBeNull();
+    expect(backendAlert(null)).toBeNull();
+  });
+
+  it('names the card refusal and says it is retrying on the exclusive layer', () => {
+    const alert = backendAlert(
+      status({ running: false, card: null, error: 'hw:0 (Capture): Device or resource busy' }),
+    );
+    expect(alert).toBe(
+      'Real-time card not open: hw:0 (Capture): Device or resource busy — retrying',
+    );
+  });
+
+  it('does not promise a retry when the backend never started', () => {
+    const alert = backendAlert(
+      status({
+        started: false,
+        running: false,
+        card: null,
+        error: 'the audio backend failed to start; restart the daemon',
+      }),
+    );
+    expect(alert).toBe(
+      'Audio backend not running: the audio backend failed to start; restart the daemon',
+    );
   });
 });

@@ -7,6 +7,15 @@
 //! Refresh (user-initiated, no background retry): re-enumerate, re-run
 //! name reconciliation, close-and-release failed streams, retry every
 //! wanted-but-unopened device.
+//!
+//! One exception, and it is the backend's, not a device's: when the
+//! backend's OWN device set changes — the exclusive layer's card coming
+//! up after a boot without it, or coming back after a death — the
+//! orchestrator heals as if Refresh had been pressed. It learns that from
+//! a generation counter the backend bumps, polled once a second without
+//! enumerating, so a headless appliance recovers with nobody at the
+//! console. A device that failed to open on a healthy backend still waits
+//! for Refresh, exactly as before.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -316,7 +325,14 @@ struct Orchestrator {
     wanted_outputs: BTreeSet<Option<String>>,
     open_outputs: HashMap<Option<String>, OutOpenEntry>,
     output_errors: HashMap<Option<String>, String>,
+    /// The backend generation last reconciled against.
+    backend_generation: u64,
 }
+
+/// How often the orchestrator looks at the backend's generation while
+/// idle. A lock read, not an enumeration — enumerating happens only when
+/// the number moved.
+const BACKEND_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// What the orchestrator knows about one open output.
 struct OutOpenEntry {
@@ -333,6 +349,7 @@ impl Orchestrator {
         slots_changed: Box<dyn Fn(InputSlots) + Send>,
         out_slots_changed: Box<dyn Fn(OutputSlots) + Send>,
     ) -> Self {
+        let backend_generation = backend.generation();
         Orchestrator {
             backend,
             stream,
@@ -348,7 +365,24 @@ impl Orchestrator {
             wanted_outputs: BTreeSet::new(),
             open_outputs: HashMap::new(),
             output_errors: HashMap::new(),
+            backend_generation,
         }
+    }
+
+    /// Heal after the backend's own device set changed, if it has.
+    /// Returns whether it had.
+    fn heal_if_backend_changed(&mut self) -> bool {
+        let generation = self.backend.generation();
+        if generation == self.backend_generation {
+            return false;
+        }
+        self.backend_generation = generation;
+        tracing::info!(generation, "audio backend devices changed; re-patching");
+        let present = self.backend.input_devices();
+        self.reconcile(&present, true);
+        let present = self.backend.output_devices();
+        self.reconcile_outputs(&present, true);
+        true
     }
 
     /// Which present device a stored output name refers to. `None` follows
@@ -563,9 +597,21 @@ impl Orchestrator {
         rows
     }
     fn run(mut self, rx: Receiver<DeviceMsg>) {
+        use std::sync::mpsc::RecvTimeoutError;
         // The channel closing is the shutdown signal: the thread exits and
         // the stream handle drops here, stopping all audio.
-        while let Ok(msg) = rx.recv() {
+        loop {
+            let msg = match rx.recv_timeout(BACKEND_POLL) {
+                Ok(msg) => msg,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.heal_if_backend_changed();
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
+            // A message that arrives while the backend just changed sees
+            // the healed state, not a stale one.
+            self.heal_if_backend_changed();
             match msg {
                 DeviceMsg::WantedChanged(wanted) => {
                     self.wanted = wanted;
@@ -1081,12 +1127,18 @@ mod tests {
     use super::*;
 
     /// Backend double with a swappable enumeration — the "replug".
+    #[derive(Default)]
     struct TestBackend {
         devices: Mutex<Vec<InputDeviceInfo>>,
         cards: Mutex<Vec<trib_audio::CardInfo>>,
         /// What the card exposes once switched: profile → devices.
         on_switch: Mutex<HashMap<String, Vec<InputDeviceInfo>>>,
         switch_fails: Mutex<bool>,
+        /// The backend's own-device-set counter — the exclusive layer's
+        /// card coming and going.
+        generation: Mutex<u64>,
+        /// How many times the orchestrator enumerated; polling must not.
+        enumerations: Mutex<u32>,
     }
 
     impl AudioBackend for TestBackend {
@@ -1094,7 +1146,11 @@ mod tests {
             "test"
         }
         fn input_devices(&self) -> Vec<InputDeviceInfo> {
+            *self.enumerations.lock().unwrap() += 1;
             self.devices.lock().unwrap().clone()
+        }
+        fn generation(&self) -> u64 {
+            *self.generation.lock().unwrap()
         }
         fn input_cards(&self) -> Vec<trib_audio::CardInfo> {
             self.cards.lock().unwrap().clone()
@@ -1175,9 +1231,7 @@ mod tests {
     fn rig(devices: Vec<InputDeviceInfo>) -> Rig {
         let backend = Arc::new(TestBackend {
             devices: Mutex::new(devices),
-            cards: Mutex::default(),
-            on_switch: Mutex::default(),
-            switch_fails: Mutex::default(),
+            ..TestBackend::default()
         });
         let stream = Arc::new(TestStream::default());
         let updates: Arc<Mutex<Vec<InputSlots>>> = Arc::default();
@@ -1505,6 +1559,40 @@ mod tests {
     }
 
     #[test]
+    fn the_backends_own_card_coming_up_re_patches_without_a_refresh() {
+        // The appliance boots with the interface unplugged: the exclusive
+        // backend enumerates nothing, and the default patch has nowhere to
+        // go. Nobody is at the console to press Refresh.
+        let mut rig = rig(Vec::new());
+        reconcile(&mut rig, &[None], false);
+        assert!(
+            rig.calls.calls.lock().unwrap().is_empty(),
+            "nothing to open"
+        );
+        let enumerated = *rig.devices.enumerations.lock().unwrap();
+
+        // Idle polls with an unchanged generation must not enumerate.
+        assert!(!rig.orchestrator.heal_if_backend_changed());
+        assert_eq!(*rig.devices.enumerations.lock().unwrap(), enumerated);
+
+        // The card comes up inside the backend, which says so.
+        rig.devices
+            .devices
+            .lock()
+            .unwrap()
+            .push(dev("hw:1", 10, true));
+        *rig.devices.generation.lock().unwrap() += 1;
+        assert!(rig.orchestrator.heal_if_backend_changed());
+        assert_eq!(
+            rig.calls.calls.lock().unwrap().as_slice(),
+            ["open None ch10 @0"],
+            "the wanted default patch opens at the card's width, unprompted"
+        );
+        // Seen: a second look at the same generation is a no-op.
+        assert!(!rig.orchestrator.heal_if_backend_changed());
+    }
+
+    #[test]
     fn a_failed_open_releases_its_slot_and_only_refresh_retries() {
         let mut rig = rig(vec![dev("default", 2, true), dev("flaky", 2, false)]);
         rig.calls.fail.lock().unwrap().push(Some("flaky".into()));
@@ -1623,9 +1711,7 @@ mod tests {
     fn without_a_running_backend_the_report_says_so() {
         let backend = Arc::new(TestBackend {
             devices: Mutex::new(vec![dev("usb", 2, true)]),
-            cards: Mutex::default(),
-            on_switch: Mutex::default(),
-            switch_fails: Mutex::default(),
+            ..TestBackend::default()
         });
         let mut orchestrator =
             Orchestrator::new(backend.clone(), None, Box::new(|_| {}), Box::new(|_| {}));
