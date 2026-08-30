@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 
 import type { SoundfontInfo } from '../../state/instruments';
 import {
+  defaultSoundfont,
   deleteBlocked,
   emptyState,
   formatBytes,
   groupSoundfonts,
   progressLine,
+  ramNotice,
   uploadErrorMessage,
   validateUpload,
 } from './soundfont-logic';
@@ -118,5 +120,70 @@ describe('byte formatting', () => {
     expect(formatBytes(4 * 1024 * 1024)).toBe('4 MB');
     expect(formatBytes(1536)).toBe('2 KB');
     expect(formatBytes(2 * 1024 ** 3)).toBe('2.0 GB');
+  });
+});
+
+describe('the shipped library', () => {
+  const font = (over: Partial<SoundfontInfo>): SoundfontInfo => ({
+    id: 'x.sf2',
+    path: '/usr/share/tributary/soundfonts/x.sf2',
+    bytes: 1_000,
+    origin: 'built_in',
+    ...over,
+  });
+
+  /** On a fresh appliance the built-ins are the only sounds there are, so
+   *  an empty "Internal" heading above them would read as an empty box. */
+  it('lists built-in sounds above uploads and drives', () => {
+    const groups = groupSoundfonts([
+      font({ id: 'mine.sf2', origin: 'internal' }),
+      font({ id: 'GeneralUser-GS.sf2' }),
+      font({ id: 'theirs.sf2', origin: 'removable', volume: 'STICK' }),
+    ]);
+    expect(groups.map((g) => g.title)).toEqual(['Built in', 'Internal', 'STICK']);
+    expect(groups[0].builtIn).toBe(true);
+    expect(groups[0].files[0].id).toBe('GeneralUser-GS.sf2');
+  });
+
+  /** A build that bundled nothing must not show a heading promising some. */
+  it('shows no built-in heading when nothing was bundled', () => {
+    const groups = groupSoundfonts([font({ id: 'mine.sf2', origin: 'internal' })]);
+    expect(groups.map((g) => g.title)).toEqual(['Internal']);
+  });
+
+  /** They belong to the installation, and there is no way to put one back
+   *  — an upload cannot take a built-in's name. */
+  it('refuses to delete a built-in, with a reason rather than a hidden button', () => {
+    const blocked = deleteBlocked(font({}), [], false);
+    expect(blocked).toBe('built in — part of this installation');
+  });
+
+  /** Size is memory here, so a large bank says so in words. */
+  it('warns in plain language about a font large enough to matter', () => {
+    expect(ramNotice(1_000)).toBeNull();
+    expect(ramNotice(32_319_396)).toBeNull();
+    expect(ramNotice(215_614_036)).toMatch(/memory/);
+    expect(ramNotice(215_614_036)).toMatch(/206 MB/);
+  });
+
+  /** The smallest, because a new instrument silently costing 206 MB on a
+   *  2 GB Pi is a bad way to meet the feature. */
+  it('starts a new instrument on the smallest built-in', () => {
+    expect(
+      defaultSoundfont([
+        font({ id: 'MuseScore_General.sf2', bytes: 215_614_036 }),
+        font({ id: 'GeneralUser-GS.sf2', bytes: 32_319_396 }),
+        font({ id: 'FluidR3_GM.sf2', bytes: 148_398_306 }),
+      ]),
+    ).toBe('GeneralUser-GS.sf2');
+  });
+
+  it('falls back to an upload, then to no voice at all', () => {
+    expect(defaultSoundfont([font({ id: 'mine.sf2', origin: 'internal' })])).toBe('mine.sf2');
+    // A font on someone's stick is not a default: it leaves with them.
+    expect(
+      defaultSoundfont([font({ id: 'theirs.sf2', origin: 'removable', volume: 'S' })]),
+    ).toBeUndefined();
+    expect(defaultSoundfont([])).toBeUndefined();
   });
 });

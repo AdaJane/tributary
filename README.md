@@ -81,6 +81,26 @@ user and can enable SSH). Recordings live under `/home/tributary/projects`;
 logs via `sudo journalctl SYSLOG_IDENTIFIER=tribd` (needs a login user).
 Read Security below — the appliance trusts its own network.
 
+**Recording to an attached drive.** Plug in a USB stick or fit an NVMe SSD
+(Pi 5, M.2 HAT) and it appears in the Setup tab on its own — the image
+mounts anything with a filesystem on it and enables the Pi 5's PCIe slot.
+Pick a volume to record there; recordings land in `<mount>/tributary`.
+
+A drive that has never been used here — or one that arrived carrying a
+flashed OS image — can be prepared from **Format**, which wipes it and lays
+down one volume spanning the whole disk. Choose the filesystem in the
+dialog: **ext4** for a drive that stays in the recorder (journalled, keeps
+file ownership) or **exFAT** for one you unplug and open on a Mac or PC.
+Formatting asks you to type `ERASE`, and prints what is on the drive now
+against what it will become.
+
+The disk the appliance boots from is never offered and cannot be formatted,
+whether that is the SD card, a USB stick or an NVMe drive — the console
+asks the running mount table which disk it stands on rather than guessing
+from how a drive is attached. An NVMe SSD is the best medium here for long
+multitrack takes: an 8-channel take at 48 kHz/32-bit is a continuous few
+MB/s for as long as you record.
+
 ### Docker
 
 ```sh
@@ -104,7 +124,19 @@ tar xzf tributary-*.tar.gz && ./tributary-*/tribd
 
 The daemon serves the console at <http://127.0.0.1:4600>. Recordings land
 in `projects/` next to where you launch it; change the destination in the
-Setup tab. For the friendly-named patchbay sources install
+Setup tab.
+
+The AppImage finds its bundled soundfonts on its own. A tarball has no
+install prefix, so point the daemon at the `soundfonts/` directory beside
+the binary:
+
+```sh
+TRIB__SOUNDFONTS__BUILTIN_ROOT="$PWD/tributary-*/soundfonts" ./tributary-*/tribd
+```
+
+Without it the daemon runs fine and simply reports no built-in sounds.
+
+For the friendly-named patchbay sources install
 `pulseaudio-utils` (`pactl`/`parec`) — present by default on PipeWire
 desktops; without a Pulse server the daemon falls back to raw ALSA/cpal
 devices.
@@ -260,13 +292,39 @@ Splits share one loaded soundfont and only ever sound their own keys, so a
 six-piece kit costs no extra sample memory and no extra voices — just one
 synthesiser instance each.
 
-**Soundfonts** live in `soundfonts.root` on the boot disk (the appliance
-uses `/var/lib/tributary/soundfonts`), and any mounted drive is scanned one
+**Soundfonts.** Three General MIDI banks ship with Tributary, so instruments
+make a sound the first time you press Add — nothing to find, nothing to
+upload. They are installed read-only to `/usr/share/tributary/soundfonts`,
+listed in the console under *Built in*, and cannot be deleted or overwritten
+from the console because they belong to the installation rather than to a
+session. Their licences are in [THIRD-PARTY.md](THIRD-PARTY.md), and
+`soundfonts/manifest.toml` is where they are defined.
+
+| Bank | Size | Presets | Licence |
+|---|---|---|---|
+| GeneralUser GS 2.0.3 | 31 MB | 287 | GeneralUser GS License v2.0 |
+| FluidR3 GM 3.1 | 142 MB | 189 | MIT |
+| MuseScore General | 206 MB | 309 | MIT |
+
+**Mind the memory.** rustysynth keeps all of a bank's sample data resident
+for as long as it is loaded, so a bank's file size is very nearly its RAM
+cost, and two different banks cost both. A new instrument therefore starts
+on GeneralUser GS, the smallest — on a 2 GB Pi 4, loading MuseScore General
+during a take is an OOM kill rather than a slow load. The 8 GB boards carry
+any of them comfortably. `soundfonts.max_bytes` (64 MB by default) is the
+same budget applied to *uploads*; the bundled banks are exempt because they
+are vetted rather than arriving over the network.
+
+Your own files live in `soundfonts.root` on the boot disk (the appliance
+uses `/home/tributary/soundfonts`), and any mounted drive is scanned one
 level deep, so dropping files on a USB stick is enough. The console can also
-upload one directly. Note the memory cost: all sample data stays resident, so
-`soundfonts.max_bytes` (64 MB by default) is a RAM budget, not a disk one — a
-148 MB General MIDI set is an OOM kill on a 2 GB Pi 4 rather than a slow
-load. None is bundled; Tributary ships no soundfont of its own.
+upload one directly.
+
+The banks are not in the git repository — 380 MB of sample data is a cost
+every clone would pay forever. `scripts/fetch-soundfonts.sh` downloads them
+and checks every byte against the manifest's SHA-256; release builds run it
+before packaging. A build that skips it produces working software with an
+empty *Built in* shelf, which the console reports honestly.
 
 **MIDI** comes in over the ALSA sequencer, so any USB keyboard the system
 enumerates works, and no extra package is needed. Ports open when an

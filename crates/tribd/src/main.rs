@@ -152,6 +152,21 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             "could not create the soundfont library; instruments will have nothing to load"
         );
     }
+    // The shipped library, resolved once here so no handler re-derives it
+    // and they cannot disagree about where it is. Never created: it is
+    // read-only and installed by the package, so a missing directory is an
+    // installation that bundled no sounds, not a fault to repair at boot.
+    let builtin_soundfont_root = std::path::absolute(&settings.soundfonts.builtin_root)?;
+    let soundfont_library = crate::soundfonts::Library {
+        builtin: builtin_soundfont_root.clone(),
+        user: soundfont_root.clone(),
+    };
+    if !builtin_soundfont_root.is_dir() {
+        tracing::info!(
+            root = %builtin_soundfont_root.display(),
+            "no built-in soundfont library on this installation"
+        );
+    }
 
     // Reopen the latest project, or tear off fresh tape: one strip patched
     // to input 0 and the classic AUX 1/2 → reverb/delay loop pre-wired.
@@ -266,7 +281,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         let control = control.clone();
         instrument_host::spawn(
             instrument_rx,
-            soundfont_root.clone(),
+            soundfont_library.clone(),
             sample_rate,
             engine_handle.midi_tx,
             midi_out,
@@ -307,6 +322,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         audio_started,
         instruments,
         soundfont_dir: soundfont_root.to_string_lossy().into_owned(),
+        builtin_soundfont_dir: builtin_soundfont_root.to_string_lossy().into_owned(),
         max_soundfont_bytes: settings.soundfonts.max_bytes,
     };
 

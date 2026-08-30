@@ -1,9 +1,11 @@
 //! The SoundFont library: what is on this box, and whether it can be used.
 //!
-//! Two sources, deliberately kept apart in the report. The internal root is
-//! the box's own store — uploads land there and it is always present. A
-//! removable volume is somebody's stick, so its files are listed but never
-//! deleted from here, and they vanish when it is unplugged.
+//! Three sources, deliberately kept apart in the report. The built-in root
+//! is read-only and ships with the installation, so a fresh appliance has
+//! sounds before anyone uploads anything. The internal root is the box's
+//! own store — uploads land there and it is always present. A removable
+//! volume is somebody's stick, so its files are listed but never deleted
+//! from here, and they vanish when it is unplugged.
 //!
 //! Everything here is blocking filesystem work, so it runs on the
 //! instrument host thread or under `spawn_blocking` — never on the control
@@ -25,10 +27,86 @@ const USB_SUBDIR: &str = "soundfonts";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SoundfontOrigin {
+    /// Shipped with the installation. Playable, never deleted — it is part
+    /// of the box, not of anyone's session.
+    BuiltIn,
     /// The box's own library. Uploadable, deletable.
     Internal,
     /// A mounted volume. Listed and playable, never deleted from here.
     Removable,
+}
+
+/// Where this box looks for SoundFonts.
+///
+/// One value rather than two paths threaded side by side: every caller
+/// needs both roots and the order they are searched in is a rule, not a
+/// caller's choice.
+#[derive(Debug, Clone)]
+pub struct Library {
+    /// Read-only, installed with the package or baked into the image.
+    /// Empty or absent on a build that shipped no sounds, which is an
+    /// empty library rather than an error.
+    pub builtin: PathBuf,
+    /// The writable store. Uploads land here.
+    pub user: PathBuf,
+}
+
+impl Library {
+    /// Everything the box can currently load, built-ins first.
+    ///
+    /// `mounts` are the removable volumes to sweep — the caller passes what
+    /// the destinations enumeration already knows, so there is one place
+    /// that decides what "a drive" is.
+    pub fn list(&self, mounts: &[(PathBuf, String)]) -> Vec<SoundfontInfo> {
+        let mut out = entries_in(&self.builtin, SoundfontOrigin::BuiltIn, None);
+        out.extend(entries_in(&self.user, SoundfontOrigin::Internal, None));
+        for (mount, label) in mounts {
+            // The volume root, then its `soundfonts/` directory. Two
+            // shallow reads, never a walk.
+            out.extend(entries_in(mount, SoundfontOrigin::Removable, Some(label)));
+            out.extend(entries_in(
+                &mount.join(USB_SUBDIR),
+                SoundfontOrigin::Removable,
+                Some(label),
+            ));
+        }
+        out
+    }
+
+    /// Resolve a library id to a readable path.
+    ///
+    /// Searched in the same order `list` reports, which is what makes an id
+    /// unambiguous: `is_builtin` refuses an upload that would shadow a
+    /// shipped name, so no id can name two files.
+    ///
+    /// An id is a bare file name by construction, so a traversal cannot be
+    /// expressed — but it is re-validated here rather than trusted, because
+    /// this id arrives from a manifest that may have been hand-edited.
+    pub fn resolve(&self, mounts: &[(PathBuf, String)], id: &str) -> Option<PathBuf> {
+        if safe_file_name(id).as_deref() != Some(id) {
+            return None;
+        }
+        for root in [&self.builtin, &self.user] {
+            let candidate = root.join(id);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        mounts.iter().find_map(|(mount, _)| {
+            [mount.join(id), mount.join(USB_SUBDIR).join(id)]
+                .into_iter()
+                .find(|candidate| candidate.is_file())
+        })
+    }
+
+    /// Is this id one of the shipped sounds?
+    ///
+    /// The single question behind two refusals: an upload may not take a
+    /// built-in's name, and a delete may not remove one. Both exist so a
+    /// library id always names exactly one file.
+    pub fn is_builtin(&self, id: &str) -> bool {
+        safe_file_name(id).as_deref() == Some(id) && self.builtin.join(id).is_file()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
@@ -121,46 +199,6 @@ fn entries_in(dir: &Path, origin: SoundfontOrigin, volume: Option<&str>) -> Vec<
     out
 }
 
-/// Everything the box can currently load, internal first.
-///
-/// `mounts` are the removable volumes to sweep — the caller passes what the
-/// destinations enumeration already knows, so there is one place that
-/// decides what "a drive" is.
-pub fn list(root: &Path, mounts: &[(PathBuf, String)]) -> Vec<SoundfontInfo> {
-    let mut out = entries_in(root, SoundfontOrigin::Internal, None);
-    for (mount, label) in mounts {
-        // The volume root, then its `soundfonts/` directory. Two shallow
-        // reads, never a walk.
-        out.extend(entries_in(mount, SoundfontOrigin::Removable, Some(label)));
-        out.extend(entries_in(
-            &mount.join(USB_SUBDIR),
-            SoundfontOrigin::Removable,
-            Some(label),
-        ));
-    }
-    out
-}
-
-/// Resolve a library id to a readable path.
-///
-/// An id is a bare file name by construction, so a traversal cannot be
-/// expressed — but it is re-validated here rather than trusted, because
-/// this id arrives from a manifest that may have been hand-edited.
-pub fn resolve(root: &Path, mounts: &[(PathBuf, String)], id: &str) -> Option<PathBuf> {
-    if safe_file_name(id).as_deref() != Some(id) {
-        return None;
-    }
-    let internal = root.join(id);
-    if internal.is_file() {
-        return Some(internal);
-    }
-    mounts.iter().find_map(|(mount, _)| {
-        [mount.join(id), mount.join(USB_SUBDIR).join(id)]
-            .into_iter()
-            .find(|candidate| candidate.is_file())
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +241,14 @@ mod tests {
         assert_eq!(safe_file_name("...sf2"), None);
     }
 
+    /// A library with no shipped sounds — the desktop-package shape.
+    fn user_only(root: &Path) -> Library {
+        Library {
+            builtin: PathBuf::from("/definitely/not/here"),
+            user: root.to_path_buf(),
+        }
+    }
+
     #[test]
     fn the_library_lists_internal_files_before_removable_ones() {
         let root = tempfile::tempdir().unwrap();
@@ -214,7 +260,7 @@ mod tests {
         std::fs::write(stick.path().join("notes.txt"), b"ignored").unwrap();
 
         let mounts = vec![(stick.path().to_path_buf(), "STICK".to_owned())];
-        let found = list(root.path(), &mounts);
+        let found = user_only(root.path()).list(&mounts);
 
         let ids: Vec<&str> = found.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["internal.sf2", "stick.sf2", "nested.sf2"]);
@@ -228,7 +274,7 @@ mod tests {
     fn a_missing_root_is_an_empty_library_not_a_failure() {
         // A fresh install has no soundfonts directory until the first
         // upload; that must read as "none yet", never as a boot error.
-        let found = list(Path::new("/definitely/not/here"), &[]);
+        let found = user_only(Path::new("/definitely/not/here")).list(&[]);
         assert!(found.is_empty());
     }
 
@@ -240,11 +286,102 @@ mod tests {
         std::fs::write(stick.path().join("soundfonts/pad.sf2"), b"x").unwrap();
         let mounts = vec![(stick.path().to_path_buf(), "STICK".to_owned())];
 
+        let library = user_only(root.path());
         assert_eq!(
-            resolve(root.path(), &mounts, "pad.sf2"),
+            library.resolve(&mounts, "pad.sf2"),
             Some(stick.path().join("soundfonts/pad.sf2"))
         );
-        assert_eq!(resolve(root.path(), &mounts, "../pad.sf2"), None);
-        assert_eq!(resolve(root.path(), &mounts, "missing.sf2"), None);
+        assert_eq!(library.resolve(&mounts, "../pad.sf2"), None);
+        assert_eq!(library.resolve(&mounts, "missing.sf2"), None);
+    }
+
+    // ------------------------------------------------ the shipped library
+
+    /// Built-ins come first, so a fresh appliance shows sounds above the
+    /// empty space where the user's own uploads will go.
+    #[test]
+    fn shipped_sounds_are_listed_before_uploads_and_sticks() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let stick = tempfile::tempdir().unwrap();
+        std::fs::write(builtin.path().join("GeneralUser-GS.sf2"), b"x").unwrap();
+        std::fs::write(user.path().join("mine.sf2"), b"xx").unwrap();
+        std::fs::write(stick.path().join("theirs.sf2"), b"xxx").unwrap();
+
+        let library = Library {
+            builtin: builtin.path().to_path_buf(),
+            user: user.path().to_path_buf(),
+        };
+        let mounts = vec![(stick.path().to_path_buf(), "STICK".to_owned())];
+        let found = library.list(&mounts);
+
+        let ids: Vec<&str> = found.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["GeneralUser-GS.sf2", "mine.sf2", "theirs.sf2"]);
+        assert_eq!(found[0].origin, SoundfontOrigin::BuiltIn);
+        assert_eq!(found[1].origin, SoundfontOrigin::Internal);
+        assert_eq!(found[2].origin, SoundfontOrigin::Removable);
+        // A built-in belongs to the box, not to a volume anyone can remove.
+        assert_eq!(found[0].volume, None);
+    }
+
+    /// An installation that bundled no sounds is an empty shelf, never an
+    /// error — that is the deb/tarball case before the fetch step runs.
+    #[test]
+    fn a_missing_builtin_root_is_simply_no_shipped_sounds() {
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("mine.sf2"), b"x").unwrap();
+        let library = Library {
+            builtin: PathBuf::from("/definitely/not/here"),
+            user: user.path().to_path_buf(),
+        };
+        assert_eq!(library.list(&[]).len(), 1);
+        assert!(!library.is_builtin("mine.sf2"));
+    }
+
+    /// `resolve` searches in the order `list` reports. Because an upload
+    /// can never take a built-in's name (the API refuses it), no id can
+    /// name two files and the two orders cannot disagree.
+    #[test]
+    fn resolve_searches_in_the_order_the_library_lists() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(builtin.path().join("shipped.sf2"), b"x").unwrap();
+        std::fs::write(user.path().join("mine.sf2"), b"x").unwrap();
+        let library = Library {
+            builtin: builtin.path().to_path_buf(),
+            user: user.path().to_path_buf(),
+        };
+
+        assert_eq!(
+            library.resolve(&[], "shipped.sf2"),
+            Some(builtin.path().join("shipped.sf2"))
+        );
+        assert_eq!(
+            library.resolve(&[], "mine.sf2"),
+            Some(user.path().join("mine.sf2"))
+        );
+    }
+
+    /// The one question behind both refusals: an upload may not take a
+    /// shipped name, and a delete may not remove one.
+    #[test]
+    fn is_builtin_answers_only_for_shipped_files() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(builtin.path().join("shipped.sf2"), b"x").unwrap();
+        std::fs::write(user.path().join("mine.sf2"), b"x").unwrap();
+        let library = Library {
+            builtin: builtin.path().to_path_buf(),
+            user: user.path().to_path_buf(),
+        };
+
+        assert!(library.is_builtin("shipped.sf2"));
+        assert!(
+            !library.is_builtin("mine.sf2"),
+            "an upload is not a built-in"
+        );
+        assert!(!library.is_builtin("absent.sf2"));
+        // A traversing id is not a built-in either — it is not a name.
+        assert!(!library.is_builtin("../shipped.sf2"));
     }
 }

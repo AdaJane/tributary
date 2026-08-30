@@ -48,7 +48,14 @@
 # Uploads land here; mounted drives are also scanned, one level deep.
 # root = "soundfonts"
 #
-# Ceiling on an uploaded soundfont. This is a MEMORY budget wearing a disk
+# The read-only library that ships with Tributary. Listed in the console
+# beside your own uploads and never written to or deleted from. Packages
+# install it here; a tarball or AppImage build sets the path with
+# TRIB__SOUNDFONTS__BUILTIN_ROOT instead, because it has no fixed prefix.
+# builtin_root = "/usr/share/tributary/soundfonts"
+#
+# Ceiling on an UPLOADED soundfont — the bundled ones are exempt, being
+# vetted rather than arriving over the network. This is a MEMORY budget wearing a disk
 # hat: the synthesiser holds all sample data resident, so a 148 MB General
 # MIDI set is an OOM kill on a 2 GB Pi 4 rather than a slow load.
 # max_bytes = 67108864

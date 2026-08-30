@@ -97,6 +97,11 @@ impl Default for Projects {
 #[serde(default, deny_unknown_fields)]
 pub struct Soundfonts {
     pub root: PathBuf,
+    /// Read-only library shipped with the installation, listed alongside
+    /// the user's own. Absent on a build that bundled no sounds, which is
+    /// an empty library rather than an error — the console then says the
+    /// box has no sounds, which is true.
+    pub builtin_root: PathBuf,
     /// Ceiling on an uploaded file. `rustysynth` holds all sample data
     /// resident, so this is a memory budget wearing a disk-shaped hat: a
     /// 148 MB General MIDI set is an OOM kill on a 2 GB Pi 4, not a slow
@@ -108,6 +113,7 @@ impl Default for Soundfonts {
     fn default() -> Self {
         Soundfonts {
             root: "soundfonts".into(),
+            builtin_root: "/usr/share/tributary/soundfonts".into(),
             max_bytes: 64 * 1024 * 1024,
         }
     }

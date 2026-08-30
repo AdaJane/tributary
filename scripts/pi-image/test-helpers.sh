@@ -10,7 +10,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly HERE
 readonly AP="$HERE/ap-prepare.sh"
-readonly USB="$HERE/usb-mount.sh"
+readonly DRIVE="$HERE/drive-mount.sh"
 readonly FMT="$HERE/format-drive.sh"
 readonly BUILD="$HERE/build.sh"
 
@@ -42,9 +42,9 @@ TMP="$(mktemp -d)"
 readonly TMP
 trap 'rm -rf "$TMP"' EXIT
 
-# ---------------------------------------------------------------- usb-mount
+# -------------------------------------------------------------- drive-mount
 
-opts() { "$USB" --print-options "$@"; }
+opts() { "$DRIVE" --print-options "$@"; }
 
 # The whole point of the FAT/exFAT branch: no POSIX ownership on the
 # filesystem means ownership has to arrive as a mount option, or the daemon
@@ -76,9 +76,9 @@ esac
 
 # blkid says "ntfs"; `mount -t ntfs` would route to the ntfs-3g FUSE
 # helper, whose ownership semantics differ from the in-kernel driver's.
-check "type/ntfs-to-ntfs3" "ntfs3" "$("$USB" --print-type ntfs)"
-check "type/exfat-passthrough" "exfat" "$("$USB" --print-type exfat)"
-check "type/ext4-passthrough" "ext4" "$("$USB" --print-type ext4)"
+check "type/ntfs-to-ntfs3" "ntfs3" "$("$DRIVE" --print-type ntfs)"
+check "type/exfat-passthrough" "exfat" "$("$DRIVE" --print-type exfat)"
+check "type/ext4-passthrough" "ext4" "$("$DRIVE" --print-type ext4)"
 
 # Sustained-write regression guard: `sync` here would quietly ruin
 # multitrack recording to USB.
@@ -92,7 +92,7 @@ for fs in vfat exfat ntfs3 ext4; do
     esac
 done
 
-mp() { MOUNT_ROOT="$TMP" MOUNTPOINT_BIN=/bin/false "$USB" --print-mountpoint "$@"; }
+mp() { MOUNT_ROOT="$TMP" MOUNTPOINT_BIN=/bin/false "$DRIVE" --print-mountpoint "$@"; }
 
 check "label/plain" "$TMP/RECORDINGS" "$(mp RECORDINGS sda1)"
 check "label/spaces" "$TMP/MY_STICK" "$(mp "MY STICK" sda1)"
@@ -119,7 +119,7 @@ check "collision/walks-on" "$TMP/TAKEN-3" "$(mp TAKEN sda1)"
 mkdir -p "$TMP/EMPTY"
 check "collision/reuses-empty" "$TMP/EMPTY" "$(mp EMPTY sda1)"
 
-check_fails "usb/requires-args" "$USB"
+check_fails "drive/requires-args" "$DRIVE"
 
 # -------------------------------------------------------------- format-drive
 
@@ -127,7 +127,7 @@ lbl() { "$FMT" --print-label-check "$1"; }
 
 # 11 characters is exFAT's volume-label limit — a filesystem fact. The
 # label becomes the volume name, then the mount basename, then the tile,
-# so validating to ASCII here makes usb-mount.sh's sanitiser a no-op on
+# so validating to ASCII here makes drive-mount.sh's sanitiser a no-op on
 # drives the appliance formatted itself.
 check "label/default" ok "$(lbl TRIBUTARY)"
 check "label/punctuation" ok "$(lbl FIELD_REC-1)"
@@ -139,6 +139,111 @@ check "label/slash" refused "$(lbl 'a/b')"
 check "label/unicode" refused "$(lbl 'café')"
 check_fails "format/requires-a-verb" "$FMT"
 check_fails "format/rejects-unknown-verb" "$FMT" wipe /dev/sda X
+
+fs() { "$FMT" --print-fs-check "$1"; }
+
+# Two filesystems and no others. exFAT for a drive that gets unplugged and
+# opened on a laptop; ext4 for one that lives in the recorder. Anything
+# else is refused rather than passed through to mkfs.
+check "fs/exfat" ok "$(fs exfat)"
+check "fs/ext4" ok "$(fs ext4)"
+check "fs/ntfs-not-offered" refused "$(fs ntfs)"
+check "fs/empty" refused "$(fs '')"
+check "fs/injection" refused "$(fs 'ext4 /dev/mmcblk0')"
+
+# ------------------------------------------------------- block-device facts
+
+# The guard that replaced ID_BUS=="usb". A fixture sysfs tree and mountinfo
+# file are enough to exercise it with no root and no real disk, which is the
+# whole reason the helpers take $SYS_BLOCK and $MOUNTINFO from the
+# environment.
+#
+# Layout: an SD card (179:0) with two partitions, a USB stick (8:0) with
+# one, and an NVMe SSD (259:0) with one.
+readonly SYSB="$TMP/sysblock"
+mkdir -p "$SYSB"
+mkdev() { # <devno> <path-under-$TMP/devices> [partition]
+    local devno="$1" path="$TMP/devices/$2"
+    mkdir -p "$path"
+    # Newline-terminated, exactly as the kernel writes it.
+    printf '%s\n' "$devno" >"$path/dev"
+    [ "${3:-}" = partition ] && : >"$path/partition"
+    ln -sfn "$path" "$SYSB/$devno"
+}
+mkdev 179:0 mmcblk0
+mkdev 179:1 mmcblk0/mmcblk0p1 partition
+mkdev 179:2 mmcblk0/mmcblk0p2 partition
+mkdev 8:0 sda
+mkdev 8:1 sda/sda1 partition
+mkdev 259:0 nvme0n1
+mkdev 259:1 nvme0n1/nvme0n1p1 partition
+
+# mountinfo: field 3 is major:minor, field 5 is the mount point.
+cat >"$TMP/mountinfo-sd" <<'MI'
+26 1 179:2 / / rw,noatime - ext4 /dev/mmcblk0p2 rw
+27 26 179:1 / /boot/firmware rw - vfat /dev/mmcblk0p1 rw
+40 26 8:1 / /media/STICK rw - exfat /dev/sda1 rw
+MI
+
+sysck() { MOUNTINFO="$TMP/mountinfo-$1" SYS_BLOCK="$SYSB" "$FMT" --print-system-check "$2"; }
+
+check "system/sd-boot-disk" system "$(sysck sd 179:0)"
+check "system/sd-boot-partition" system "$(sysck sd 179:2)"
+check "system/sd-boot-firmware" system "$(sysck sd 179:1)"
+check "system/usb-stick-is-not" other "$(sysck sd 8:0)"
+check "system/usb-partition-is-not" other "$(sysck sd 8:1)"
+# The case the old bus test got wrong in the other direction: an NVMe that
+# is merely attached is fair game.
+check "system/nvme-attached-is-not" other "$(sysck sd 259:0)"
+check "system/unknown-devno" other "$(sysck sd 253:7)"
+
+# Boot from NVMe and the answer flips — which is the point. A bus test
+# could never do this: it would have called the same drive formattable.
+cat >"$TMP/mountinfo-nvme" <<'MI'
+26 1 259:1 / / rw,noatime - ext4 /dev/nvme0n1p1 rw
+40 26 8:1 / /media/STICK rw - exfat /dev/sda1 rw
+MI
+# Root on a whole disk with /boot on one of its partitions: the two
+# lookups take different branches of parent_devno, which is precisely the
+# shape that used to concatenate into one meaningless devno and quietly
+# stop recognising the boot disk.
+cat >"$TMP/mountinfo-wholedisk" <<'MI'
+26 1 8:0 / / rw,noatime - ext4 /dev/sda rw
+27 26 8:1 / /boot rw - vfat /dev/sda1 rw
+MI
+check "system/mixed-branch-lookup" system "$(sysck wholedisk 8:0)"
+check "system/mixed-branch-other-disk" other "$(sysck wholedisk 179:0)"
+
+check "system/nvme-boot-disk" system "$(sysck nvme 259:0)"
+check "system/nvme-boot-partition" system "$(sysck nvme 259:1)"
+check "system/sd-is-not-when-nvme-booted" other "$(sysck nvme 179:0)"
+
+# Both helpers must answer identically: they share one implementation, and
+# a copy that drifted is exactly what this asserts cannot happen.
+check "system/mount-helper-agrees" \
+    "$(sysck sd 179:0)" \
+    "$(MOUNTINFO="$TMP/mountinfo-sd" SYS_BLOCK="$SYSB" "$DRIVE" --print-system-check 179:0)"
+check "system/mount-helper-agrees-negative" \
+    "$(sysck sd 8:0)" \
+    "$(MOUNTINFO="$TMP/mountinfo-sd" SYS_BLOCK="$SYSB" "$DRIVE" --print-system-check 8:0)"
+
+# The partition node is read back from the kernel rather than spelled:
+# ${DEV}1 is sda1 but nvme0n11, which is nothing.
+cat >"$TMP/fake-lsblk" <<'LSB'
+#!/usr/bin/env bash
+case "${!#}" in
+/dev/sda) printf '/dev/sda disk\n/dev/sda1 part\n' ;;
+/dev/nvme0n1) printf '/dev/nvme0n1 disk\n/dev/nvme0n1p1 part\n' ;;
+/dev/mmcblk0) printf '/dev/mmcblk0 disk\n/dev/mmcblk0p1 part\n/dev/mmcblk0p2 part\n' ;;
+esac
+LSB
+chmod +x "$TMP/fake-lsblk"
+partnode() { LSBLK="$TMP/fake-lsblk" "$FMT" --print-part-node "$1"; }
+
+check "part-node/sata" /dev/sda1 "$(partnode /dev/sda)"
+check "part-node/nvme" /dev/nvme0n1p1 "$(partnode /dev/nvme0n1)"
+check "part-node/mmc-takes-the-first" /dev/mmcblk0p1 "$(partnode /dev/mmcblk0)"
+check "part-node/no-partition" "" "$(partnode /dev/sdz)"
 
 # --------------------------------------------------------------- ap-prepare
 
@@ -274,6 +379,75 @@ check "pam/no-pam-limits-caught" "systemd-user: no pam_limits" "$(pam "$TMP/pam-
 # And a rootfs with no systemd-user at all is a failure, not a pass.
 mkdir -p "$TMP/pam-empty"
 check "pam/missing-file-is-not-ok" "systemd-user: not found" "$(pam "$TMP/pam-empty")"
+
+# ---------------------------------------------------------- soundfonts
+
+# The manifest parser, against a fixture manifest — no network, no 380 MB.
+# It is exercised at all because it already hid a real bug: the key class
+# was [a-z_]+, which does not match `sha256`, so every hash parsed as empty
+# and every file compared unequal. That surfaced as "corrupt GeneralUser-
+# GS.sf2" on a byte-perfect download — a parser fault wearing a data
+# fault's clothes.
+readonly FETCH="$HERE/../fetch-soundfonts.sh"
+cat >"$TMP/manifest.toml" <<'MF'
+# A comment that must not parse as a key.
+[[soundfont]]
+id = "Alpha.sf2"
+name = "Alpha Bank"
+version = "1.2"
+default = true
+bytes = 12
+sha256 = "aaaa"
+url = "https://example.invalid/alpha.sf2"
+license = "MIT"
+license_url = "https://example.invalid/alpha"
+author = "A. Person, with a comma"
+description = "first"
+
+[[soundfont]]
+id = "Beta.sf2"
+name = "Beta Bank"
+version = "3.1"
+bytes = 34
+sha256 = "bbbb"
+archive_sha256 = "cccc"
+archive_member = "beta-3.1/Beta.sf2"
+url = "https://example.invalid/beta.tar.gz"
+license = "MIT"
+license_url = "https://example.invalid/beta"
+author = "B. Person"
+description = "second"
+MF
+sf() { MANIFEST="$TMP/manifest.toml" DEST="$TMP/sfdist" "$FETCH" "$@"; }
+
+check "soundfonts/ids" "Alpha.sf2 Beta.sf2" "$(sf --print-ids | tr '\n' ' ' | sed 's/ $//')"
+# Exactly one default, attributed to its own font rather than to whichever
+# block was read last.
+check "soundfonts/default" "Alpha.sf2" "$(sf --print-default)"
+
+# Values containing spaces and commas must survive whole. awk's default
+# whitespace splitting truncated every one of these at the first space.
+ATTRIB="$(sf --print-attribution)"
+check "soundfonts/attribution-name" \
+    "- **Alpha Bank** 1.2 by A. Person, with a comma — MIT. <https://example.invalid/alpha>" \
+    "$(printf '%s\n' "$ATTRIB" | grep '^- \*\*Alpha')"
+check "soundfonts/attribution-lists-every-font" 2 \
+    "$(printf '%s\n' "$ATTRIB" | grep -c '^- \*\*')"
+check "soundfonts/attribution-has-a-heading" "## SoundFonts" \
+    "$(printf '%s\n' "$ATTRIB" | head -1)"
+
+# --check never downloads, and says which of the two failure shapes it is.
+mkdir -p "$TMP/sfdist"
+check_fails "soundfonts/check-reports-missing" sf --check
+check "soundfonts/missing-names-the-file" 1 \
+    "$(sf --check 2>&1 | grep -c 'missing  Alpha.sf2')"
+# 12 bytes whose sha256 is not "aaaa": present but wrong is a different
+# sentence from absent, because the fix is different.
+printf '%s' 'not the font' >"$TMP/sfdist/Alpha.sf2"
+check "soundfonts/corrupt-is-not-missing" 1 \
+    "$(sf --check 2>&1 | grep -c 'corrupt  Alpha.sf2')"
+
+check_fails "soundfonts/rejects-unknown-mode" sf --nope
 
 # ------------------------------------------------ pipewire rate agreement
 

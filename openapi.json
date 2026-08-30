@@ -66,7 +66,7 @@
             "description": "Recording, or the drive is in use"
           },
           "422": {
-            "description": "Refused — not a removable whole disk, or a bad label"
+            "description": "Refused — not a whole disk, the system disk, or a bad label"
           },
           "501": {
             "description": "This installation has no format helper"
@@ -890,6 +890,45 @@
           },
           "409": {
             "description": "An instrument is using it, or tape is rolling"
+          }
+        }
+      }
+    },
+    "/api/v1/soundfonts/{name}/presets": {
+      "get": {
+        "summary": "The presets inside one library file.",
+        "description": "Its own endpoint rather than a field on `InstrumentsDto`: a General MIDI\nbank has around 300 of these, three are bundled, and the instruments\ndocument is fetched on every mixer change. The console asks for the one\nfont it is showing a picker for.\n\nReading them means parsing the whole file, which for a 206 MB bank is\nreal work — hence `spawn_blocking`, and hence the console asking once\nper soundfont rather than per render.",
+        "operationId": "list_presets",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Library id, e.g. GeneralUser-GS.sf2",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every preset in the file, by bank then program",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PresetDto"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such soundfont in the library"
+          },
+          "422": {
+            "description": "Present, but not a SoundFont this daemon can read"
           }
         }
       }
@@ -1857,6 +1896,7 @@
           "label",
           "total_bytes",
           "removable",
+          "transport",
           "state"
         ],
         "properties": {
@@ -1917,6 +1957,10 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "transport": {
+            "$ref": "#/components/schemas/Transport",
+            "description": "How the drive is attached, for the tile's icon and the word beside\nits size. Cosmetic — nothing is gated on it."
           }
         }
       },
@@ -2023,6 +2067,14 @@
         ],
         "description": "Which fader a level command addresses; doubles as the mute/PFL/rename\ntarget (the master supports only fader moves in v1 — see `apply`)."
       },
+      "Filesystem": {
+        "type": "string",
+        "description": "The filesystem to lay down.\n\nexFAT for a drive that gets unplugged and opened on a laptop; ext4 for\none that lives in the recorder, where journalling and real ownership\nare worth more than being readable on macOS.",
+        "enum": [
+          "exfat",
+          "ext4"
+        ]
+      },
       "FormatRequest": {
         "type": "object",
         "required": [
@@ -2032,11 +2084,15 @@
         "properties": {
           "device": {
             "type": "string",
-            "description": "The whole disk, as `DriveDto.disk` names it (\"/dev/sda\"). A\npartition is refused: formatting one strands the rest of the drive."
+            "description": "The whole disk, as `DriveDto.disk` names it (\"/dev/sda\",\n\"/dev/nvme0n1\"). A partition is refused by the helper, which can\nread /sys/dev/block and actually tell."
+          },
+          "filesystem": {
+            "$ref": "#/components/schemas/Filesystem",
+            "description": "Defaulted rather than required, so a client that predates the\npicker keeps meaning what it used to mean."
           },
           "label": {
             "type": "string",
-            "description": "The exFAT volume label, which becomes the drive's printed name."
+            "description": "The volume label, which becomes the drive's printed name. 11\ncharacters, exFAT's limit, for both filesystems."
           }
         }
       },
@@ -3723,6 +3779,13 @@
               "string",
               "null"
             ]
+          },
+          "soundfont": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A library id to give it straight away, so a new instrument can make\na sound without a second round trip. Optional: an instrument with\nno voice is a valid, silent one, and the console says so."
           }
         },
         "additionalProperties": false
@@ -4154,6 +4217,30 @@
           "supported": {
             "type": "boolean",
             "description": "Whether this backend can drive patchable outputs at all. False\nmakes every mutation a 501 rather than a silent no-op."
+          }
+        }
+      },
+      "PresetDto": {
+        "type": "object",
+        "description": "One selectable sound inside a SoundFont.",
+        "required": [
+          "bank",
+          "program",
+          "name"
+        ],
+        "properties": {
+          "bank": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "program": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           }
         }
       },
@@ -4815,6 +4902,7 @@
         "type": "string",
         "description": "Where a file came from. Drives what the console offers to do with it.",
         "enum": [
+          "built_in",
           "internal",
           "removable"
         ]
@@ -5708,6 +5796,17 @@
             "minimum": 0
           }
         }
+      },
+      "Transport": {
+        "type": "string",
+        "description": "How a drive is attached.\n\nDescription, never permission. This used to be policy: the automount\nrule fired only for `ID_BUS=usb`, and the console refused to format\nanything it had not called removable — which between them made an NVMe\nSSD, the best medium this recorder can write to, unreachable. What\nactually has to be refused is the disk the system booted from, and that\nis `DriveState::System`, derived from the live mount table.\n\nSo this exists to pick an icon and print a word.",
+        "enum": [
+          "usb",
+          "nvme",
+          "sd",
+          "sata",
+          "other"
+        ]
       },
       "TransportDto": {
         "type": "object",

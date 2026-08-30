@@ -6,6 +6,16 @@ dist
 # Runtime-written state (recording destination prefs), not config to ship.
 /config/recording.toml
 
+# SoundFonts are fetched, never committed. soundfonts/manifest.toml is the
+# tracked source of truth — the bytes themselves are ~380 MB of PCM that
+# git would carry forever, so `scripts/fetch-soundfonts.sh` pulls them and
+# checks them against the manifest's hashes instead.
+#
+# /soundfonts is also the daemon's own library root when it runs from the
+# repo, so an uploaded .sf2 lands here too; neither belongs in a commit.
+/soundfonts/dist/
+/soundfonts/*.sf2
+
 # Tool and editor droppings.
 .serena/
 .DS_Store

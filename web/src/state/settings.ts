@@ -8,6 +8,8 @@ import { create } from 'zustand';
 
 import { $api } from '../api/client';
 import type { components } from '../api/generated/schema';
+import type { Transport } from '../features/setup/drives-logic';
+import type { Filesystem } from '../features/setup/format-logic';
 import { saveErrorMessage } from '../features/setup/settings-logic';
 
 export type RecordingFormat = components['schemas']['RecordFormat'];
@@ -35,6 +37,8 @@ export interface Destination {
   device: string | null;
   label: string;
   filesystem: string | null;
+  /** How it is attached — an icon and a printed word, never a permission. */
+  transport: Transport;
   totalBytes: number;
   /** `null` until it is mounted — free space is a statvfs answer. */
   freeBytes: number | null;
@@ -111,6 +115,7 @@ const fromDrives = (drives: readonly DriveDto[]): Destination[] =>
     totalBytes: d.total_bytes,
     freeBytes: d.available_bytes ?? null,
     removable: d.removable,
+    transport: d.transport,
     state: d.state,
     reason: d.reason ?? null,
     disk: d.disk ?? null,
@@ -138,17 +143,21 @@ export function applyDestinations(drives: readonly DriveDto[]): void {
 }
 
 /**
- * Wipe a drive and lay down one exFAT volume. Returns `null` on success,
- * else a sentence to show. Not optimistic: there is no honest way to
- * predict what a drive becomes, and the confirmation is the pushed
- * `destinations` update showing the reformatted drive — the same idiom
- * `setCardProfile` uses for a card-profile switch.
+ * Wipe a drive and lay down one volume. Returns `null` on success, else a
+ * sentence to show. Not optimistic: there is no honest way to predict what
+ * a drive becomes, and the confirmation is the pushed `destinations`
+ * update showing the reformatted drive — the same idiom `setCardProfile`
+ * uses for a card-profile switch.
  */
-export async function formatDrive(device: string, label: string): Promise<string | null> {
+export async function formatDrive(
+  device: string,
+  label: string,
+  filesystem: Filesystem,
+): Promise<string | null> {
   const { formatErrorMessage } = await import('../features/setup/format-logic');
   try {
     const { error, response } = await $api.POST('/api/v1/destinations/format', {
-      body: { device, label },
+      body: { device, label, filesystem },
     });
     if (!error) return null;
     const detail = (error as { detail?: string } | undefined)?.detail;

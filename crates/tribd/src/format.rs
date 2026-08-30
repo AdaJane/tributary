@@ -1,4 +1,4 @@
-//! Formatting a USB drive to exFAT, via the appliance's privileged helper.
+//! Formatting an attached drive, via the appliance's privileged helper.
 //!
 //! The daemon has no privilege to partition anything — it runs as a
 //! nologin service account under a systemd *user* unit. A sudoers drop-in
@@ -8,6 +8,13 @@
 //! independently too; neither layer trusts the other, because each can
 //! check something the other cannot — the helper owns kernel facts, and
 //! only the daemon knows whether tape is rolling or where it is recording.
+//!
+//! Note where the line between the two falls. This module guards the
+//! *shape* of what it forwards; the helper decides what the device
+//! actually is. Deciding "whole disk" from a device name is guesswork —
+//! `sda1` is a partition and `nvme0n1` is not, and no amount of string
+//! reading settles it — while the helper can read `/sys/dev/block` and the
+//! mount table, which settle it exactly.
 
 use std::path::Path;
 use std::process::Command;
@@ -20,9 +27,40 @@ pub const HELPER: &str = "/usr/local/lib/tributary/format-drive.sh";
 /// mkfs.exfat on a 64 GB stick is seconds; this only has to bound a hang.
 const TIMEOUT: Duration = Duration::from_secs(600);
 
+/// The filesystem to lay down.
+///
+/// exFAT for a drive that gets unplugged and opened on a laptop; ext4 for
+/// one that lives in the recorder, where journalling and real ownership
+/// are worth more than being readable on macOS.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
+pub enum Filesystem {
+    #[serde(rename = "exfat")]
+    Exfat,
+    #[serde(rename = "ext4")]
+    Ext4,
+}
+
+impl Filesystem {
+    /// The token the helper takes — and, by the test below, byte-identical
+    /// to the one the console sends. Two spellings of one filesystem is
+    /// the kind of drift that ends with mkfs never being reached.
+    pub const fn as_arg(self) -> &'static str {
+        match self {
+            Self::Exfat => "exfat",
+            Self::Ext4 => "ext4",
+        }
+    }
+}
+
 /// exFAT's volume label limit — a filesystem fact, mirrored from the
 /// helper's own check so the console can refuse before a round trip. The
 /// helper's answer is authoritative; this one only greys out a button.
+///
+/// ext4 would allow 16 characters and still gets 11: one rule the helper,
+/// the daemon and the console can all state identically is worth more than
+/// five characters on one of the two filesystems.
 pub fn validate_label(label: &str) -> Result<(), String> {
     if label.is_empty() || label.len() > 11 {
         return Err("label must be 1-11 characters".into());
@@ -36,16 +74,26 @@ pub fn validate_label(label: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A whole-disk device node, and nothing that could be anything else.
-/// Partitions are refused here as well as in the helper: formatting one
-/// would strand the rest of the drive, which is the problem the feature
-/// exists to solve.
+/// A device node under `/dev`, named by exactly one path component.
+///
+/// This is a shape guard, not a semantic one. It exists so nothing that
+/// could traverse, glob or carry a separator reaches the helper's argument
+/// list — and it stops there, deliberately.
+///
+/// It used to require every character to be lowercase, which read like a
+/// whole-disk test and was really an alphabet test: it accepted `sda` and
+/// rejected `sda1`, and so also rejected `nvme0n1`, `mmcblk0` and every
+/// other disk whose name carries a digit. Whether a node is a whole disk
+/// is answered in the helper from `/sys/dev/block/<devno>/partition`,
+/// which is the only place that can answer it truthfully.
 pub fn validate_device(device: &str) -> Result<(), String> {
-    let ok = device
-        .strip_prefix("/dev/")
-        .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase()));
+    let ok = device.strip_prefix("/dev/").is_some_and(|n| {
+        !n.is_empty()
+            && n.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+    });
     if !ok {
-        return Err(format!("not a whole-disk device node: {device}"));
+        return Err(format!("not a device node: {device}"));
     }
     Ok(())
 }
@@ -75,9 +123,9 @@ pub enum FormatError {
     Internal(String),
 }
 
-/// Blocking: wipe `device` and lay down one exFAT volume labelled `label`.
+/// Blocking: wipe `device` and lay down one volume labelled `label`.
 /// Call via `spawn_blocking`.
-pub fn run(device: &str, label: &str) -> Result<(), FormatError> {
+pub fn run(device: &str, label: &str, filesystem: Filesystem) -> Result<(), FormatError> {
     validate_device(device).map_err(FormatError::Refused)?;
     validate_label(label).map_err(FormatError::Refused)?;
 
@@ -85,7 +133,15 @@ pub fn run(device: &str, label: &str) -> Result<(), FormatError> {
     // defended against is naming the wrong device, not quoting.
     let out = Command::new("timeout")
         .arg(TIMEOUT.as_secs().to_string())
-        .args(["sudo", "-n", HELPER, "format", device, label])
+        .args([
+            "sudo",
+            "-n",
+            HELPER,
+            "format",
+            device,
+            label,
+            filesystem.as_arg(),
+        ])
         .output()
         .map_err(|e| FormatError::Internal(e.to_string()))?;
 
@@ -123,17 +179,53 @@ mod tests {
         assert!(validate_label("café").is_err());
     }
 
-    /// A partition is not a format target, and neither is anything that
-    /// could walk out of /dev.
+    /// The shape guard admits any single node name under /dev — including
+    /// the ones with digits, which is the whole point — and nothing that
+    /// could walk out of it or split into a second argument.
     #[test]
-    fn only_whole_disk_nodes_are_accepted() {
-        assert!(validate_device("/dev/sda").is_ok());
-        assert!(validate_device("/dev/sdb").is_ok());
-        assert!(validate_device("/dev/sda1").is_err(), "partition");
-        assert!(validate_device("/dev/mmcblk0p2").is_err(), "partition");
-        assert!(validate_device("/dev/../etc/passwd").is_err());
-        assert!(validate_device("sda").is_err());
-        assert!(validate_device("/dev/").is_err());
-        assert!(validate_device("").is_err());
+    fn device_names_are_one_component_under_dev() {
+        for ok in [
+            "/dev/sda",
+            "/dev/sdb",
+            // The names the old lowercase-only rule silently refused.
+            "/dev/nvme0n1",
+            "/dev/mmcblk0",
+        ] {
+            assert!(validate_device(ok).is_ok(), "{ok} should be accepted");
+        }
+        for bad in [
+            "/dev/../etc/passwd",
+            "/dev/disk/by-id/usb-x",
+            "sda",
+            "/dev/",
+            "",
+            "/dev/sda /dev/mmcblk0",
+            "/dev/sda;rm -rf /",
+            "/dev/sda\u{0}",
+        ] {
+            assert!(validate_device(bad).is_err(), "{bad:?} should be refused");
+        }
+    }
+
+    /// Partitions are NOT refused here any more, and that is deliberate:
+    /// the name cannot tell you (`nvme0n1` is a disk, `sda1` is not, and
+    /// both are "letters then digits"). The helper reads
+    /// /sys/dev/block/<devno>/partition and refuses on the evidence.
+    #[test]
+    fn deciding_whole_disk_is_left_to_the_helper() {
+        assert!(validate_device("/dev/sda1").is_ok());
+        assert!(validate_device("/dev/nvme0n1p1").is_ok());
+    }
+
+    /// One filesystem, one spelling. The wire token, the helper argument
+    /// and the enum cannot drift apart without this failing.
+    #[test]
+    fn the_wire_token_and_the_helper_argument_are_the_same_string() {
+        for fs in [Filesystem::Exfat, Filesystem::Ext4] {
+            let wire = serde_json::to_string(&fs).expect("serialize");
+            assert_eq!(wire, format!("\"{}\"", fs.as_arg()));
+            let back: Filesystem = serde_json::from_str(&wire).expect("round trip");
+            assert_eq!(back, fs);
+        }
     }
 }

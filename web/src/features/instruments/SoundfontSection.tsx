@@ -11,6 +11,7 @@ import {
   formatBytes,
   groupSoundfonts,
   progressLine,
+  ramNotice,
   uploadErrorMessage,
   validateUpload,
 } from './soundfont-logic';
@@ -100,7 +101,13 @@ export function SoundfontSection({
                 return (
                   <li key={file.path} className={styles.file}>
                     <span className={styles.fileName}>{file.id}</span>
-                    <span className={styles.hint}>{formatBytes(file.bytes)}</span>
+                    {/* The memory line, not just the size: a 206 MB bank
+                        costs about 206 MB of RAM for as long as it is
+                        loaded, and on a 2 GB Pi that is worth knowing
+                        before a take rather than during one. */}
+                    <span className={styles.hint}>
+                      {ramNotice(file.bytes) ?? formatBytes(file.bytes)}
+                    </span>
                     <ActionButton
                       label="Remove"
                       ariaLabel={`Remove ${file.id} from the library`}

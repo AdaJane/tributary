@@ -85,6 +85,42 @@ impl DriveState {
     }
 }
 
+/// How a drive is attached.
+///
+/// Description, never permission. This used to be policy: the automount
+/// rule fired only for `ID_BUS=usb`, and the console refused to format
+/// anything it had not called removable — which between them made an NVMe
+/// SSD, the best medium this recorder can write to, unreachable. What
+/// actually has to be refused is the disk the system booted from, and that
+/// is `DriveState::System`, derived from the live mount table.
+///
+/// So this exists to pick an icon and print a word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Transport {
+    Usb,
+    Nvme,
+    /// An SD/MMC card, including the one the appliance boots from.
+    Sd,
+    Sata,
+    /// Attached by something we have no better word for, or by nothing
+    /// lsblk would name.
+    Other,
+}
+
+impl Transport {
+    /// lsblk's `TRAN`, which is a free-form string we deliberately narrow.
+    fn from_tran(tran: Option<&str>) -> Self {
+        match tran {
+            Some("usb") => Self::Usb,
+            Some("nvme") => Self::Nvme,
+            Some("mmc") => Self::Sd,
+            Some("sata" | "ata") => Self::Sata,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// One filesystem a recording could land on — mounted or not.
 #[derive(Debug, Clone)]
 pub struct Drive {
@@ -97,6 +133,9 @@ pub struct Drive {
     /// Only knowable while mounted.
     pub available_bytes: Option<u64>,
     pub removable: bool,
+    /// How the drive is attached. Cosmetic: it names the icon and the word
+    /// beside the size, and gates nothing.
+    pub transport: Transport,
     pub state: DriveState,
     /// The whole disk this lives on, for grouping in the console.
     pub disk: Option<String>,
@@ -125,6 +164,12 @@ pub struct Node {
     pub ro: bool,
     #[serde(default)]
     pub tran: Option<String>,
+    /// The kernel's own "this can come and go" bit. Unlike `rm` (the SCSI
+    /// removable bit, which plenty of sticks report as 0) it is set by the
+    /// bus driver — but it is false for a USB stick on some kernels, so it
+    /// is a third opinion rather than the answer.
+    #[serde(default)]
+    pub hotplug: bool,
     #[serde(default)]
     pub children: Vec<Node>,
 }
@@ -196,12 +241,31 @@ pub fn system_disks(nodes: &[Node]) -> BTreeSet<String> {
 }
 
 /// Removability, resolved through the parent. `tran` is set on the parent
-/// disk but null on the partitions of a USB stick — while an SD card
-/// carries `mmc` on both — so a partition must ask its disk. `rm` alone is
-/// unreliable: plenty of USB sticks report the SCSI removable bit as 0.
+/// disk but null on the partitions of a USB stick — while an SD card and
+/// an NVMe drive carry theirs on both — so a partition must ask its disk.
+/// `rm` alone is unreliable: plenty of USB sticks report the SCSI
+/// removable bit as 0, hence `hotplug` as a third opinion.
+///
+/// Nothing is refused on this any more. It picks the format dialog's
+/// default filesystem and the tile's icon, and that is all: a fixed disk
+/// is just as valid a place to record as a stick.
 fn removable(node: &Node, disk: Option<&Node>) -> bool {
     let usb = |n: &Node| n.tran.as_deref() == Some("usb");
-    usb(node) || disk.is_some_and(usb) || node.rm || disk.is_some_and(|d| d.rm)
+    usb(node)
+        || disk.is_some_and(usb)
+        || node.rm
+        || disk.is_some_and(|d| d.rm)
+        || node.hotplug
+        || disk.is_some_and(|d| d.hotplug)
+}
+
+/// How this volume is attached, resolved through the parent for the same
+/// reason removability is.
+fn transport(node: &Node, disk: Option<&Node>) -> Transport {
+    match Transport::from_tran(node.tran.as_deref()) {
+        Transport::Other => Transport::from_tran(disk.and_then(|d| d.tran.as_deref())),
+        known => known,
+    }
 }
 
 /// The precedence table. `writable` is the probe's answer, `None` when the
@@ -282,7 +346,7 @@ fn run_lsblk() -> Option<String> {
             "--json",
             "-b",
             "-o",
-            "NAME,PATH,TYPE,SIZE,FSTYPE,LABEL,MOUNTPOINTS,RM,RO,TRAN",
+            "NAME,PATH,TYPE,SIZE,FSTYPE,LABEL,MOUNTPOINTS,RM,RO,TRAN,HOTPLUG",
         ])
         .output()
         .ok()?;
@@ -334,6 +398,7 @@ pub fn enumerate() -> Vec<Drive> {
                 filesystem: node.fstype.clone(),
                 mount_point: mount,
                 removable,
+                transport: transport(node, disk),
                 disk: disk_path,
             }
         })
@@ -375,8 +440,19 @@ mod tests {
     /// `bootfs` and 3 GB ext4 `rootfs` — with ~54 GB unallocated.
     const APPLIANCE: &str = include_str!("../tests/fixtures/lsblk-appliance.json");
 
+    /// A Pi 5 booting from its SD card with a 2 TB NVMe SSD on the M.2
+    /// slot — the arrangement this feature exists for. Shaped from a real
+    /// `lsblk` capture, including the detail that NVMe carries `tran` on
+    /// the partitions as well as the disk, where USB carries it only on
+    /// the disk.
+    const NVME: &str = include_str!("../tests/fixtures/lsblk-nvme.json");
+
     fn nodes() -> Vec<Node> {
         parse_lsblk(APPLIANCE).expect("fixture parses")
+    }
+
+    fn nvme_nodes() -> Vec<Node> {
+        parse_lsblk(NVME).expect("fixture parses")
     }
 
     #[test]
@@ -452,6 +528,7 @@ mod tests {
             rm: true,
             ro,
             tran: None,
+            hotplug: false,
             children: vec![],
         }
     }
@@ -547,5 +624,135 @@ mod tests {
                 "usable drives sort first: {drives:?}"
             );
         }
+    }
+
+    // ------------------------------------------------------------- NVMe
+
+    #[test]
+    fn the_nvme_fixture_nests_like_any_other_disk() {
+        let nodes = nvme_nodes();
+        let nvme = nodes.iter().find(|n| n.name == "nvme0n1").unwrap();
+        assert_eq!(nvme.children.len(), 1);
+        // p1, not 1 — the naming that made `${DEV}1` wrong in the helper.
+        assert_eq!(nvme.children[0].path, "/dev/nvme0n1p1");
+        assert_eq!(nvme.children[0].mount(), Some("/media/TRIBUTARY"));
+    }
+
+    /// The whole point. An attached NVMe is an ordinary candidate, and the
+    /// SD card it booted from is not — decided by the mount table, not by
+    /// how either one is plugged in.
+    #[test]
+    fn an_attached_nvme_is_a_candidate_and_the_boot_card_is_not() {
+        let nodes = nvme_nodes();
+        let system = system_disks(&nodes);
+        assert!(
+            system.contains("/dev/mmcblk0"),
+            "boot card is the system disk"
+        );
+        assert!(!system.contains("/dev/nvme0n1"), "attached NVMe is not");
+
+        let pairs = walk(&nodes);
+        let (part, disk) = pairs
+            .iter()
+            .find(|(n, _)| n.path == "/dev/nvme0n1p1")
+            .copied()
+            .unwrap();
+        assert_eq!(
+            classify(part, part.size, false, Some(true)),
+            DriveState::Ready,
+            "a mounted, writable NVMe volume is ready to record to"
+        );
+        assert_eq!(transport(part, disk), Transport::Nvme);
+    }
+
+    /// Boot from the NVMe instead and the answer flips, with no change to
+    /// anything about the drive itself. A transport test could never do
+    /// this: it would have called the same disk formattable either way.
+    ///
+    /// The mount is moved on the parsed nodes rather than in the fixture
+    /// text — the assertion is about where `/` lives, and editing JSON by
+    /// substring would make it about whitespace.
+    #[test]
+    fn booting_from_the_nvme_makes_it_the_system_disk() {
+        let mut nodes = nvme_nodes();
+        for disk in &mut nodes {
+            for part in &mut disk.children {
+                part.mountpoints = match part.path.as_str() {
+                    "/dev/nvme0n1p1" => vec![Some("/".into())],
+                    "/dev/mmcblk0p2" => vec![None],
+                    _ => std::mem::take(&mut part.mountpoints),
+                };
+            }
+        }
+        let system = system_disks(&nodes);
+        assert!(system.contains("/dev/nvme0n1"), "now the system disk");
+        // And the card stays one too, because it still holds
+        // /boot/firmware — which is exactly the Pi 5 arrangement where the
+        // firmware lives on the SD and the root filesystem on the SSD.
+        // Both disks are off limits, and for the same stated reason.
+        assert!(
+            system.contains("/dev/mmcblk0"),
+            "a disk carrying /boot/firmware is a system disk even when / is elsewhere"
+        );
+
+        let pairs = walk(&nodes);
+        let (part, _) = pairs
+            .iter()
+            .find(|(n, _)| n.path == "/dev/nvme0n1p1")
+            .copied()
+            .unwrap();
+        assert_eq!(
+            classify(part, part.size, true, Some(true)),
+            DriveState::System,
+            "System wins the precedence order over every other state"
+        );
+    }
+
+    /// Transport resolves through the parent, because USB reports it only
+    /// on the disk. It names an icon and nothing else.
+    #[test]
+    fn transport_resolves_through_the_parent() {
+        let nodes = nodes();
+        let pairs = walk(&nodes);
+        let usb_part = pairs.iter().find(|(n, _)| n.path == "/dev/sda1").unwrap();
+        assert_eq!(usb_part.0.tran, None, "USB leaves it null on partitions");
+        assert_eq!(transport(usb_part.0, usb_part.1), Transport::Usb);
+
+        let sd_part = pairs
+            .iter()
+            .find(|(n, _)| n.path == "/dev/mmcblk0p2")
+            .unwrap();
+        assert_eq!(transport(sd_part.0, sd_part.1), Transport::Sd);
+    }
+
+    /// A fixed disk is still removable-for-display purposes only. The bit
+    /// must not creep back into a decision: it picks an icon and the
+    /// format dialog's default filesystem.
+    #[test]
+    fn a_fixed_nvme_is_not_removable_but_is_still_a_candidate() {
+        let nodes = nvme_nodes();
+        let pairs = walk(&nodes);
+        let (part, disk) = pairs
+            .iter()
+            .find(|(n, _)| n.path == "/dev/nvme0n1p1")
+            .copied()
+            .unwrap();
+        assert!(!removable(part, disk));
+        assert_eq!(
+            classify(part, part.size, false, Some(true)),
+            DriveState::Ready
+        );
+    }
+
+    /// `hotplug` is the third opinion, for the sticks that report the SCSI
+    /// removable bit as 0 and carry no `usb` transport of their own.
+    #[test]
+    fn hotplug_alone_is_enough_to_call_a_drive_removable() {
+        let mut node = node_with(Some("exfat"), false);
+        node.rm = false;
+        node.tran = None;
+        assert!(!removable(&node, None));
+        node.hotplug = true;
+        assert!(removable(&node, None));
     }
 }

@@ -3,4 +3,12 @@
 # host requirement is ALSA (libasound2), deliberately NOT bundled — it
 # dlopens host-specific plugins and configuration.
 HERE="$(dirname "$(readlink -f "$0")")"
+# An AppImage has no fixed install prefix, and the daemon's default
+# builtin_root is an absolute /usr/share path that does not exist here.
+# The bundled sounds would be invisible without this — and the daemon
+# would honestly report an empty library, which is the worst kind of
+# correct. Only set when the caller has not, so a user pointing at their
+# own library still wins.
+: "${TRIB__SOUNDFONTS__BUILTIN_ROOT:=$HERE/usr/share/tributary/soundfonts}"
+export TRIB__SOUNDFONTS__BUILTIN_ROOT
 exec "$HERE/usr/bin/tribd" "$@"

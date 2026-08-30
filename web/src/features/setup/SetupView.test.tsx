@@ -42,6 +42,7 @@ const destinationsDto = {
       total_bytes: 32_000_000_000,
       available_bytes: 14_200_000_000,
       removable: true,
+      transport: 'usb',
       state: 'ready',
       reason: null,
     },
@@ -54,6 +55,7 @@ const destinationsDto = {
       total_bytes: 8_000_000_000,
       available_bytes: 1_000_000_000,
       removable: true,
+      transport: 'usb',
       state: 'read_only',
       reason: 'mounted read-only',
     },
@@ -215,6 +217,7 @@ describe('SetupView', () => {
                     total_bytes: 536_870_912,
                     available_bytes: 450_450_944,
                     removable: true,
+                    transport: 'usb',
                     state: 'too_small',
                     reason: 'too small to record onto',
                   },
@@ -227,6 +230,7 @@ describe('SetupView', () => {
                     total_bytes: 3_238_002_688,
                     available_bytes: null,
                     removable: true,
+                    transport: 'usb',
                     state: 'not_mounted',
                     reason: 'connected, but nothing mounted it',
                   },
@@ -261,7 +265,7 @@ describe('SetupView', () => {
       ) as never,
     );
     render(<SetupView />);
-    expect(await screen.findByText(/No USB drive connected/)).toBeTruthy();
+    expect(await screen.findByText(/No drive connected/)).toBeTruthy();
   });
 
   it('the REC PATH lamp goes red after a boot fallback', async () => {

@@ -6,7 +6,7 @@ daemon_port := "4600"
 ui_port := "5180"
 
 # The bar for a PR: `just check` green.
-check: fmt-check clippy test web-test script-test
+check: fmt-check clippy test web-test script-test attribution-check
 
 fmt:
     cargo fmt
@@ -39,6 +39,22 @@ script-test:
     else
         echo "shellcheck not installed — skipped"
     fi
+
+# Download the bundled SoundFonts into soundfonts/dist and verify every
+# byte against soundfonts/manifest.toml. Idempotent; ~380 MB on a cold run.
+# Needed before `just pi-image` or any packaging that ships them.
+soundfonts:
+    scripts/fetch-soundfonts.sh
+
+# Rewrite THIRD-PARTY.md's SoundFonts section from the manifest.
+attribution:
+    scripts/update-attribution.sh
+
+# A bundled sound's licence has one home. This is a drift gate like the
+# openapi one: a font added to the manifest but never attributed would
+# otherwise ship with nothing to notice.
+attribution-check:
+    scripts/update-attribution.sh --check
 
 # Regenerate the committed OpenAPI spec (CI fails on drift).
 openapi:

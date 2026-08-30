@@ -37,6 +37,10 @@ pub struct InstrumentsDto {
 #[serde(deny_unknown_fields)]
 pub struct NewInstrument {
     pub name: Option<String>,
+    /// A library id to give it straight away, so a new instrument can make
+    /// a sound without a second round trip. Optional: an instrument with
+    /// no voice is a valid, silent one, and the console says so.
+    pub soundfont: Option<String>,
 }
 
 /// Any subset of an instrument's settings. Absent fields stay put.
@@ -179,6 +183,35 @@ pub async fn create_instrument(
     let StateDelta::InstrumentAdded { instrument } = delta else {
         return Err(ApiError::Internal(
             "AddInstrument produced a foreign delta".into(),
+        ));
+    };
+    let Some(soundfont) = new.soundfont else {
+        return Ok((StatusCode::CREATED, Json(instrument)));
+    };
+    // A second reducer command rather than a field on `AddInstrument`:
+    // `SetInstrumentVoice` is where loading a soundfont already lives, and
+    // teaching the core a second way to do it would be two paths to keep
+    // agreeing. Both run inside this one request, so the console never
+    // renders the instrument in its voiceless intermediate state.
+    //
+    // Polyphony and effects are read back from the instrument the reducer
+    // just made, so its defaults are carried rather than restated here.
+    let delta = state
+        .control
+        .apply(
+            MixCommand::SetInstrumentVoice {
+                id: instrument.id,
+                soundfont: Some(soundfont),
+                polyphony: instrument.polyphony,
+                effects: instrument.effects,
+            },
+            None,
+        )
+        .await
+        .map_err(map_mix_err)?;
+    let StateDelta::InstrumentChanged { instrument } = delta else {
+        return Err(ApiError::Internal(
+            "SetInstrumentVoice produced a foreign delta".into(),
         ));
     };
     Ok((StatusCode::CREATED, Json(instrument)))

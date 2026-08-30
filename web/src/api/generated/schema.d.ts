@@ -474,6 +474,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/soundfonts/{name}/presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The presets inside one library file.
+         * @description Its own endpoint rather than a field on `InstrumentsDto`: a General MIDI
+         *     bank has around 300 of these, three are bundled, and the instruments
+         *     document is fetched on every mixer change. The console asks for the one
+         *     font it is showing a picker for.
+         *
+         *     Reading them means parsing the whole file, which for a 206 MB bank is
+         *     real work — hence `spawn_blocking`, and hence the console asking once
+         *     per soundfont rather than per render.
+         */
+        get: operations["list_presets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/state": {
         parameters: {
             query?: never;
@@ -993,6 +1020,11 @@ export interface components {
             state: components["schemas"]["DriveState"];
             /** Format: int64 */
             total_bytes: number;
+            /**
+             * @description How the drive is attached, for the tile's icon and the word beside
+             *     its size. Cosmetic — nothing is gated on it.
+             */
+            transport: components["schemas"]["Transport"];
         };
         /**
          * @description Why a drive is or is not a usable destination.
@@ -1037,13 +1069,31 @@ export interface components {
             /** @enum {string} */
             kind: "master";
         };
+        /**
+         * @description The filesystem to lay down.
+         *
+         *     exFAT for a drive that gets unplugged and opened on a laptop; ext4 for
+         *     one that lives in the recorder, where journalling and real ownership
+         *     are worth more than being readable on macOS.
+         * @enum {string}
+         */
+        Filesystem: "exfat" | "ext4";
         FormatRequest: {
             /**
-             * @description The whole disk, as `DriveDto.disk` names it ("/dev/sda"). A
-             *     partition is refused: formatting one strands the rest of the drive.
+             * @description The whole disk, as `DriveDto.disk` names it ("/dev/sda",
+             *     "/dev/nvme0n1"). A partition is refused by the helper, which can
+             *     read /sys/dev/block and actually tell.
              */
             device: string;
-            /** @description The exFAT volume label, which becomes the drive's printed name. */
+            /**
+             * @description Defaulted rather than required, so a client that predates the
+             *     picker keeps meaning what it used to mean.
+             */
+            filesystem?: components["schemas"]["Filesystem"];
+            /**
+             * @description The volume label, which becomes the drive's printed name. 11
+             *     characters, exFAT's limit, for both filesystems.
+             */
             label: string;
         };
         /**
@@ -1685,6 +1735,12 @@ export interface components {
         MonitorTarget: "hardware" | "stream";
         NewInstrument: {
             name?: string | null;
+            /**
+             * @description A library id to give it straight away, so a new instrument can make
+             *     a sound without a second round trip. Optional: an instrument with
+             *     no voice is a valid, silent one, and the console says so.
+             */
+            soundfont?: string | null;
         };
         NewSession: {
             name: string;
@@ -1878,6 +1934,14 @@ export interface components {
              *     makes every mutation a 501 rather than a silent no-op.
              */
             supported: boolean;
+        };
+        /** @description One selectable sound inside a SoundFont. */
+        PresetDto: {
+            /** Format: int32 */
+            bank: number;
+            name: string;
+            /** Format: int32 */
+            program: number;
         };
         /** @description One profile a device's card can be switched into. */
         ProfileReport: {
@@ -2089,7 +2153,7 @@ export interface components {
          * @description Where a file came from. Drives what the console offers to do with it.
          * @enum {string}
          */
-        SoundfontOrigin: "internal" | "removable";
+        SoundfontOrigin: "built_in" | "internal" | "removable";
         /**
          * @description What a successful `apply` changed — the WS `state_changed` payload.
          *     Semantically complete per change: a client patches its mirror from the
@@ -2337,6 +2401,20 @@ export interface components {
             strip_id?: number | null;
         };
         /**
+         * @description How a drive is attached.
+         *
+         *     Description, never permission. This used to be policy: the automount
+         *     rule fired only for `ID_BUS=usb`, and the console refused to format
+         *     anything it had not called removable — which between them made an NVMe
+         *     SSD, the best medium this recorder can write to, unreachable. What
+         *     actually has to be refused is the disk the system booted from, and that
+         *     is `DriveState::System`, derived from the live mount table.
+         *
+         *     So this exists to pick an icon and print a word.
+         * @enum {string}
+         */
+        Transport: "usb" | "nvme" | "sd" | "sata" | "other";
+        /**
          * @description Transport state, pushed on the Transport channel on every state change
          *     and served over REST. Position ticks ride `PlaybackPosition` instead.
          */
@@ -2484,7 +2562,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Refused — not a removable whole disk, or a bad label */
+            /** @description Refused — not a whole disk, the system disk, or a bad label */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3373,6 +3451,43 @@ export interface operations {
             };
             /** @description An instrument is using it, or tape is rolling */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_presets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Library id, e.g. GeneralUser-GS.sf2 */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every preset in the file, by bank then program */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PresetDto"][];
+                };
+            };
+            /** @description No such soundfont in the library */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Present, but not a SoundFont this daemon can read */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

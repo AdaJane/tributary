@@ -1,15 +1,23 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { ActionButton } from '../../design/ActionButton';
 import { InlineError } from '../../design/Panel';
 import { SegmentedControl } from '../../design/SegmentedControl';
 import { TapeLabel } from '../../design/TapeLabel';
 import { MAX_STRIPS } from '../../state/limits';
-import { useInstruments } from '../../state/instruments';
+import { fetchPresets, useInstruments } from '../../state/instruments';
 import type { InstrumentsDocument } from '../../state/instruments';
 import { useMixer } from '../../state/mixer';
 import { addStripsBlocked, channelNames, feedsLabel, silenceReason, voiceBlocked } from '../console/instrument-logic';
 import { inputSource } from '../console/input-source';
+import { SelectField } from '../../design/SelectField';
+import type { Preset } from './preset-options';
+import {
+  parsePresetValue,
+  presetFallback,
+  presetOptions,
+  presetValue,
+} from './preset-options';
 import styles from './InstrumentsView.module.css';
 
 const POLYPHONY_OPTIONS = [
@@ -115,6 +123,27 @@ function RackUnit({
   const remove = useInstruments((s) => s.remove);
   const test = useInstruments((s) => s.test);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  // Fetched per soundfont, not per render: a General MIDI bank holds ~300
+  // presets and reading them means parsing a file that can be 206 MB. The
+  // list is cleared the moment the soundfont changes so the picker never
+  // shows one bank's names while another is loaded — it falls back to the
+  // raw numbers, which are at least true.
+  const [presets, setPresets] = useState<Preset[]>([]);
+  const soundfont = instrument.soundfont;
+  useEffect(() => {
+    if (!soundfont) {
+      setPresets([]);
+      return;
+    }
+    let live = true;
+    setPresets([]);
+    void fetchPresets(soundfont).then((list) => {
+      if (live) setPresets(list);
+    });
+    return () => {
+      live = false;
+    };
+  }, [soundfont]);
 
   const voiceLock = voiceBlocked(recording);
   const splits = instrument.splits ?? [];
@@ -183,25 +212,29 @@ function RackUnit({
         </select>
       </Row>
 
+      {/* A bare number input was unanswerable once a General MIDI bank
+          shipped: three of them are bundled, each with ~300 sounds, and
+          "program 40" tells you nothing about whether you are about to
+          hear a violin. MASTER.md already specified SelectField for
+          exactly this list. Bank becomes reachable at the same time —
+          it had no control at all before. */}
       <Row label="Preset">
-        <span className={styles.mono}>
-          {String(instrument.bank).padStart(3, '0')}:
-          {String(instrument.program).padStart(3, '0')}
-        </span>
-        <input
-          className={styles.number}
-          type="number"
-          min={0}
-          max={127}
-          value={instrument.program}
-          aria-label={`Preset number for ${instrument.name}`}
-          onChange={(e) =>
-            void update(instrument.id, { program: Number(e.target.value) })
+        <SelectField
+          label={`Preset for ${instrument.name}`}
+          value={presetValue(instrument.bank, instrument.program)}
+          options={
+            presets.length > 0
+              ? presetOptions(presets)
+              : presetFallback(instrument.bank, instrument.program)
+          }
+          onChange={(value) => {
+            const picked = parsePresetValue(value);
+            if (picked) void update(instrument.id, picked);
+          }}
+          hint={
+            report?.presets != null ? `${report.presets} in this soundfont` : undefined
           }
         />
-        {report?.presets != null && (
-          <span className={styles.hint}>{report.presets} presets in this soundfont</span>
-        )}
       </Row>
 
       <Row label="MIDI in">

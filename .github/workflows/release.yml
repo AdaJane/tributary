@@ -62,6 +62,12 @@ jobs:
           version=$(cargo pkgid -p tribd | cut -d# -f2)
           [ "v${version}" = "${GITHUB_REF_NAME}" ] \
             || { echo "tag ${GITHUB_REF_NAME} != workspace version ${version}"; exit 1; }
+      # Every artifact below carries the same bundled sounds, so they are
+      # fetched once per leg and verified against soundfonts/manifest.toml
+      # before anything is packaged. A bad download fails here rather than
+      # shipping to an SD card someone cannot easily re-flash.
+      - name: Fetch bundled SoundFonts
+        run: scripts/fetch-soundfonts.sh
       # The embed smoke tests only run here — the one place with a real dist.
       - run: cargo test -p tribd --features embed-ui
       - run: cargo build --release -p tribd --features embed-ui
@@ -75,6 +81,11 @@ jobs:
           name="tributary-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir "${name}"
           cp target/release/tribd LICENSE README.md THIRD-PARTY.md "${name}/"
+          # A tarball has no install prefix, so the daemon's absolute
+          # default builtin_root will not find these. README's Install
+          # section says to point TRIB__SOUNDFONTS__BUILTIN_ROOT here.
+          mkdir "${name}/soundfonts"
+          cp soundfonts/dist/*.sf2 "${name}/soundfonts/"
           tar czf "${name}.tar.gz" "${name}"
           sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
       # deb/rpm keep their native filename conventions (apt pool layout and
@@ -89,8 +100,10 @@ jobs:
           for f in *.deb *.rpm; do sha256sum "$f" > "$f.sha256"; done
       - name: Package AppImage
         run: |
-          mkdir -p AppDir/usr/bin
+          mkdir -p AppDir/usr/bin AppDir/usr/share/tributary/soundfonts
           cp target/release/tribd AppDir/usr/bin/
+          # AppRun points TRIB__SOUNDFONTS__BUILTIN_ROOT at this directory.
+          cp soundfonts/dist/*.sf2 AppDir/usr/share/tributary/soundfonts/
           install -m 755 packaging/appimage/AppRun AppDir/AppRun
           cp packaging/appimage/tributary.desktop packaging/appimage/tributary.svg AppDir/
           curl -fL --retry 3 -o appimagetool \
@@ -155,6 +168,12 @@ jobs:
         with:
           name: tribd-aarch64-unknown-linux-gnu
       - run: chmod +x tribd
+      # build.sh installs whatever is in soundfonts/dist into the image's
+      # read-only library. Fetched here because this job checks out the
+      # repo fresh; a skipped fetch would silently ship an image with no
+      # sounds, which build.sh's verify step now refuses.
+      - name: Fetch bundled SoundFonts
+        run: scripts/fetch-soundfonts.sh
       - name: Build image
         run: |
           sudo IMAGE_URL_BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" \
@@ -215,6 +234,12 @@ jobs:
         with:
           name: tribd-aarch64-unknown-linux-gnu
           path: ctx/arm64
+      # The Dockerfile COPYs soundfonts/ from the build context, and the
+      # context is `ctx` rather than the checkout — so they are fetched
+      # into it here rather than inherited from the build job.
+      - name: Fetch bundled SoundFonts into the build context
+        run: |
+          DEST=ctx/soundfonts scripts/fetch-soundfonts.sh
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3

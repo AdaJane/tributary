@@ -63,6 +63,17 @@ pub async fn upload_soundfont(
         ApiError::Invalid(format!("“{name}” is not a SoundFont (.sf2) file name"))
     })?;
 
+    // A library id names exactly one file, and this is what keeps that
+    // true. Allowing an upload to shadow a shipped name would make the
+    // order `list` reports and the order `resolve` searches into a rule
+    // nobody could see — and an instrument's stored `soundfont` would
+    // silently mean a different file than it did yesterday.
+    if state.library().is_builtin(&file_name) {
+        return Err(ApiError::Invalid(format!(
+            "“{file_name}” is the name of a built-in sound — save yours under another name"
+        )));
+    }
+
     let dir = std::path::PathBuf::from(&state.soundfont_dir);
     // Temp file in the SAME directory: that is what makes the rename
     // atomic, and what stops a half-written file ever being listed.
@@ -189,6 +200,15 @@ pub async fn delete_soundfont(
     }
     let file_name = soundfonts::safe_file_name(&name).ok_or(ApiError::NotFound)?;
 
+    // Built-ins belong to the installation, not to the session. Removing
+    // one would also make it un-restorable from the console, since there
+    // is no way to upload a file back under a built-in's name.
+    if state.library().is_builtin(&file_name) {
+        return Err(ApiError::Conflict(
+            "built-in sounds are part of this installation and cannot be removed".into(),
+        ));
+    }
+
     // Refusing while an instrument holds it keeps the failure at the moment
     // of the decision, rather than as a silent rack after the next restart.
     let snapshot = state.control.snapshot().await;
@@ -215,4 +235,75 @@ pub async fn delete_soundfont(
 
     state.instruments.refresh().await;
     Ok(axum::Json(crate::api::instruments::document(&state).await))
+}
+
+/// One selectable sound inside a SoundFont.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct PresetDto {
+    pub bank: u16,
+    pub program: u8,
+    pub name: String,
+}
+
+/// The presets inside one library file.
+///
+/// Its own endpoint rather than a field on `InstrumentsDto`: a General MIDI
+/// bank has around 300 of these, three are bundled, and the instruments
+/// document is fetched on every mixer change. The console asks for the one
+/// font it is showing a picker for.
+///
+/// Reading them means parsing the whole file, which for a 206 MB bank is
+/// real work — hence `spawn_blocking`, and hence the console asking once
+/// per soundfont rather than per render.
+#[utoipa::path(
+    get,
+    path = "/api/v1/soundfonts/{name}/presets",
+    params(("name" = String, Path, description = "Library id, e.g. GeneralUser-GS.sf2")),
+    responses(
+        (status = 200, description = "Every preset in the file, by bank then program", body = [PresetDto]),
+        (status = 404, description = "No such soundfont in the library"),
+        (status = 422, description = "Present, but not a SoundFont this daemon can read"),
+    )
+)]
+pub async fn list_presets(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<axum::Json<Vec<PresetDto>>, ApiError> {
+    let file_name = soundfonts::safe_file_name(&name).ok_or(ApiError::NotFound)?;
+    // Looked up in the library the instrument host already enumerated,
+    // rather than resolved again here. That keeps one answer to "which
+    // drives count" — the host holds the mounts and this handler does not
+    // — and the path is one we produced, never one a caller supplied.
+    // Fonts on a stick are selectable for the same reason they are
+    // playable: they are in the list.
+    let path = state
+        .instruments
+        .library()
+        .await
+        .into_iter()
+        .find(|sf| sf.id == file_name)
+        .map(|sf| std::path::PathBuf::from(sf.path))
+        .ok_or(ApiError::NotFound)?;
+
+    tokio::task::spawn_blocking(move || {
+        let mut file = std::fs::File::open(&path)
+            .map_err(|e| ApiError::Internal(format!("could not read the soundfont: {e}")))?;
+        let sf = trib_engine::SoundFont::new(&mut file)
+            .map_err(|e| ApiError::Invalid(format!("that SoundFont could not be read: {e}")))?;
+        let mut presets: Vec<PresetDto> = sf
+            .get_presets()
+            .iter()
+            .map(|p| PresetDto {
+                bank: u16::try_from(p.get_bank_number()).unwrap_or(0),
+                program: u8::try_from(p.get_patch_number()).unwrap_or(0),
+                name: p.get_name().to_owned(),
+            })
+            .collect();
+        // Bank then program: General MIDI order, which is the order a
+        // player expects to scroll through, not the file's storage order.
+        presets.sort_by(|a, b| a.bank.cmp(&b.bank).then(a.program.cmp(&b.program)));
+        Ok(axum::Json(presets))
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
 }

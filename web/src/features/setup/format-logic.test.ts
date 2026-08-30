@@ -3,7 +3,10 @@ import { describe, expect, it } from 'vitest';
 import {
   CONFIRM_WORD,
   DEFAULT_LABEL,
+  FILESYSTEMS,
+  FILESYSTEM_COPY,
   confirmReady,
+  defaultFilesystem,
   formatErrorMessage,
   formatPromise,
   validateLabel,
@@ -51,9 +54,40 @@ describe('formatPromise', () => {
   /** The whole argument for the feature: the user's stick shows 3.5 GB of
    *  partitions on 58 GB of hardware. */
   it('states the full capacity the drive will end up with', () => {
-    expect(formatPromise(62_026_416_128, 'TRIBUTARY')).toBe(
+    expect(formatPromise(62_026_416_128, 'TRIBUTARY', 'exfat')).toBe(
       '1 partition · exFAT · TRIBUTARY · 62.0 GB',
     );
+  });
+
+  /** The promise names the filesystem actually chosen. Printing "exFAT"
+   *  over an ext4 format would be a lie in the one dialog that must not
+   *  tell any. */
+  it('names the filesystem being laid down', () => {
+    expect(formatPromise(2_000_398_934_016, 'STAGE', 'ext4')).toBe(
+      '1 partition · ext4 · STAGE · 2.0 TB',
+    );
+  });
+});
+
+describe('defaultFilesystem', () => {
+  /** A stick is going somewhere else, so it gets the one every laptop
+   *  reads; a fixed disk is staying, so it gets the journalled one. */
+  it('follows where the drive lives', () => {
+    expect(defaultFilesystem(true)).toBe('exfat');
+    expect(defaultFilesystem(false)).toBe('ext4');
+  });
+
+  /** Both options are always offered — the default is a starting point,
+   *  not a restriction. */
+  it('offers both filesystems whatever the default', () => {
+    expect(FILESYSTEMS).toContain('exfat');
+    expect(FILESYSTEMS).toContain('ext4');
+  });
+
+  /** "exFAT" and "ext4" tell a musician nothing; the consequence does. */
+  it('explains each choice in words, differently', () => {
+    expect(FILESYSTEM_COPY.exfat.detail).not.toBe(FILESYSTEM_COPY.ext4.detail);
+    expect(FILESYSTEM_COPY.exfat.detail).toMatch(/Mac|PC/);
   });
 });
 

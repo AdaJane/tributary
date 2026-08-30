@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# Mount a USB filesystem so the console can offer it as a recording
+# Mount an attached filesystem so the console can offer it as a recording
 # destination. Raspberry Pi OS Lite ships no automounter and no desktop, so
-# without this a plugged-in stick reaches the kernel and stops there: tribd
-# enumerates the mount table (sysinfo), and an unmounted device is invisible
-# to it by construction.
+# without this a plugged-in drive reaches the kernel and stops there: tribd
+# enumerates the mount table, and an unmounted device is invisible to it by
+# construction.
 #
-# Driven by 99-tributary-usb.rules, which fires only for ID_BUS=usb block
-# devices carrying a filesystem. udev kills long-running RUN processes, so
-# everything here must return immediately — hence `systemd-mount --no-block`,
-# which hands the work to PID 1 and exits.
+# Driven by 99-tributary-storage.rules, which fires for any block device
+# carrying a filesystem — USB stick, NVMe SSD, SD card in a reader. udev
+# kills long-running RUN processes, so everything here must return
+# immediately — hence `systemd-mount --no-block`, which hands the work to
+# PID 1 and exits.
+#
+# The rule used to filter on ID_BUS=usb and no longer does, so the refusal
+# that keeps the boot media out lives here now (see the system-disk guard
+# below). That is the trade: the rule got simpler and this script took the
+# responsibility, in the one place that can actually ask the question.
 #
 # udev already probed the device, so the rule passes ID_FS_TYPE/ID_FS_LABEL
 # in and this script never re-runs blkid.
@@ -16,6 +22,9 @@ set -euo pipefail
 
 readonly MOUNT_ROOT="${MOUNT_ROOT:-/media}"
 readonly TRIB_USER="${TRIB_USER:-tributary}"
+
+# shellcheck source=scripts/pi-image/blockdev-lib.sh
+. "$(dirname "$(readlink -f "$0")")/blockdev-lib.sh"
 
 # Absolute paths throughout: udev and systemd hand us a minimal PATH that
 # does not include /sbin, and a bare `findmnt` there fails silently-ish.
@@ -27,9 +36,9 @@ readonly SYSTEMD_MOUNT="${SYSTEMD_MOUNT:-/usr/bin/systemd-mount}"
 # in debug mode, which is exactly how "nothing mounted it and nothing said
 # why" happens — the failure shape this project has been bitten by before.
 # Everything worth reading goes to the journal under a greppable tag:
-#   journalctl -t tributary-usb
+#   journalctl -t tributary-storage
 log() {
-    logger -t tributary-usb -p daemon.info -- "$*" 2>/dev/null || true
+    logger -t tributary-storage -p daemon.info -- "$*" 2>/dev/null || true
 }
 
 # blkid reports plain "ntfs", and Debian routes `mount -t ntfs` to
@@ -132,17 +141,36 @@ case "${1:-}" in
     mount_type "${2:-}"
     exit
     ;;
+# Takes a major:minor rather than a device node so the guard can be
+# exercised against a fixture $SYS_BLOCK tree and $MOUNTINFO file, with no
+# root and no real disk.
+--print-system-check)
+    is_system_devno "${2:-}" && echo system || echo other
+    exit
+    ;;
 esac
 
-readonly DEV="${1:?usage: usb-mount.sh <devnode> <fstype> [label]}"
-readonly FSTYPE="${2:?usage: usb-mount.sh <devnode> <fstype> [label]}"
+readonly DEV="${1:?usage: drive-mount.sh <devnode> <fstype> [label]}"
+readonly FSTYPE="${2:?usage: drive-mount.sh <devnode> <fstype> [label]}"
 readonly LABEL="${3:-}"
 
-# The one guard that matters, and it covers more than it looks like. A Pi
-# booted from USB has ID_BUS=usb on its *own* root and boot partitions, so
-# this rule fires for them too — and they are already mounted, which is
-# exactly what this catches. Re-mounting a live filesystem elsewhere would
-# be at best confusing and at worst destructive.
+# Never touch the disk the appliance runs from. Since the udev rule stopped
+# filtering on ID_BUS, this is what keeps the boot media off the console's
+# destination list — and unlike the bus test it holds however the Pi booted,
+# from SD, from USB or from NVMe.
+#
+# Belt to the braces below: an unmounted spare partition on the boot disk
+# would sail straight past the already-mounted guard.
+if is_system_device "$DEV"; then
+    log "$DEV is on the disk the appliance runs from — leaving it alone"
+    exit 0
+fi
+
+# The second guard, and it covers more than it looks like. The rule matches
+# `change` as well as `add`, so it fires repeatedly for the same device —
+# including for a booted-from drive's own live partitions. Re-mounting a
+# live filesystem elsewhere would be at best confusing and at worst
+# destructive.
 if "$FINDMNT" -n -S "$DEV" >/dev/null 2>&1; then
     log "$DEV is already mounted — leaving it alone"
     exit 0
@@ -166,7 +194,7 @@ log "mounting $DEV ($fstype, label '${LABEL:-none}') at $target"
 # the same, so no remove rule is needed. Pass the real devnode, never a
 # /dev/disk/by-id symlink — sysinfo decides `removable` by comparing
 # /proc/mounts' source against the canonicalised by-id targets, and a
-# symlink there silently turns the console's USB tile into a generic drive.
+# symlink there silently turns the console's transport label into a guess.
 exec "$SYSTEMD_MOUNT" --no-block --collect \
     --type="$fstype" --options="$options" \
     -- "$DEV" "$target"

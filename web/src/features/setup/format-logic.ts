@@ -12,7 +12,12 @@
 
 import { formatBytes } from './settings-logic';
 
-/** exFAT's volume-label limit — a filesystem fact, not a style choice. */
+/**
+ * exFAT's volume-label limit — a filesystem fact, not a style choice.
+ * ext4 would allow 16 and still gets 11: one rule the console, the daemon
+ * and the helper can all state identically beats five extra characters on
+ * one of the two filesystems.
+ */
 export const MAX_LABEL = 11;
 
 export const DEFAULT_LABEL = 'TRIBUTARY';
@@ -33,13 +38,45 @@ export function confirmReady(typed: string, label: string): boolean {
   return typed === CONFIRM_WORD && validateLabel(label) === null;
 }
 
+/** The filesystems the helper knows how to lay down. */
+export type Filesystem = 'exfat' | 'ext4';
+
+export const FILESYSTEMS: readonly Filesystem[] = ['exfat', 'ext4'];
+
+/** How each is printed, and the one-line consequence of choosing it. */
+export const FILESYSTEM_COPY: Record<Filesystem, { label: string; detail: string }> = {
+  exfat: {
+    label: 'exFAT',
+    detail: 'also opens on a Mac or PC — best for a drive you unplug',
+  },
+  ext4: {
+    label: 'ext4',
+    detail: 'journalled, keeps file ownership — best for a drive that stays in',
+  },
+};
+
+/**
+ * What to offer for a drive. A stick is going somewhere else, so it gets
+ * the filesystem every laptop can read; a fixed disk is not, so it gets
+ * the one that survives a power cut mid-take. The choice is always shown —
+ * this only decides which option starts selected.
+ */
+export function defaultFilesystem(removable: boolean): Filesystem {
+  return removable ? 'exfat' : 'ext4';
+}
+
 /**
  * What the drive becomes. Printed next to what it currently holds, so the
  * reclaimed space is legible rather than magic — the case that prompted
  * this feature is a 58 GB stick showing 3.5 GB of partitions.
  */
-export function formatPromise(totalBytes: number, label: string): string {
-  return `1 partition · exFAT · ${label || '—'} · ${formatBytes(totalBytes)}`;
+export function formatPromise(
+  totalBytes: number,
+  label: string,
+  filesystem: Filesystem,
+): string {
+  const fs = FILESYSTEM_COPY[filesystem].label;
+  return `1 partition · ${fs} · ${label || '—'} · ${formatBytes(totalBytes)}`;
 }
 
 /** Message for a refused format, matching the settings error table. */

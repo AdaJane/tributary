@@ -89,6 +89,12 @@ assets = [
   ["../../THIRD-PARTY.md", "usr/share/doc/tributary/", "644"],
   # The commented defaults, shipped verbatim — one source of truth.
   ["../../config/tribd.toml", "etc/tributary/tribd.toml", "644"],
+  # The bundled SoundFonts, so instruments have something to play on a
+  # fresh install. Fetched by scripts/fetch-soundfonts.sh (never committed:
+  # ~380 MB of PCM), and this glob is empty on a build that skipped the
+  # fetch — which packages cleanly and reports an empty library rather
+  # than failing. `builtin_root` in the shipped tribd.toml points here.
+  ["../../soundfonts/dist/*.sf2", "usr/share/tributary/soundfonts/", "644"],
 ]
 
 [package.metadata.deb.systemd-units]
@@ -111,6 +117,10 @@ assets = [
   { source = "config/tribd.toml", dest = "/etc/tributary/tribd.toml", mode = "644", config = "noreplace" },
   { source = "README.md", dest = "/usr/share/doc/tributary/README.md", mode = "644", doc = true },
   { source = "THIRD-PARTY.md", dest = "/usr/share/doc/tributary/THIRD-PARTY.md", mode = "644", doc = true },
+  # As for the deb — note these paths are relative to the WORKSPACE root,
+  # where cargo-deb's are relative to this crate. The asymmetry is
+  # cargo-generate-rpm's, not ours.
+  { source = "soundfonts/dist/*.sf2", dest = "/usr/share/tributary/soundfonts/", mode = "644" },
 ]
 # Fedora/openSUSE convention: ship the unit preset-disabled; admins opt in
 # with `systemctl enable --now tribd` (the deb's enable+start would violate

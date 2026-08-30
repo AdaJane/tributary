@@ -11,10 +11,29 @@ import type { SoundfontInfo } from '../../state/instruments';
 export const SOUNDFONT_EXT = '.sf2';
 
 export interface SoundfontGroup {
-  /** `Internal`, or the volume label of a mounted drive. */
+  /** `Built in`, `Internal`, or the volume label of a mounted drive. */
   title: string;
   removable: boolean;
+  /** Shipped with the installation: playable, never deletable. */
+  builtIn: boolean;
   files: SoundfontInfo[];
+}
+
+/**
+ * Above this, a font's size is worth saying out loud.
+ *
+ * rustysynth holds all of a font's sample data resident for as long as it
+ * is loaded, so the file size is very nearly the memory cost — and the
+ * bundled General MIDI banks run to 142 MB and 206 MB. On a 2 GB Pi 4 that
+ * is the difference between a preset change and an OOM kill, which is not
+ * something to discover during a take.
+ */
+export const RAM_NOTICE_BYTES = 64 * 1024 * 1024;
+
+/** A plain-language memory warning for a large font, or null. */
+export function ramNotice(bytes: number): string | null {
+  if (bytes < RAM_NOTICE_BYTES) return null;
+  return `${formatBytes(bytes)} — needs about the same again in memory while loaded`;
 }
 
 export function formatBytes(bytes: number): string {
@@ -24,26 +43,53 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
- * Internal first, then one group per drive.
+ * Built-ins first, then Internal, then one group per drive.
  *
  * Grouping is not disclosure: every file is always rendered. It exists so a
  * font on somebody's stick reads as theirs — which is also why only the
- * internal ones can be deleted from here.
+ * internal ones can be deleted from here. Built-ins lead because on a
+ * fresh appliance they are the only sounds there are, and an empty
+ * "Internal" heading above them would read as a box with nothing in it.
  */
 export function groupSoundfonts(files: readonly SoundfontInfo[]): SoundfontGroup[] {
+  const builtIn = files.filter((f) => f.origin === 'built_in');
   const internal = files.filter((f) => f.origin === 'internal');
-  const groups: SoundfontGroup[] = [
-    { title: 'Internal', removable: false, files: internal },
-  ];
+  const groups: SoundfontGroup[] = [];
+  // Only when there are any: a build that bundled no sounds should not
+  // show a heading promising some.
+  if (builtIn.length > 0) {
+    groups.push({ title: 'Built in', removable: false, builtIn: true, files: builtIn });
+  }
+  groups.push({ title: 'Internal', removable: false, builtIn: false, files: internal });
   const byVolume = new Map<string, SoundfontInfo[]>();
   for (const file of files.filter((f) => f.origin === 'removable')) {
     const key = file.volume ?? 'Removable drive';
     byVolume.set(key, [...(byVolume.get(key) ?? []), file]);
   }
   for (const [title, group] of [...byVolume].sort(([a], [b]) => a.localeCompare(b))) {
-    groups.push({ title, removable: true, files: group });
+    groups.push({ title, removable: true, builtIn: false, files: group });
   }
   return groups;
+}
+
+/**
+ * What a new instrument should load, when the box has anything to offer.
+ *
+ * The smallest built-in, because size is memory here: a bundled General
+ * MIDI bank can be 206 MB resident, and a new instrument silently costing
+ * that on a 2 GB Pi is a bad way to meet the feature. The user can pick any
+ * of them a moment later; this only decides what plays first.
+ *
+ * Falls back to the smallest uploaded font so a build that bundles nothing
+ * still starts somewhere, and to `undefined` when the library is empty —
+ * a voiceless instrument is valid, and the console explains it.
+ */
+export function defaultSoundfont(files: readonly SoundfontInfo[]): string | undefined {
+  const smallest = (origin: SoundfontInfo['origin']) =>
+    files
+      .filter((f) => f.origin === origin)
+      .sort((a, b) => a.bytes - b.bytes)[0]?.id;
+  return smallest('built_in') ?? smallest('internal');
 }
 
 /** Why this file cannot be deleted from the console, or null. */
@@ -52,6 +98,9 @@ export function deleteBlocked(
   usedBy: readonly string[],
   recording: boolean,
 ): string | null {
+  if (file.origin === 'built_in') {
+    return 'built in — part of this installation';
+  }
   if (file.origin === 'removable') {
     return `lives on “${file.volume ?? 'a drive'}” — remove it there`;
   }

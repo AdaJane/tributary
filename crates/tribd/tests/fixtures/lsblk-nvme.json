@@ -1,0 +1,81 @@
+{
+   "blockdevices": [
+      {
+         "name": "nvme0n1",
+         "path": "/dev/nvme0n1",
+         "type": "disk",
+         "size": 2000398934016,
+         "fstype": null,
+         "label": null,
+         "mountpoints": [
+             null
+         ],
+         "rm": false,
+         "ro": false,
+         "tran": "nvme",
+         "hotplug": false,
+         "children": [
+            {
+               "name": "nvme0n1p1",
+               "path": "/dev/nvme0n1p1",
+               "type": "part",
+               "size": 2000397885440,
+               "fstype": "exfat",
+               "label": "TRIBUTARY",
+               "mountpoints": [
+                   "/media/TRIBUTARY"
+               ],
+               "rm": false,
+               "ro": false,
+               "tran": "nvme",
+               "hotplug": false
+            }
+         ]
+      },{
+         "name": "mmcblk0",
+         "path": "/dev/mmcblk0",
+         "type": "disk",
+         "size": 31914983424,
+         "fstype": null,
+         "label": null,
+         "mountpoints": [
+             null
+         ],
+         "rm": false,
+         "ro": false,
+         "tran": "mmc",
+         "hotplug": true,
+         "children": [
+            {
+               "name": "mmcblk0p1",
+               "path": "/dev/mmcblk0p1",
+               "type": "part",
+               "size": 536870912,
+               "fstype": "vfat",
+               "label": "bootfs",
+               "mountpoints": [
+                   "/boot/firmware"
+               ],
+               "rm": false,
+               "ro": false,
+               "tran": "mmc",
+               "hotplug": true
+            },{
+               "name": "mmcblk0p2",
+               "path": "/dev/mmcblk0p2",
+               "type": "part",
+               "size": 31377064448,
+               "fstype": "ext4",
+               "label": "rootfs",
+               "mountpoints": [
+                   "/"
+               ],
+               "rm": false,
+               "ro": false,
+               "tran": "mmc",
+               "hotplug": true
+            }
+         ]
+      }
+   ]
+}

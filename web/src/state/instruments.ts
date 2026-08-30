@@ -16,6 +16,7 @@ import { create } from 'zustand';
 
 import { $api } from '../api/client';
 import type { InstrumentReport } from '../features/console/instrument-logic';
+import type { Preset } from '../features/instruments/preset-options';
 import { instrumentErrorMessage } from '../features/console/instrument-logic';
 import type { InstrumentSplit, InstrumentState } from '../ws/messages';
 
@@ -30,7 +31,7 @@ export interface SoundfontInfo {
   id: string;
   path: string;
   bytes: number;
-  origin: 'internal' | 'removable';
+  origin: 'built_in' | 'internal' | 'removable';
   volume?: string | null;
 }
 
@@ -105,7 +106,14 @@ export const useInstruments = create<InstrumentsStore>()((set, get) => ({
   },
 
   add: async () => {
-    const { error, response } = await $api.POST('/api/v1/instruments', { body: {} });
+    // Created with a voice already loaded where there is one to load, so
+    // a fresh appliance makes a sound on the first press rather than
+    // presenting an instrument that cannot.
+    const { defaultSoundfont } = await import('../features/instruments/soundfont-logic');
+    const soundfont = defaultSoundfont(get().doc?.soundfonts ?? []);
+    const { error, response } = await $api.POST('/api/v1/instruments', {
+      body: soundfont ? { soundfont } : {},
+    });
     if (error || !response.ok) {
       const message = instrumentErrorMessage(response.status, detailOf(error));
       set({ error: { id: null, message } });
@@ -207,4 +215,20 @@ function detailOf(error: unknown): string | undefined {
     if (typeof detail === 'string') return detail;
   }
   return undefined;
+}
+
+/**
+ * The presets inside one library file.
+ *
+ * Its own request, cached by the caller: a General MIDI bank holds ~300 and
+ * reading them means parsing a file that can be 206 MB, so this is asked
+ * once per soundfont rather than folded into the instruments document that
+ * every mixer change refetches.
+ */
+export async function fetchPresets(name: string): Promise<Preset[]> {
+  const { data, error } = await $api.GET('/api/v1/soundfonts/{name}/presets', {
+    params: { path: { name } },
+  });
+  if (error || !data) return [];
+  return data as Preset[];
 }

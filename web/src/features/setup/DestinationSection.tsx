@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { FolderOpen, HardDrive, Usb } from 'lucide-react';
+import { FolderOpen, HardDrive, MemoryStick, Microchip, Usb } from 'lucide-react';
 
 import { ActionButton } from '../../design/ActionButton';
 import { TextField } from '../../design/TextField';
@@ -9,7 +9,16 @@ import { FormatDiskModal } from './FormatDiskModal';
 import { destinationStatus, owningPath } from './settings-logic';
 import styles from './DestinationSection.module.css';
 
-const TILE_ICONS = { internal: FolderOpen, usb: Usb, drive: HardDrive } as const;
+// One per transport the daemon reports, so a drive is recognisable before
+// its name is read. An M.2 stick and an SD card do not look like a thumb
+// drive, and the panel should not claim they do.
+const TILE_ICONS = {
+  internal: FolderOpen,
+  usb: Usb,
+  nvme: MemoryStick,
+  sd: Microchip,
+  drive: HardDrive,
+} as const;
 
 /**
  * The destination panel body: one tile per plausible drive plus a custom

@@ -16,6 +16,32 @@ import { formatBytes } from './settings-logic';
 /** Where a drive tile points recording: a tidy subdir, not the drive root. */
 export const DRIVE_SUBDIR = 'tributary';
 
+/** How a drive is attached, as the daemon narrows lsblk's `TRAN`. */
+export type Transport = 'usb' | 'nvme' | 'sd' | 'sata' | 'other';
+
+/**
+ * The word beside a drive's size. Description only: this panel used to
+ * refuse to format anything it had not called removable, which made an
+ * NVMe SSD — the best medium this recorder can write to — unformattable
+ * from the console. What may not be wiped is the disk the system booted
+ * from, and the daemon reports that as `state: 'system'`.
+ */
+const TRANSPORT_LABEL: Record<Transport, string> = {
+  usb: 'USB',
+  nvme: 'NVMe',
+  sd: 'SD',
+  sata: 'SATA',
+  other: '',
+};
+
+const TRANSPORT_ICON: Record<Transport, DriveTile['icon']> = {
+  usb: 'usb',
+  nvme: 'nvme',
+  sd: 'sd',
+  sata: 'drive',
+  other: 'drive',
+};
+
 export interface DriveLike {
   mountPath: string | null;
   device: string | null;
@@ -24,6 +50,7 @@ export interface DriveLike {
   totalBytes: number;
   freeBytes: number | null;
   removable: boolean;
+  transport: Transport;
   state: string;
   reason: string | null;
   disk: string | null;
@@ -36,7 +63,7 @@ export interface DriveTile {
   detail: string;
   reason: string | null;
   state: string;
-  icon: 'internal' | 'usb' | 'drive';
+  icon: 'internal' | 'usb' | 'nvme' | 'sd' | 'drive';
   selectable: boolean;
 }
 
@@ -50,6 +77,9 @@ export interface DriveGroup {
   /** Set when the group holds no usable volume — the headline case. */
   headline: string | null;
   removable: boolean;
+  /** Drives the tile icon, the printed badge, and the format dialog's
+   *  default filesystem. Never whether something may be formatted. */
+  transport: Transport;
   /** `null` when this drive may be formatted, else why it may not. Never
    *  hidden: a control that vanishes teaches nothing. */
   formatBlocked: string | null;
@@ -76,7 +106,7 @@ function tileFor(drive: DriveLike): DriveTile {
     detail: detailFor(drive),
     reason: drive.reason,
     state: drive.state,
-    icon: drive.removable ? 'usb' : 'drive',
+    icon: TRANSPORT_ICON[drive.transport] ?? 'drive',
     selectable: usable,
   };
 }
@@ -88,16 +118,17 @@ function tileFor(drive: DriveLike): DriveTile {
  * follow.
  */
 function formatBlockedReason(
-  removable: boolean,
-  key: string,
+  diskNode: string | null,
   options: { canFormat?: boolean; recording?: boolean },
 ): string | null {
   if (options.canFormat === false) return 'not available on this installation';
   if (options.recording) return 'stop recording first';
-  if (!removable) return 'only removable drives can be formatted';
-  // The daemon and the helper both refuse a non-whole-disk target; this
-  // only keeps the button from offering something they would reject.
-  if (!/^\/dev\/[a-z]+$/.test(key)) return 'not a whole drive';
+  // Whether there is a whole disk to wipe is a fact the daemon already
+  // sent, not one to re-derive from the shape of a device name here. The
+  // rule used to be `/^\/dev\/[a-z]+$/`, which called `/dev/nvme0n1` "not
+  // a whole drive" for having digits in it — the same mistake the daemon's
+  // own validator was making, in a second place, where it could drift.
+  if (diskNode === null) return 'not a whole drive';
   return null;
 }
 
@@ -117,6 +148,7 @@ export function groupDrives(
     detail: 'built-in storage',
     totalBytes: 0,
     removable: false,
+    transport: 'other',
     headline: null,
     formatBlocked: 'built-in storage is never formatted',
     tiles: [
@@ -145,6 +177,12 @@ export function groupDrives(
   const groups = [...byDisk.entries()].map<DriveGroup>(([key, members]) => {
     const capacity = members.reduce((sum, d) => sum + d.totalBytes, 0);
     const removable = members.some((d) => d.removable);
+    // `disk` on a partition, `device` on a partitionless disk: either way
+    // the daemon has already resolved this to the whole disk, which is the
+    // format target.
+    const diskNode = members[0].disk ?? members[0].device;
+    const transport = members[0].transport;
+    const badge = TRANSPORT_LABEL[transport] ?? '';
     const usable = members.filter((d) => d.state === 'ready');
     const tiles = [...members]
       .sort(
@@ -156,13 +194,14 @@ export function groupDrives(
     return {
       key,
       title: members[0].label,
-      detail: `${formatBytes(capacity)}${removable ? ' · USB' : ''}`,
+      detail: `${formatBytes(capacity)}${badge ? ` · ${badge}` : ''}`,
       totalBytes: capacity,
       tiles,
       removable,
+      transport,
       headline:
         usable.length === 0 ? 'no volume on this drive can be recorded to' : null,
-      formatBlocked: formatBlockedReason(removable, key, options),
+      formatBlocked: formatBlockedReason(diskNode, options),
     };
   });
 
@@ -180,7 +219,7 @@ export function groupDrives(
 /**
  * What the panel says when there is nothing to pick. These are genuinely
  * different situations and must not share a sentence — "no drive" sends
- * you to the USB port, "unusable" sends you to Format.
+ * you to the port, "unusable" sends you to Format.
  */
 export function emptyState(groups: readonly DriveGroup[]): 'no-drive' | 'unusable-only' | null {
   const external = groups.filter((g) => g.key !== 'internal');
@@ -190,6 +229,6 @@ export function emptyState(groups: readonly DriveGroup[]): 'no-drive' | 'unusabl
 }
 
 export const EMPTY_STATE_COPY: Record<'no-drive' | 'unusable-only', string> = {
-  'no-drive': 'No USB drive connected — plug one in and it appears here on its own.',
+  'no-drive': 'No drive connected — plug one in and it appears here on its own.',
   'unusable-only': 'A drive is connected, but nothing on it can be recorded to.',
 };

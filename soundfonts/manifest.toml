@@ -1,0 +1,98 @@
+# The SoundFonts Tributary ships.
+#
+# This file is the single source of truth for them. `scripts/fetch-soundfonts.sh`
+# downloads and verifies against it, the packaging targets install what it
+# names, THIRD-PARTY.md's SoundFonts section is generated from it, and the
+# README quotes its sizes. Nothing restates a fact that lives here.
+#
+# The bytes are never committed: ~380 MB of PCM in git history is a cost
+# paid forever by everyone who clones. The sha256 is what makes fetching
+# them as trustworthy as committing them would have been.
+#
+# ---------------------------------------------------------------------------
+# Two constraints decide what can be on this list at all.
+#
+# 1. SF2 ONLY, uncompressed. rustysynth 1.3.6 sniffs the `smpl` chunk for
+#    an `OggS` magic and refuses the file outright
+#    (soundfont_sampledata.rs, `SoundFontError::UnsupportedSampleFormat`).
+#    That rules out every SF3 package — including the tempting ones, like
+#    Debian's fluidr3mono-gm-soundfont, which is 18 MB *because* it is SF3.
+#    A 16-bit SF2 is the only thing the engine can play.
+#
+# 2. A LICENCE OF RECORD. Tributary is MIT and ships binaries through apt,
+#    GitHub Releases and an SD-card image, so "widely used and probably
+#    fine" is not a licence. SGM, Chorium, Timbres of Heaven and Arachno
+#    are all excluded on this ground alone, whatever their quality, and
+#    Debian's TimGM6mb.sf2 is excluded for being GPL.
+#
+# A font's file size is very close to its RAM cost while loaded:
+# rustysynth holds sample data as one Vec<i16> for the life of the font,
+# shared between an instrument's splits but not between fonts. That is why
+# the default is the smallest one here and why the README says plainly
+# what a 2 GB Pi 4 can carry. The `presets` and `bytes` counts below were
+# measured by loading each file through rustysynth 1.3.6 itself, not read
+# off a web page.
+
+[[soundfont]]
+id = "GeneralUser-GS.sf2"
+name = "GeneralUser GS"
+version = "2.0.3"
+# The default voice: a complete GM/GS bank at a size a 2 GB Pi 4 can hold
+# comfortably while recording. Being the default is the whole reason to
+# prefer it over the two larger banks.
+default = true
+bytes = 32319396
+sha256 = "9575028c7a1f589f5770fccc8cff2734566af40cd26ed836944e9a5152688cfe"
+presets = 287
+url = "https://raw.githubusercontent.com/mrbumpy409/GeneralUser-GS/684543d5e5efaef08d02be50dcda8d552478fa60/GeneralUser-GS.sf2"
+# Pinned to a commit, not to `main`: a moving URL cannot be verified
+# against a fixed hash, and a bank that changed under us is exactly the
+# thing the hash exists to catch.
+license = "GeneralUser GS License v2.0"
+license_url = "https://github.com/mrbumpy409/GeneralUser-GS/blob/main/documentation/LICENSE.txt"
+author = "S. Christian Collins"
+description = "General MIDI / GS bank, 30 MB — the default voice"
+# The licence grants use "without restriction", says "feel free to use it
+# in your software projects", and contemplates a commercial software
+# product. It asks that nobody hot-link the author's own download files
+# and says to "provide your own local copy instead" — which is what this
+# does, and this GitHub mirror exists, in its own words, "to offer an
+# easier source for automated packaging".
+#
+# Recorded honestly: this is a bespoke licence, not an OSI one, and the
+# author documents that the bank grew from a personal project and that he
+# "cannot be 100% sure where all samples originated". FluidR3's Debian-main
+# provenance below is stronger. Both ship; this note is why the stronger
+# one is named first in THIRD-PARTY.md.
+
+[[soundfont]]
+id = "FluidR3_GM.sf2"
+name = "FluidR3 GM"
+version = "3.1"
+bytes = 148398306
+sha256 = "74594e8f4250680adf590507a306655a299935343583256f3b722c48a1bc1cb0"
+presets = 189
+# Debian's orig tarball rather than a direct .sf2: there is no stable
+# first-party download left (the author's host refuses connections), and
+# this is the copy that passed ftp-master's DFSG review and sits in Debian
+# main. The most trustworthy host available is worth one tar member.
+url = "http://deb.debian.org/debian/pool/main/f/fluid-soundfont/fluid-soundfont_3.1.orig.tar.gz"
+archive_sha256 = "2621acaa1c78e4abdb24bdd163230cc577e61276936d6aa6e3180582142f0343"
+archive_member = "fluid-soundfont-3.1/FluidR3_GM.sf2"
+license = "MIT"
+license_url = "https://metadata.ftp-master.debian.org/changelogs/main/f/fluid-soundfont/fluid-soundfont_3.1-6_copyright"
+author = "Frank Wen (2000-2002, 2008), Toby Smithe (2008)"
+description = "General MIDI bank, 142 MB — the fullest sound, the largest footprint"
+
+[[soundfont]]
+id = "MuseScore_General.sf2"
+name = "MuseScore General"
+version = "0.2"
+bytes = 215614036
+sha256 = "ee51d2c4b1525e70f19a45909c4fd7a2e26d91d115fa89dbf5a6bc413d8b9bf3"
+presets = 309
+url = "https://ftp.osuosl.org/pub/musescore/soundfont/MuseScore_General/MuseScore_General.sf2"
+license = "MIT"
+license_url = "https://github.com/musescore/MuseScore/blob/master/share/sound/FluidR3Mono_License.md"
+author = "S. Christian Collins"
+description = "General MIDI bank, 206 MB — orchestral emphasis, largely FluidR3-derived"

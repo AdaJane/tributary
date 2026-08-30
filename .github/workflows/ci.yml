@@ -59,3 +59,25 @@ jobs:
       - run: npm run codegen && git diff --exit-code src/api/generated/
       - run: npm run -s test
       - run: npm run build
+
+  # `just check` has run these locally since they were written; nothing ran
+  # them here. That gap is why a filename allowlist in build.sh shipped
+  # broken and only failed on a release tag, where the pi-image job lives.
+  # The storage helpers now carry the refusal that keeps the boot media off
+  # the destination list — a promise worth testing on every push.
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # shellcheck is preinstalled on ubuntu-latest runners; assert it
+      # rather than let the local recipe's "skipped" path apply in CI,
+      # where a silent skip is indistinguishable from a pass.
+      - run: shellcheck --version
+      - run: scripts/pi-image/test-helpers.sh
+      # Reads the manifest only — no downloads — so it is as cheap as the
+      # openapi drift gate and guards the same class of rot: a bundled
+      # sound whose licence is never attributed.
+      - run: scripts/update-attribution.sh --check
+      - run: >
+          shellcheck --severity=warning
+          scripts/pi-image/*.sh packaging/deb/postinst packaging/deb/postrm

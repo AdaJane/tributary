@@ -11,7 +11,8 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use super::{ApiError, AppState};
-use crate::destinations::{self, DriveState};
+use crate::destinations::{self, DriveState, Transport};
+use crate::format::Filesystem;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct DriveDto {
@@ -27,6 +28,9 @@ pub struct DriveDto {
     /// Only knowable while mounted.
     pub available_bytes: Option<u64>,
     pub removable: bool,
+    /// How the drive is attached, for the tile's icon and the word beside
+    /// its size. Cosmetic — nothing is gated on it.
+    pub transport: Transport,
     pub state: DriveState,
     /// Why this is not a usable destination; `null` when it is.
     pub reason: Option<String>,
@@ -54,11 +58,24 @@ pub struct DestinationsDto {
 
 #[derive(Debug, serde::Deserialize, ToSchema)]
 pub struct FormatRequest {
-    /// The whole disk, as `DriveDto.disk` names it ("/dev/sda"). A
-    /// partition is refused: formatting one strands the rest of the drive.
+    /// The whole disk, as `DriveDto.disk` names it ("/dev/sda",
+    /// "/dev/nvme0n1"). A partition is refused by the helper, which can
+    /// read /sys/dev/block and actually tell.
     pub device: String,
-    /// The exFAT volume label, which becomes the drive's printed name.
+    /// The volume label, which becomes the drive's printed name. 11
+    /// characters, exFAT's limit, for both filesystems.
     pub label: String,
+    /// Defaulted rather than required, so a client that predates the
+    /// picker keeps meaning what it used to mean.
+    #[serde(default = "default_filesystem")]
+    pub filesystem: Filesystem,
+}
+
+/// The historical behaviour, and the only safe thing to assume when a
+/// client did not say: exFAT is what every drive this feature has ever
+/// formatted came back as.
+const fn default_filesystem() -> Filesystem {
+    Filesystem::Exfat
 }
 
 #[utoipa::path(
@@ -68,7 +85,7 @@ pub struct FormatRequest {
     responses(
         (status = 200, description = "Drive formatted; it remounts on its own"),
         (status = 409, description = "Recording, or the drive is in use"),
-        (status = 422, description = "Refused — not a removable whole disk, or a bad label"),
+        (status = 422, description = "Refused — not a whole disk, the system disk, or a bad label"),
         (status = 501, description = "This installation has no format helper"),
     )
 )]
@@ -89,7 +106,8 @@ pub async fn format_drive(
     }
     let device = req.device.clone();
     let label = req.label.clone();
-    tokio::task::spawn_blocking(move || crate::format::run(&device, &label))
+    let filesystem = req.filesystem;
+    tokio::task::spawn_blocking(move || crate::format::run(&device, &label, filesystem))
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .map_err(|e| match e {
@@ -117,6 +135,7 @@ pub fn drive_dtos() -> Vec<DriveDto> {
             total_bytes: d.total_bytes,
             available_bytes: d.available_bytes,
             removable: d.removable,
+            transport: d.transport,
             disk: d.disk,
         })
         .collect()

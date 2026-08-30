@@ -494,13 +494,22 @@ drive status must never be hidden.
     listed".
 
 - **Destination**: one section per physical drive, each with a print
-  header (drive name + mono "57.8 GB · USB") over a `role="listbox"` grid
+  header (drive name + mono "57.8 GB · USB", the badge naming how the
+  drive is attached — USB / NVMe / SD / SATA, and nothing at all when
+  lsblk has no word for it) over a `role="listbox"` grid
   of volume tiles. Internal (default root, FolderOpen) is always the first
   section; every attached drive follows, removable first, then by usable
   capacity — a drive with a ready 58 GB volume outranks one holding only
   junk. Grouping by drive is what stops a 512 MB boot partition sitting as
   an equal peer to a real stick; it is **not** a disclosure. Every volume
   of every drive is rendered, always.
+  - The tile icon follows that same transport — thumb drive, M.2 stick, SD
+    card, generic disk — so a drive is recognisable before its name is
+    read. Transport is **description only**: it picks an icon, a printed
+    word, and the format dialog's default filesystem, and it gates
+    nothing. The one drive that may never be wiped is the one the
+    appliance booted from, which arrives as `state: system` and is not
+    rendered as a destination at all.
   - A tile carries icon, label, and either mono "14.2 GB free" (ready) or
     "537 MB · vfat" — free space on a volume you cannot write to is a
     meaningless number. Then a status line: green LED + `ready`, or a dim
@@ -513,16 +522,27 @@ drive status must never be hidden.
     drive can be recorded to" — and Format as the obvious next step.
   - **Format…** `ActionButton` per drive. Blocked reasons render the
     button disabled with the reason beside it, never hidden: `stop
-    recording first`, `only removable drives can be formatted`, `not
-    available on this installation`. It opens the wipe `Modal`, which
-    prints NOW (every existing volume) against AFTER (`1 partition ·
-    exFAT · TRIBUTARY · 57.8 GB`), takes a drive name (≤11 chars, exFAT's
-    limit), and gates the confirm button behind the typed word `ERASE`.
-    Two-click SURE? is deliberately *not* enough here — a strip costs
-    nothing to rebuild, someone's recordings do not.
+    recording first`, `not available on this installation`, `not a whole
+    drive`, `built-in storage is never formatted`. It opens the wipe
+    `Modal`, which offers the filesystem as a `SegmentedControl` (exFAT /
+    ext4) with the consequence spelled underneath — "also opens on a Mac
+    or PC" against "journalled, keeps file ownership" — because the two
+    names tell a musician nothing on their own. The default follows where
+    the drive lives (exFAT removable, ext4 fixed) and is a starting point,
+    never a restriction. Then NOW (every existing volume) against AFTER
+    (`1 partition · ext4 · TRIBUTARY · 57.8 GB`, naming the filesystem
+    actually chosen), a drive name (≤11 chars — exFAT's limit, applied to
+    both so the console, daemon and helper state one rule), and the
+    confirm button gated behind the typed word `ERASE`. Two-click SURE? is
+    deliberately *not* enough here — a strip costs nothing to rebuild,
+    someone's recordings do not.
+  - There is no `only removable drives can be formatted`, and there was:
+    it made an NVMe SSD — the best medium this recorder can write to —
+    impossible to prepare from the console. Removability describes where a
+    drive is going, not whether it may be erased.
   - Selecting a volume records to `<mount>/tributary`. Exactly one tile
     lights (`aria-selected` + focus ring), by longest-path containment.
-  - Empty states are two different sentences, never one: "No USB drive
+  - Empty states are two different sentences, never one: "No drive
     connected…" vs "A drive is connected, but nothing on it can be
     recorded to." A connected drive that renders as an empty port is the
     bug this panel exists to not have.
@@ -575,6 +595,27 @@ below that. Reading order is repair order.
   live, because changing sound mid-take is normal playing and a keyboardist
   on the wrong channel has to be able to fix it. The rule a user can hold:
   *changing the sound stops the tape, changing the patch doesn't.*
+- **Preset** is a `SelectField`, never a number input. Three General MIDI
+  banks ship with Tributary and each holds around 300 sounds, so a bare
+  `<input type=number>` asked the player to know that program 40 is a
+  violin. Options read `040  Violin`, keeping the number visible because a
+  MIDI file and a hardware controller both speak it; the bank is printed
+  only when it is not 0, so the common case is not a coordinate pair. The
+  daemon serves the list per soundfont (`GET
+  /api/v1/soundfonts/{name}/presets`) rather than folding ~300 names into
+  the instruments document that every mixer change refetches. While it
+  loads, the picker shows the raw `bank:program` the instrument holds — an
+  empty box would suggest it has no preset, which is never true.
+- **Soundfonts group Built in · Internal · one per drive**, in that order.
+  Built-ins lead because on a fresh appliance they are the only sounds
+  there are, and an empty "Internal" heading above them would read as a box
+  with nothing in it; the heading is absent entirely when a build bundled
+  none. A built-in's Remove is disabled with `built in — part of this
+  installation` beside it — the same never-hide rule the drive tiles
+  follow. A font at or over the 64 MB upload budget prints its memory cost
+  in words ("206 MB — needs about the same again in memory while loaded")
+  rather than just its size, because sample data stays resident and that is
+  the number that decides whether a take survives on a 2 GB Pi.
 - **Outputs** is a two-option `SegmentedControl` — Stereo mix / Drum splits
   — with a live consequence line under it saying what the desk will get
   ("6 mono channels: Kick, Snare, Toms, HiHat, Cymbals, Percussion").

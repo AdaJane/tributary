@@ -57,7 +57,11 @@ readonly BASE_SHA256="acff736ca7945e3b305f07cda4abdb870910e12634991da69783611756
 readonly PACKAGES="pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-utils dbus-user-session"
 readonly TRIB_USER="tributary"
 readonly TRIB_HOSTNAME="tributary"
-readonly GROW_MIB=768 # deterministic apt headroom; zeros are ~free under xz
+# Deterministic headroom; zeros are ~free under xz. 768 covered apt alone.
+# The bundled soundfont library is ~380 MB of uncompressed SF2 on top of
+# that, and it is installed read-only into /usr/share, so it has to fit
+# before first-boot expansion ever runs.
+readonly GROW_MIB=1408
 
 # The Wi-Fi regulatory domain the access point runs under. A legal
 # constraint that varies by market, so it is a build input for regional
@@ -238,6 +242,22 @@ ln -sf /etc/systemd/user/tribd.service \
     "$ROOT/home/$TRIB_USER/.config/systemd/user/default.target.wants/tribd.service"
 install -d "$ROOT/home/$TRIB_USER/config" "$ROOT/home/$TRIB_USER/projects"
 install -m 644 "$HERE/tribd.toml" "$ROOT/home/$TRIB_USER/config/tribd.toml"
+# The user's own library, so the first upload has somewhere to land and
+# the console can name the directory before anything is in it.
+install -d "$ROOT/home/$TRIB_USER/soundfonts"
+
+# The sounds the appliance ships with. Read-only and owned by root: they
+# belong to the image, not to the session, and the daemon refuses to
+# delete them. Fetched by scripts/fetch-soundfonts.sh — never committed —
+# so a build that skipped the fetch installs nothing and the console
+# reports an empty library, which is true rather than broken.
+install -d -m 755 "$ROOT/usr/share/tributary/soundfonts"
+if compgen -G "$HERE/../../soundfonts/dist/*.sf2" >/dev/null; then
+    install -m 644 "$HERE"/../../soundfonts/dist/*.sf2 \
+        "$ROOT/usr/share/tributary/soundfonts/"
+else
+    echo "==> no soundfonts fetched; image will ship none" >&2
+fi
 in_chroot "chown -R $TRIB_USER:$TRIB_USER /home/$TRIB_USER"
 
 # Debian's pipewire/wireplumber packages normally arrive user-enabled via
@@ -441,7 +461,7 @@ ln -sf ../tributary-performance.service \
 # 5. USB autosuspend off for audio interfaces. `usbcore` is built into the
 #    Pi kernel, so modprobe.d cannot reach `usbcore.autosuspend` — a udev
 #    rule is the only build-time knob. Its own file rather than an addition
-#    to 99-tributary-usb.rules: that one is about block devices and mounting,
+#    to 99-tributary-storage.rules: that one is about block devices and mounting,
 #    and a second unrelated promise inside it widens its blast radius.
 cat > "$ROOT/etc/udev/rules.d/98-tributary-usb-audio.rules" <<'EOF'
 # An interface that autosuspends between takes glitches on the first buffer
@@ -464,16 +484,44 @@ echo "vm.swappiness=10" >> "$ROOT/etc/sysctl.d/80-tributary.conf"
 #     the xrun rate first, and only then spend that risk.
 #   * No PREEMPT_RT kernel: this image stays on the pinned stock base.
 
-echo "==> USB automount"
+echo "==> storage automount"
 # Raspberry Pi OS Lite ships no automounter. udisks2 is in the base image
 # and runs, but it only mounts when a client calls Filesystem.Mount and a
-# headless install has none — so without this a plugged-in stick reaches
+# headless install has none — so without this a plugged-in drive reaches
 # the kernel and stops there, invisible to tribd's mount-table scan.
-# Config only: every binary this needs (systemd-mount, findmnt, mountpoint)
-# is already in the base, and exfat/ntfs3 ship as kernel modules.
-install -D -m 755 "$HERE/usb-mount.sh" "$ROOT/usr/local/lib/tributary/usb-mount.sh"
-install -D -m 644 "$HERE/99-tributary-usb.rules" \
-    "$ROOT/etc/udev/rules.d/99-tributary-usb.rules"
+# Config only: every binary this needs (systemd-mount, findmnt, mountpoint,
+# lsblk) is already in the base, and exfat/ntfs3 ship as kernel modules.
+#
+# The library is installed beside the helpers because both source it by
+# path: it holds the system-disk question that replaced the rule's old
+# ID_BUS=usb filter, and neither helper is safe without it.
+install -D -m 755 "$HERE/blockdev-lib.sh" "$ROOT/usr/local/lib/tributary/blockdev-lib.sh"
+install -D -m 755 "$HERE/drive-mount.sh" "$ROOT/usr/local/lib/tributary/drive-mount.sh"
+install -D -m 644 "$HERE/99-tributary-storage.rules" \
+    "$ROOT/etc/udev/rules.d/99-tributary-storage.rules"
+# PCIe, so an NVMe drive exists to be mounted in the first place. Off by
+# default on the Pi 5; the official M.2 HAT+ turns it on from its own
+# EEPROM, but a third-party carrier does not, and then /dev/nvme0n1 simply
+# never appears and the console honestly shows an empty port.
+#
+# A [pi5] conditional filter rather than a bare line: this is one image for
+# both boards and the Pi 4 has no PCIe connector at all. [all] closes the
+# filter so anything appended after this stays board-independent.
+#
+# config.txt is fair game — only cmdline.txt is sha-pinned here, because it
+# carries the first-boot resize token. Deliberately NOT setting
+# dtparam=pciex1_gen=3: the connector is certified for Gen 2, and an
+# unstable link under a take is a worse failure than a slower one.
+if ! grep -q '^dtparam=pciex1$' "$ROOT/boot/firmware/config.txt"; then
+    cat >> "$ROOT/boot/firmware/config.txt" <<'EOF'
+
+[pi5]
+# Enable the PCIe connector so an M.2 NVMe drive enumerates (Tributary).
+dtparam=pciex1
+[all]
+EOF
+fi
+
 # The console's Format button. tribd is a systemd USER unit under a nologin
 # account with no capabilities, so partitioning needs one root-owned script
 # and a sudoers line naming it. 0440 and no dot in the filename: sudo
@@ -654,33 +702,31 @@ v grep -q '^vm.swappiness=10$' "$ROOT/etc/sysctl.d/80-tributary.conf"
 # The appliance takes its card outright; the shared layer would leave it at
 # the desktop's latency with nobody able to tell.
 v grep -q '^layer = "exclusive"$' "$ROOT/home/$TRIB_USER/config/tribd.toml"
-USB_RULE="$ROOT/etc/udev/rules.d/99-tributary-usb.rules"
-v test -f "$USB_RULE"
-v test -x "$ROOT/usr/local/lib/tributary/usb-mount.sh"
-# ID_BUS is what keeps the boot media out: the SD card carries no ID_BUS at
-# all, so losing this line would put / on the destination list.
-v grep -q 'ENV{ID_BUS}!="usb"' "$USB_RULE"
+STORAGE_RULE="$ROOT/etc/udev/rules.d/99-tributary-storage.rules"
+v test -f "$STORAGE_RULE"
+v test -x "$ROOT/usr/local/lib/tributary/drive-mount.sh"
+v test -x "$ROOT/usr/local/lib/tributary/blockdev-lib.sh"
 # The rule names the helper by absolute path; a rename on one side only
 # would fail silently at hotplug time, which nothing else here would catch.
-v grep -q 'RUN+="/usr/local/lib/tributary/usb-mount.sh' "$USB_RULE"
+v grep -q 'RUN+="/usr/local/lib/tributary/drive-mount.sh' "$STORAGE_RULE"
 # `change` is how a console-formatted drive remounts without a replug.
-v grep -q 'ACTION!="add|change"' "$USB_RULE"
-# Behaviour of the SHIPPED helper, not the repo copy — the scripts are
+v grep -q 'ACTION!="add|change"' "$STORAGE_RULE"
+# Behaviour of the SHIPPED helpers, not the repo copies — the scripts are
 # arch-independent text, so the build host can run the aarch64 image's own
-# file and assert the strings the kernel would actually receive.
-USB_HELPER="$ROOT/usr/local/lib/tributary/usb-mount.sh"
-USB_OPTS="$(bash "$USB_HELPER" --print-options vfat 999 985)"
-case ",$USB_OPTS," in
+# files and assert what the kernel would actually receive.
+DRIVE_HELPER="$ROOT/usr/local/lib/tributary/drive-mount.sh"
+STORAGE_OPTS="$(bash "$DRIVE_HELPER" --print-options vfat 999 985)"
+case ",$STORAGE_OPTS," in
 *,sync,* | *,flush,*) fail "verify: mount options include sync/flush — a take is a sustained write" ;;
 esac
-case "$USB_OPTS" in
+case "$STORAGE_OPTS" in
 *uid=999,gid=985*) ;;
-*) fail "verify: vfat carries no uid=/gid= — the daemon could not write: $USB_OPTS" ;;
+*) fail "verify: vfat carries no uid=/gid= — the daemon could not write: $STORAGE_OPTS" ;;
 esac
-case "$(bash "$USB_HELPER" --print-options ext4 999 985)" in
+case "$(bash "$DRIVE_HELPER" --print-options ext4 999 985)" in
 *uid=*) fail "verify: uid= passed to ext4 — that mount fails outright" ;;
 esac
-[ "$(bash "$USB_HELPER" --print-type ntfs)" = ntfs3 ] \
+[ "$(bash "$DRIVE_HELPER" --print-type ntfs)" = ntfs3 ] \
     || fail "verify: ntfs would route to the ntfs-3g FUSE helper"
 # The format helper's trust boundary is one script plus the sudoers line
 # naming it, so ownership and mode are as load-bearing as the contents.
@@ -697,6 +743,36 @@ v test -f "$FMT_SUDO"
 v grep -q "^$TRIB_USER ALL=(root:root) NOPASSWD: /usr/local/lib/tributary/format-drive.sh\$" "$FMT_SUDO"
 [ "$(bash "$FMT" --print-label-check TRIBUTARY)" = ok ] || fail "verify: label check"
 [ "$(bash "$FMT" --print-label-check 'has space')" = refused ] || fail "verify: label check"
+[ "$(bash "$FMT" --print-fs-check ext4)" = ok ] || fail "verify: ext4 not offered"
+[ "$(bash "$FMT" --print-fs-check ntfs)" = refused ] || fail "verify: fs allowlist is open"
+# The assertion that replaced `grep ENV{ID_BUS}!="usb"`.
+#
+# That grep asserted an inventory — the presence of one line whose *effect*
+# was to keep the boot media off the destination list. This asserts the
+# promise itself, against the shipped helpers, using a fixture sysfs tree
+# and mountinfo: a disk carrying / is refused, and one that is not is not.
+# It holds for an SD, USB or NVMe boot, which the bus test never did, and
+# it cannot pass by accident the way a surviving grep line could.
+SYSCK="$WORK/sysck"
+rm -rf "$SYSCK"
+mkdir -p "$SYSCK/sys" "$SYSCK/dev/mmcblk0/mmcblk0p2" "$SYSCK/dev/sda"
+printf '179:0\n' > "$SYSCK/dev/mmcblk0/dev"
+printf '179:2\n' > "$SYSCK/dev/mmcblk0/mmcblk0p2/dev"
+: > "$SYSCK/dev/mmcblk0/mmcblk0p2/partition"
+printf '8:0\n' > "$SYSCK/dev/sda/dev"
+ln -sfn "$SYSCK/dev/mmcblk0" "$SYSCK/sys/179:0"
+ln -sfn "$SYSCK/dev/mmcblk0/mmcblk0p2" "$SYSCK/sys/179:2"
+ln -sfn "$SYSCK/dev/sda" "$SYSCK/sys/8:0"
+printf '26 1 179:2 / / rw - ext4 /dev/mmcblk0p2 rw\n' > "$SYSCK/mountinfo"
+for helper in "$FMT" "$DRIVE_HELPER"; do
+    [ "$(MOUNTINFO="$SYSCK/mountinfo" SYS_BLOCK="$SYSCK/sys" \
+        bash "$helper" --print-system-check 179:0)" = system ] \
+        || fail "verify: $helper would not refuse the disk the appliance boots from"
+    [ "$(MOUNTINFO="$SYSCK/mountinfo" SYS_BLOCK="$SYSCK/sys" \
+        bash "$helper" --print-system-check 8:0)" = other ] \
+        || fail "verify: $helper refuses an ordinary attached drive"
+done
+rm -rf "$SYSCK"
 # The filesystems a stick actually arrives formatted as. vfat is builtin;
 # these two are modules, and mkfs.exfat is what the format helper needs.
 for m in exfat ntfs3; do
@@ -704,6 +780,35 @@ for m in exfat ntfs3; do
         || fail "verify: no $m kernel module — USB sticks of that type cannot mount"
 done
 v test -x "$ROOT/sbin/mkfs.exfat"
+# ext4 is the default for a drive that stays in the recorder, so its mkfs
+# is as load-bearing as exfat's. It is in e2fsprogs, which the base needs
+# anyway, but assert it rather than assume the dependency never moves.
+v test -x "$ROOT/sbin/mkfs.ext4"
+# The sounds the appliance ships with. An image whose Instruments tab can
+# do nothing until someone finds an .sf2 is the exact problem the bundle
+# exists to remove, so a skipped fetch fails the build rather than
+# producing a quietly emptier image. Content, not inventory: the check is
+# "at least one loadable bank", not a list of file names that would need
+# editing every time the manifest changes.
+SF_DIR="$ROOT/usr/share/tributary/soundfonts"
+v test -d "$SF_DIR"
+compgen -G "$SF_DIR/*.sf2" >/dev/null \
+    || fail "verify: no soundfonts in the image — run scripts/fetch-soundfonts.sh first"
+for sf in "$SF_DIR"/*.sf2; do
+    # RIFF....sfbk is what rustysynth requires; a truncated or
+    # HTML-error-page download would sail past a size check.
+    [ "$(head -c 4 "$sf")" = RIFF ] && [ "$(dd if="$sf" bs=1 skip=8 count=4 2>/dev/null)" = sfbk ] \
+        || fail "verify: $(basename "$sf") is not a SoundFont"
+    [ "$(stat -c '%u:%g:%a' "$sf")" = 0:0:644 ] \
+        || fail "verify: $(basename "$sf") must be root-owned and read-only to the service user"
+done
+# PCIe under a [pi5] filter, not at top level: a bare dtparam here would
+# apply to the Pi 4 too, and the filter must be closed so nothing appended
+# later silently inherits it.
+v grep -q '^\[pi5\]$' "$ROOT/boot/firmware/config.txt"
+v grep -q '^dtparam=pciex1$' "$ROOT/boot/firmware/config.txt"
+[ "$(sed -n '/^\[pi5\]$/,$p' "$ROOT/boot/firmware/config.txt" | grep -c '^\[all\]$')" -ge 1 ] \
+    || fail "verify: [pi5] filter is never closed — later config.txt lines would be Pi 5 only"
 # pi must stay locked (no accidental credentials) at UID 1000 (the rename
 # target Imager customization depends on).
 v grep -q '^pi:x:1000:1000:' "$ROOT/etc/passwd"

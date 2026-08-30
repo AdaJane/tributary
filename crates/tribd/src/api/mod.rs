@@ -71,7 +71,25 @@ pub struct AppState {
     /// Where uploads land. Resolved once at boot, so handlers never
     /// re-derive it and cannot disagree about it.
     pub soundfont_dir: String,
+    /// The read-only shipped library. Resolved once at boot beside
+    /// `soundfont_dir`, so handlers never re-derive either and cannot
+    /// disagree about where sounds live.
+    pub builtin_soundfont_dir: String,
     pub max_soundfont_bytes: u64,
+}
+
+impl AppState {
+    /// The soundfont search path, from the two roots resolved at boot.
+    ///
+    /// Rebuilt per call rather than stored: it is two `PathBuf`s, and a
+    /// third copy of the same strings in `AppState` is one more thing that
+    /// could drift from them.
+    pub fn library(&self) -> crate::soundfonts::Library {
+        crate::soundfonts::Library {
+            builtin: std::path::PathBuf::from(&self.builtin_soundfont_dir),
+            user: std::path::PathBuf::from(&self.soundfont_dir),
+        }
+    }
 }
 
 /// Errors surfaced by REST handlers.
@@ -197,6 +215,7 @@ fn api_router() -> OpenApiRouter<AppState> {
             soundfonts::upload_soundfont,
             soundfonts::delete_soundfont
         ))
+        .routes(routes!(soundfonts::list_presets))
         .routes(routes!(
             recording::get_recording,
             recording::update_recording

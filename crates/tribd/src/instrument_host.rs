@@ -187,7 +187,7 @@ pub type RackReady = Box<dyn Fn(Box<InstrumentRack>) + Send>;
 
 pub fn spawn(
     rx: Receiver<InstrumentMsg>,
-    root: PathBuf,
+    library: crate::soundfonts::Library,
     sample_rate: u32,
     midi_tx: Producer<MidiEvent>,
     out: Arc<crate::midi_out::OutPorts>,
@@ -196,7 +196,7 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("trib-instruments".into())
         .spawn(move || {
-            Host::new(root, sample_rate, midi_tx, out, rack_ready).run(rx);
+            Host::new(library, sample_rate, midi_tx, out, rack_ready).run(rx);
         })
         .expect("instrument host thread spawns");
 }
@@ -212,7 +212,7 @@ struct Built {
 }
 
 struct Host {
-    root: PathBuf,
+    library: crate::soundfonts::Library,
     sample_rate: u32,
     mounts: Vec<(PathBuf, String)>,
     /// Loaded soundfonts by library id.
@@ -245,7 +245,7 @@ struct EchoState {
 
 impl Host {
     fn new(
-        root: PathBuf,
+        library: crate::soundfonts::Library,
         sample_rate: u32,
         midi_tx: Producer<MidiEvent>,
         out: Arc<crate::midi_out::OutPorts>,
@@ -274,7 +274,7 @@ impl Host {
             })
         };
         Host {
-            root,
+            library,
             sample_rate,
             mounts: Vec::new(),
             cache: HashMap::new(),
@@ -323,7 +323,7 @@ impl Host {
                     let _ = reply.send(self.report());
                 }
                 InstrumentMsg::Library { reply } => {
-                    let _ = reply.send(soundfonts::list(&self.root, &self.mounts));
+                    let _ = reply.send(self.library.list(&self.mounts));
                 }
                 InstrumentMsg::TestNote { id, reply } => {
                     let exists = self.built.iter().any(|b| b.state.id.0 == id);
@@ -495,7 +495,9 @@ impl Host {
         if let Some(hit) = self.cache.get(id) {
             return Ok(Arc::clone(hit));
         }
-        let path = soundfonts::resolve(&self.root, &self.mounts, id)
+        let path = self
+            .library
+            .resolve(&self.mounts, id)
             .ok_or_else(|| format!("“{id}” is not in the soundfont library"))?;
         let mut file =
             std::fs::File::open(&path).map_err(|e| format!("“{id}” could not be opened: {e}"))?;
@@ -552,10 +554,19 @@ mod tests {
     use super::*;
     use trib_core::InstrumentId;
 
+    /// A host whose user library is `root` and which ships no built-ins.
+    /// `builtin_host` covers the other arrangement.
     fn host(root: PathBuf) -> (Host, rtrb::Consumer<MidiEvent>) {
+        library_host(crate::soundfonts::Library {
+            builtin: PathBuf::from("/nonexistent-builtin-library"),
+            user: root,
+        })
+    }
+
+    fn library_host(library: crate::soundfonts::Library) -> (Host, rtrb::Consumer<MidiEvent>) {
         let (tx, rx) = rtrb::RingBuffer::new(64);
         let host = Host::new(
-            root,
+            library,
             48_000,
             tx,
             Arc::new(crate::midi_out::OutPorts::new()),
